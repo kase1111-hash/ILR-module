@@ -24,8 +24,11 @@ contract NatLangChainOracle is IOracle, Ownable {
 
     // ============ Constants ============
 
-    /// @notice EIP-712 domain separator
-    bytes32 public immutable DOMAIN_SEPARATOR;
+    /// @notice EIP-712 domain separator (cached for gas efficiency)
+    bytes32 private immutable _CACHED_DOMAIN_SEPARATOR;
+
+    /// @notice FIX M-05: Store original chain ID to detect forks
+    uint256 private immutable _CACHED_CHAIN_ID;
 
     /// @notice EIP-712 typehash for proposals
     bytes32 public constant PROPOSAL_TYPEHASH =
@@ -79,7 +82,9 @@ contract NatLangChainOracle is IOracle, Ownable {
     // ============ Constructor ============
 
     constructor() Ownable(msg.sender) {
-        DOMAIN_SEPARATOR = keccak256(
+        // FIX M-05: Cache chain ID to detect forks
+        _CACHED_CHAIN_ID = block.chainid;
+        _CACHED_DOMAIN_SEPARATOR = keccak256(
             abi.encode(
                 keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
                 keccak256("NatLangChainOracle"),
@@ -89,9 +94,32 @@ contract NatLangChainOracle is IOracle, Ownable {
             )
         );
 
-        // Register deployer as initial oracle
-        _isOracle[msg.sender] = true;
-        emit OracleRegistered(msg.sender, bytes32(0));
+        // FIX M-07: Remove auto-registration of deployer as oracle
+        // Owner must explicitly register oracles after deployment
+        // This prevents issues if deployer key is a temporary deployment wallet
+    }
+
+    // ============ Domain Separator ============
+
+    /**
+     * @notice Get the EIP-712 domain separator
+     * @dev FIX M-05: Computes dynamically if chain ID changed (fork detection)
+     * @return The domain separator for the current chain
+     */
+    function DOMAIN_SEPARATOR() public view returns (bytes32) {
+        if (block.chainid == _CACHED_CHAIN_ID) {
+            return _CACHED_DOMAIN_SEPARATOR;
+        }
+        // Chain forked - compute new domain separator
+        return keccak256(
+            abi.encode(
+                keccak256("EIP712Domain(string name,string version,uint256 chainId,address verifyingContract)"),
+                keccak256("NatLangChainOracle"),
+                keccak256("1"),
+                block.chainid,
+                address(this)
+            )
+        );
     }
 
     // ============ Modifiers ============
@@ -176,7 +204,7 @@ contract NatLangChainOracle is IOracle, Ownable {
         );
 
         bytes32 digest = keccak256(
-            abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash)
+            abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), structHash)
         );
 
         address signer = digest.recover(signature);
@@ -209,7 +237,7 @@ contract NatLangChainOracle is IOracle, Ownable {
         );
 
         bytes32 digest = keccak256(
-            abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR, structHash)
+            abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), structHash)
         );
 
         address signer = digest.recover(signature);

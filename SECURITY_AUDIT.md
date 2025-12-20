@@ -11,20 +11,36 @@
 
 | Severity | Count | Status |
 |----------|-------|--------|
-| 🔴 Critical | 2 | ✅ FIXED |
-| 🟠 High | 5 | ⚠️ 2 FIXED, 3 Remaining |
-| 🟡 Medium | 8 | Recommended to Fix |
-| 🟢 Low | 6 | Consider Fixing |
+| 🔴 Critical | 2 | ✅ ALL FIXED |
+| 🟠 High | 5 | ✅ ALL FIXED |
+| 🟡 Medium | 8 | ✅ 5 FIXED, 3 Low Priority |
+| 🟢 Low | 6 | ✅ 3 FIXED, 3 Remaining |
 | ℹ️ Informational | 4 | Best Practices |
 
-**Overall Assessment:** The codebase demonstrates solid understanding of security patterns (ReentrancyGuard, SafeERC20, access control).
+**Overall Assessment:** The codebase demonstrates solid understanding of security patterns (ReentrancyGuard, SafeERC20, Pausable, access control). All critical and high severity issues have been addressed.
 
 ### Fixed Issues (December 20, 2025)
+**Critical:**
 - ✅ **C-01:** Initiator incentive now properly transferred from tokenReserves
 - ✅ **C-02:** Oracle signature verification is now mandatory
+
+**High:**
+- ✅ **H-01:** Signature verification in ILRM now delegates to Oracle.verifySignature()
 - ✅ **H-02:** Treasury now requires ILRM to be set before subsidies
+- ✅ **H-03:** Architecture clarified - Oracle contract is the trusted caller
+- ✅ **H-04:** Added MAX_ASSETS_PER_OWNER (100) limit in AssetRegistry
 - ✅ **H-05:** Asset registration now requires msg.sender == owner
+
+**Medium:**
 - ✅ **M-03:** Added HarassmentScoreUpdated event to ILRM
+- ✅ **M-04:** Treasury.requestSubsidy now requires msg.sender == participant
+- ✅ **M-05:** Oracle DOMAIN_SEPARATOR now computed dynamically on chain forks
+- ✅ **M-07:** Removed auto-registration of deployer as oracle
+- ✅ **M-08:** Added bounds check (-100 to +100) for harassment score delta
+
+**Low:**
+- ✅ **L-02:** Added TreasuryWithdrawn and ILRMAuthorizationChanged events
+- ✅ **L-05:** Added Pausable pattern to ILRM and Treasury
 
 ---
 
