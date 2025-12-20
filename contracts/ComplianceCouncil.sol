@@ -109,6 +109,12 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
     /// @notice Whether warrant has been attested in hybrid mode
     mapping(uint256 => bool) private _isHybridAttested;
 
+    /// @notice Governance timelock address for emergency mode override
+    address public governanceTimelock;
+
+    /// @notice Emitted when governance timelock is set
+    event GovernanceTimelockSet(address indexed oldTimelock, address indexed newTimelock);
+
     // ============ Constructor ============
 
     constructor(
@@ -160,6 +166,38 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         ExecutionMode oldMode = executionMode;
 
         // STRICT_ONCHAIN requires BLS precompiles
+        if (newMode == ExecutionMode.STRICT_ONCHAIN) {
+            require(_blsPrecompilesAvailable, "BLS precompiles required for STRICT_ONCHAIN");
+        }
+
+        executionMode = newMode;
+        emit ExecutionModeChanged(oldMode, newMode, msg.sender, reason);
+    }
+
+    /**
+     * @notice Set governance timelock address
+     * @dev FIX: Enables governance override if admin key is lost
+     * @param _timelock New governance timelock address
+     */
+    function setGovernanceTimelock(address _timelock) external onlyRole(ADMIN_ROLE) {
+        require(_timelock != address(0), "Invalid timelock address");
+        emit GovernanceTimelockSet(governanceTimelock, _timelock);
+        governanceTimelock = _timelock;
+    }
+
+    /**
+     * @notice Emergency governance override for execution mode
+     * @dev FIX: Allows governance timelock to recover from DISABLED mode if admin key is lost
+     * @param newMode The new execution mode
+     * @param reason Human-readable reason for override
+     */
+    function governanceOverrideMode(ExecutionMode newMode, string calldata reason) external {
+        require(msg.sender == governanceTimelock, "Only governance timelock");
+        require(governanceTimelock != address(0), "Governance timelock not set");
+
+        ExecutionMode oldMode = executionMode;
+
+        // STRICT_ONCHAIN still requires BLS precompiles
         if (newMode == ExecutionMode.STRICT_ONCHAIN) {
             require(_blsPrecompilesAvailable, "BLS precompiles required for STRICT_ONCHAIN");
         }
