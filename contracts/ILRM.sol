@@ -479,10 +479,10 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable {
         token.safeTransfer(d.initiator, returnPerParty);
         token.safeTransfer(d.counterparty, returnPerParty);
 
-        // Handle dust (any odd wei from division)
+        // Handle dust (any odd wei from division) - burn any remainder
         uint256 dust = remainder - (returnPerParty * 2);
         if (dust > 0) {
-            treasury += dust;
+            token.safeTransfer(BURN_ADDRESS, dust);
         }
 
         // Apply fallback license
@@ -933,19 +933,8 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable {
         bool isCounterparty = msg.sender == d.counterparty;
         require(isInitiator || isCounterparty, "Not a party");
 
-        // Verify the challenge includes this dispute
-        bytes32 expectedChallenge = keccak256(
-            abi.encodePacked(
-                "accept-proposal",
-                _disputeId,
-                msg.sender,
-                block.chainid
-            )
-        );
-        // Allow flexible challenge format - verify signature proves ownership
-        // The challenge must be bound to the action
-
-        // Verify FIDO assertion
+        // Verify FIDO assertion - the challenge should be generated via generateFIDOChallenge()
+        // which binds it to the action, dispute, user, and chain
         require(
             fidoVerifier.verifyAssertion(msg.sender, _assertion, _challenge),
             "Invalid FIDO signature"
