@@ -17,6 +17,11 @@ import "./interfaces/IAssetRegistry.sol";
  * - Apply fallback licenses on dispute resolution
  */
 contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable {
+    // ============ Constants ============
+
+    /// @notice FIX H-04: Maximum assets per owner to prevent DoS in freeze/unfreeze loops
+    uint256 public constant MAX_ASSETS_PER_OWNER = 100;
+
     // ============ State Variables ============
 
     /// @notice Authorized ILRM contracts
@@ -54,6 +59,7 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable {
     error LicenseExpired(bytes32 assetId, address licensee);
     error InvalidAddress();
     error InvalidDuration();
+    error MaxAssetsExceeded(address owner, uint256 limit);
 
     // ============ Constructor ============
 
@@ -93,6 +99,10 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable {
         // Prevents attack where attacker registers fake assets under victim's address
         if (msg.sender != owner) revert NotAssetOwner(msg.sender, owner);
         if (_assets[assetId].owner != address(0)) revert AssetAlreadyExists(assetId);
+        // FIX H-04: Prevent DoS by limiting assets per owner
+        if (_ownerAssets[owner].length >= MAX_ASSETS_PER_OWNER) {
+            revert MaxAssetsExceeded(owner, MAX_ASSETS_PER_OWNER);
+        }
 
         _assets[assetId] = Asset({
             assetId: assetId,
@@ -344,6 +354,9 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable {
 
     // ============ Admin Functions ============
 
+    /// @notice FIX L-02: Event for ILRM authorization changes
+    event ILRMAuthorizationChanged(address indexed ilrm, bool authorized);
+
     /**
      * @notice Authorize an ILRM contract
      * @param ilrm ILRM contract address
@@ -351,6 +364,7 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable {
     function authorizeILRM(address ilrm) external onlyOwner {
         if (ilrm == address(0)) revert InvalidAddress();
         _authorizedILRM[ilrm] = true;
+        emit ILRMAuthorizationChanged(ilrm, true);
     }
 
     /**
@@ -359,5 +373,6 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable {
      */
     function revokeILRM(address ilrm) external onlyOwner {
         _authorizedILRM[ilrm] = false;
+        emit ILRMAuthorizationChanged(ilrm, false);
     }
 }

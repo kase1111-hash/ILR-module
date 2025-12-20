@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "./interfaces/IILRM.sol";
 
@@ -17,8 +18,9 @@ import "./interfaces/IILRM.sol";
  * - Subsidizes defensive stakes for low-resource counterparties
  * - Anti-Sybil protections (single subsidy per dispute, rolling caps, reputation)
  * - Fully algorithmic - no discretionary human control
+ * - FIX L-05: Pausable for emergency stops
  */
-contract NatLangChainTreasury is ReentrancyGuard, Ownable {
+contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
     using SafeERC20 for IERC20;
 
     // ============ State Variables ============
@@ -188,7 +190,13 @@ contract NatLangChainTreasury is ReentrancyGuard, Ownable {
         uint256 disputeId,
         uint256 stakeNeeded,
         address participant
-    ) external nonReentrant returns (uint256 subsidyAmount) {
+    ) external nonReentrant whenNotPaused returns (uint256 subsidyAmount) {
+        // FIX M-04: Only the participant themselves can request their subsidy
+        // Prevents front-running and ensures intended recipient gets subsidy
+        if (msg.sender != participant) {
+            revert NotCounterparty(msg.sender, participant);
+        }
+
         // Validate request
         if (disputeSubsidized[disputeId]) {
             revert DisputeAlreadySubsidized(disputeId);
@@ -325,6 +333,10 @@ contract NatLangChainTreasury is ReentrancyGuard, Ownable {
         address participant,
         int256 scoreDelta
     ) external onlyILRM {
+        // FIX M-08: Prevent overflow when negating type(int256).min
+        // Reasonable bound: delta should be between -100 and +100
+        require(scoreDelta >= -100 && scoreDelta <= 100, "Delta out of bounds");
+
         uint256 oldScore = harassmentScore[participant];
         uint256 newScore;
 
@@ -453,5 +465,21 @@ contract NatLangChainTreasury is ReentrancyGuard, Ownable {
      */
     function isEligible(address participant) external view returns (bool) {
         return harassmentScore[participant] < HARASSMENT_THRESHOLD;
+    }
+
+    /**
+     * @notice FIX L-05: Pause contract in case of emergency
+     * @dev Only owner can pause
+     */
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    /**
+     * @notice FIX L-05: Unpause contract
+     * @dev Only owner can unpause
+     */
+    function unpause() external onlyOwner {
+        _unpause();
     }
 }

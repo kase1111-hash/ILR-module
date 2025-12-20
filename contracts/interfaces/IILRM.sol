@@ -108,6 +108,12 @@ interface IILRM {
         uint256 newScore
     );
 
+    /// @notice Emitted when treasury is withdrawn (L-02)
+    event TreasuryWithdrawn(
+        address indexed recipient,
+        uint256 amount
+    );
+
     // ============ Core Functions ============
 
     /**

@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
+import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "./interfaces/IILRM.sol";
 import "./interfaces/IOracle.sol";
@@ -19,8 +20,9 @@ import "./interfaces/IAssetRegistry.sol";
  * - Anti-harassment: Exponential counters, cooldowns, escalating stakes
  * - Spec-compliant: Follows Protocol-Safety-Invariants.md
  * - Analytics-ready: Events for every state transition
+ * - FIX L-05: Pausable for emergency stops
  */
-contract ILRM is IILRM, ReentrancyGuard, Ownable {
+contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable {
     using SafeERC20 for IERC20;
 
     // ============ Constants (from Appendix A) ============
@@ -114,7 +116,7 @@ contract ILRM is IILRM, ReentrancyGuard, Ownable {
         uint256 _stakeAmount,
         bytes32 _evidenceHash,
         FallbackLicense calldata _fallback
-    ) external override nonReentrant returns (uint256 disputeId) {
+    ) external override nonReentrant whenNotPaused returns (uint256 disputeId) {
         require(_counterparty != address(0), "Invalid counterparty");
         require(_counterparty != msg.sender, "Cannot dispute self");
         require(_stakeAmount > 0, "Zero stake");
@@ -177,7 +179,7 @@ contract ILRM is IILRM, ReentrancyGuard, Ownable {
      * @inheritdoc IILRM
      * @dev Implements Invariant 8 (Economic Symmetry by Default) - matched stakes
      */
-    function depositStake(uint256 _disputeId) external override nonReentrant {
+    function depositStake(uint256 _disputeId) external override nonReentrant whenNotPaused {
         Dispute storage d = _disputes[_disputeId];
         require(msg.sender == d.counterparty, "Not counterparty");
         require(d.counterpartyStake == 0, "Already staked");
@@ -194,6 +196,7 @@ contract ILRM is IILRM, ReentrancyGuard, Ownable {
     /**
      * @inheritdoc IILRM
      * @dev Only trusted oracle can submit proposals
+     * @dev FIX H-01: Signature verification is now enforced via Oracle contract
      */
     function submitLLMProposal(
         uint256 _disputeId,
@@ -207,9 +210,13 @@ contract ILRM is IILRM, ReentrancyGuard, Ownable {
         require(!d.resolved, "Dispute resolved");
         require(bytes(_proposal).length > 0, "Empty proposal");
 
-        // TODO: Verify EIP-712 signature on evidenceHash + proposal
-        // require(_verifySignature(_disputeId, keccak256(bytes(_proposal)), _signature), "Invalid signature");
-        (_signature); // Silence unused parameter warning for now
+        // FIX H-01: Verify EIP-712 signature via Oracle contract
+        // Defense in depth - Oracle already verifies, but we double-check
+        bytes32 proposalHash = keccak256(bytes(_proposal));
+        require(
+            IOracle(oracle).verifySignature(_disputeId, proposalHash, _signature),
+            "Invalid signature"
+        );
 
         d.llmProposal = _proposal;
 
@@ -248,7 +255,7 @@ contract ILRM is IILRM, ReentrancyGuard, Ownable {
     function counterPropose(
         uint256 _disputeId,
         bytes32 _newEvidenceHash
-    ) external payable override nonReentrant {
+    ) external payable override nonReentrant whenNotPaused {
         Dispute storage d = _disputes[_disputeId];
         require(msg.sender == d.initiator || msg.sender == d.counterparty, "Not a party");
         require(!d.resolved, "Dispute resolved");
@@ -495,6 +502,24 @@ contract ILRM is IILRM, ReentrancyGuard, Ownable {
         // Note: Treasury tracks ETH from counter fees, not tokens
         (bool success, ) = _to.call{value: _amount}("");
         require(success, "Transfer failed");
+        // FIX L-02: Emit event for admin action
+        emit TreasuryWithdrawn(_to, _amount);
+    }
+
+    /**
+     * @notice FIX L-05: Pause contract in case of emergency
+     * @dev Only owner can pause
+     */
+    function pause() external onlyOwner {
+        _pause();
+    }
+
+    /**
+     * @notice FIX L-05: Unpause contract
+     * @dev Only owner can unpause
+     */
+    function unpause() external onlyOwner {
+        _unpause();
     }
 
     /// @notice Accept ETH for treasury (from external sources)
