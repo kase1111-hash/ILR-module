@@ -384,8 +384,8 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     }
 
     /// @inheritdoc IGovernanceTimelock
-    function isOperationReady(bytes32 id) external view override returns (bool) {
-        return isOperationReady(id);
+    function isOperationReady(bytes32 id) public view override(TimelockController, IGovernanceTimelock) returns (bool) {
+        return TimelockController.isOperationReady(id);
     }
 
     /// @inheritdoc IGovernanceTimelock
