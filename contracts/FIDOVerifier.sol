@@ -437,29 +437,107 @@ contract FIDOVerifier is IFIDOVerifier, Ownable, ReentrancyGuard {
 
     /**
      * @dev Verify challenge is in clientDataJSON
+     * @notice FIX HIGH: Properly validate challenge field in JSON structure
+     *         The challenge must appear in the correct JSON field, not just anywhere in the data
+     *         WebAuthn clientDataJSON format: {"type":"webauthn.get","challenge":"<base64url>","origin":"..."}
      */
     function _verifyClientDataChallenge(
         bytes calldata clientDataJSON,
         bytes32 expectedChallenge
     ) internal pure returns (bool) {
-        // clientDataJSON contains base64url-encoded challenge
-        // Simple check: hash the JSON and verify it contains our challenge
-        // In production, should parse JSON properly
-        bytes memory challengeHex = _bytes32ToHex(expectedChallenge);
+        // Look for "challenge":" pattern to find the challenge field
+        bytes memory challengeFieldPattern = '"challenge":"';
 
-        // Search for challenge in clientDataJSON (simplified)
-        for (uint256 i = 0; i + challengeHex.length <= clientDataJSON.length; i++) {
+        // Find the challenge field start
+        int256 fieldStart = _findPattern(clientDataJSON, challengeFieldPattern);
+        if (fieldStart < 0) return false;
+
+        uint256 valueStart = uint256(fieldStart) + challengeFieldPattern.length;
+
+        // Find the end of the challenge value (next quote)
+        uint256 valueEnd = valueStart;
+        while (valueEnd < clientDataJSON.length && clientDataJSON[valueEnd] != '"') {
+            valueEnd++;
+        }
+        if (valueEnd >= clientDataJSON.length) return false;
+
+        // Extract challenge value
+        bytes memory challengeValue = clientDataJSON[valueStart:valueEnd];
+
+        // Convert expected challenge to base64url (WebAuthn uses base64url encoding)
+        bytes memory expectedBase64url = _bytes32ToBase64url(expectedChallenge);
+
+        // Compare lengths first
+        if (challengeValue.length != expectedBase64url.length) return false;
+
+        // Compare content
+        for (uint256 i = 0; i < challengeValue.length; i++) {
+            if (challengeValue[i] != expectedBase64url[i]) {
+                return false;
+            }
+        }
+
+        // Also verify "type":"webauthn.get" is present (prevents type confusion attacks)
+        bytes memory typePattern = '"type":"webauthn.get"';
+        if (_findPattern(clientDataJSON, typePattern) < 0) {
+            // Try webauthn.create for registration assertions
+            bytes memory createPattern = '"type":"webauthn.create"';
+            if (_findPattern(clientDataJSON, createPattern) < 0) {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
+    /**
+     * @dev Find pattern in data, returns -1 if not found
+     */
+    function _findPattern(
+        bytes calldata data,
+        bytes memory pattern
+    ) internal pure returns (int256) {
+        if (pattern.length > data.length) return -1;
+
+        for (uint256 i = 0; i <= data.length - pattern.length; i++) {
             bool found = true;
-            for (uint256 j = 0; j < challengeHex.length; j++) {
-                if (clientDataJSON[i + j] != challengeHex[j]) {
+            for (uint256 j = 0; j < pattern.length; j++) {
+                if (data[i + j] != pattern[j]) {
                     found = false;
                     break;
                 }
             }
-            if (found) return true;
+            if (found) return int256(i);
+        }
+        return -1;
+    }
+
+    /**
+     * @dev Convert bytes32 to base64url encoding (WebAuthn format)
+     */
+    function _bytes32ToBase64url(bytes32 data) internal pure returns (bytes memory) {
+        bytes memory base64Chars = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-_";
+        bytes memory result = new bytes(43); // 32 bytes = 43 base64url chars (no padding)
+
+        uint256 value;
+        uint256 resultIndex = 0;
+
+        // Process 3 bytes at a time -> 4 base64 chars
+        for (uint256 i = 0; i < 30; i += 3) {
+            value = (uint8(data[i]) << 16) | (uint8(data[i + 1]) << 8) | uint8(data[i + 2]);
+            result[resultIndex++] = base64Chars[(value >> 18) & 0x3F];
+            result[resultIndex++] = base64Chars[(value >> 12) & 0x3F];
+            result[resultIndex++] = base64Chars[(value >> 6) & 0x3F];
+            result[resultIndex++] = base64Chars[value & 0x3F];
         }
 
-        return false;
+        // Handle last 2 bytes (30, 31) -> 3 base64 chars
+        value = (uint8(data[30]) << 16) | (uint8(data[31]) << 8);
+        result[resultIndex++] = base64Chars[(value >> 18) & 0x3F];
+        result[resultIndex++] = base64Chars[(value >> 12) & 0x3F];
+        result[resultIndex++] = base64Chars[(value >> 6) & 0x3F];
+
+        return result;
     }
 
     /**

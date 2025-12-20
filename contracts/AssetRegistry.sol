@@ -132,6 +132,10 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable {
         Asset storage asset = _assets[assetId];
         if (msg.sender != asset.owner) revert NotAssetOwner(msg.sender, asset.owner);
         if (newOwner == address(0)) revert InvalidAddress();
+        // FIX HIGH: Prevent MAX_ASSETS_PER_OWNER bypass via transfers
+        if (_ownerAssets[newOwner].length >= MAX_ASSETS_PER_OWNER) {
+            revert MaxAssetsExceeded(newOwner, MAX_ASSETS_PER_OWNER);
+        }
 
         address oldOwner = asset.owner;
 

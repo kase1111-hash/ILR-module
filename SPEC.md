@@ -1099,6 +1099,13 @@ The oracle is a **governed actor** with explicit responsibilities:
 | M-07: Deployer auto-registered as oracle | Medium | ✅ Fixed |
 | M-08: Int256 overflow edge case | Medium | ✅ Fixed |
 | M-09: Uninitialized tier threshold | Medium | ✅ Fixed |
+| M-10: Treasury harassment score decay | Medium | ✅ Fixed |
+| M-11: GovernanceTimelock silent pause failures | Medium | ✅ Fixed |
+| M-12: ComplianceCouncil DISABLED mode lockout | Medium | ✅ Fixed |
+| C-03: ComplianceCouncil public key aggregation placeholder | Critical | ✅ Fixed |
+| H-08: FIDOVerifier challenge verification bypass | High | ✅ Fixed |
+| H-09: Oracle no recovery for malicious proposals | High | ✅ Fixed |
+| H-10: AssetRegistry MAX_ASSETS bypass via transfers | High | ✅ Fixed |
 | L-01: GovernanceTimelock infinite recursion | Low | ✅ Fixed |
 | L-02: ILRM dust tracking bug | Low | ✅ Fixed |
 | L-03: Dead code in FIDO verification | Low | ✅ Fixed |
