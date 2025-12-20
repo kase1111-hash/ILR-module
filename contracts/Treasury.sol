@@ -61,6 +61,15 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
     /// @notice Harassment score per participant (0-100)
     mapping(address => uint256) public harassmentScore;
 
+    /// @notice Last harassment score update timestamp per participant
+    mapping(address => uint256) public harassmentScoreLastUpdated;
+
+    /// @notice Harassment score decay rate (points per period)
+    uint256 public harassmentDecayRate;
+
+    /// @notice Harassment score decay period (default: 30 days)
+    uint256 public harassmentDecayPeriod;
+
     /// @notice Total subsidies distributed
     uint256 public totalSubsidiesDistributed;
 
@@ -184,6 +193,10 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
         maxPerParticipant = _maxPerParticipant;
         windowDuration = _windowDuration;
         minReserve = 0; // Can be set later
+
+        // Initialize harassment score decay (1 point per 30 days by default)
+        harassmentDecayRate = 1;
+        harassmentDecayPeriod = 30 days;
     }
 
     // ============ Modifiers ============
@@ -287,9 +300,10 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
             revert NotCounterparty(participant, counterparty);
         }
 
-        // Check harassment score
-        if (harassmentScore[participant] >= HARASSMENT_THRESHOLD) {
-            revert ParticipantFlaggedForAbuse(participant, harassmentScore[participant]);
+        // Check harassment score (with time-based decay applied)
+        uint256 effectiveScore = getEffectiveHarassmentScore(participant);
+        if (effectiveScore >= HARASSMENT_THRESHOLD) {
+            revert ParticipantFlaggedForAbuse(participant, effectiveScore);
         }
 
         // Reset rolling window if expired
@@ -428,6 +442,7 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
         }
 
         harassmentScore[participant] = newScore;
+        harassmentScoreLastUpdated[participant] = block.timestamp;
 
         emit HarassmentScoreUpdated(participant, oldScore, newScore);
     }
@@ -447,9 +462,59 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
             uint256 oldScore = harassmentScore[participants[i]];
             uint256 newScore = scores[i] > 100 ? 100 : scores[i];
             harassmentScore[participants[i]] = newScore;
+            harassmentScoreLastUpdated[participants[i]] = block.timestamp;
             emit HarassmentScoreUpdated(participants[i], oldScore, newScore);
         }
     }
+
+    /**
+     * @notice Get effective harassment score with time-based decay applied
+     * @dev FIX: Scores decay over time so participants can rehabilitate
+     * @param participant Address to check
+     * @return effectiveScore The harassment score after decay is applied
+     */
+    function getEffectiveHarassmentScore(address participant) public view returns (uint256 effectiveScore) {
+        uint256 rawScore = harassmentScore[participant];
+        if (rawScore == 0) return 0;
+
+        uint256 lastUpdate = harassmentScoreLastUpdated[participant];
+        if (lastUpdate == 0 || harassmentDecayPeriod == 0) {
+            return rawScore;
+        }
+
+        // Calculate decay based on time elapsed
+        uint256 elapsed = block.timestamp - lastUpdate;
+        uint256 periodsElapsed = elapsed / harassmentDecayPeriod;
+        uint256 decayAmount = periodsElapsed * harassmentDecayRate;
+
+        // Apply decay (cannot go below 0)
+        if (decayAmount >= rawScore) {
+            return 0;
+        }
+        return rawScore - decayAmount;
+    }
+
+    /**
+     * @notice Configure harassment score decay parameters
+     * @dev FIX: Allows tuning how fast scores decay over time
+     * @param _decayRate Points to decay per period
+     * @param _decayPeriod Duration of each decay period in seconds
+     */
+    function setHarassmentDecayConfig(
+        uint256 _decayRate,
+        uint256 _decayPeriod
+    ) external onlyOwner {
+        require(_decayPeriod >= 1 days, "Decay period too short");
+        require(_decayRate <= 10, "Decay rate too high");
+
+        harassmentDecayRate = _decayRate;
+        harassmentDecayPeriod = _decayPeriod;
+
+        emit HarassmentDecayConfigUpdated(_decayRate, _decayPeriod);
+    }
+
+    /// @notice Emitted when harassment decay config is updated
+    event HarassmentDecayConfigUpdated(uint256 decayRate, uint256 decayPeriod);
 
     // ============ Admin Functions ============
 
@@ -647,7 +712,8 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
             return (BPS_DENOMINATOR, 0); // 100% if tiered subsidies disabled
         }
 
-        uint256 score = harassmentScore[participant];
+        // Use effective score with decay applied
+        uint256 score = getEffectiveHarassmentScore(participant);
 
         // Tier 0: score < tier1Threshold → 100% subsidy
         if (score < tier1Threshold) {

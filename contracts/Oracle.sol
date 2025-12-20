@@ -306,6 +306,45 @@ contract NatLangChainOracle is IOracle, Ownable {
         oraclePublicKeyHash[oracle] = bytes32(0);
     }
 
+    // ============ Recovery Functions ============
+
+    /// @notice Emitted when a proposal is reset for re-submission
+    event ProposalReset(uint256 indexed disputeId, bytes32 oldProposalHash, string reason);
+
+    /**
+     * @notice Reset a processed proposal to allow re-submission
+     * @dev FIX HIGH: Provides recovery mechanism for malicious/incorrect proposals
+     *      Only owner can reset, and it emits an audit event
+     * @param disputeId The dispute ID to reset
+     * @param reason Human-readable reason for the reset
+     */
+    function resetProposal(uint256 disputeId, string calldata reason) external onlyOwner {
+        bytes32 oldHash = processedProposals[disputeId];
+        require(oldHash != bytes32(0), "No proposal to reset");
+
+        // Clear the processed proposal
+        processedProposals[disputeId] = bytes32(0);
+
+        // Re-enable the pending request so a new proposal can be submitted
+        pendingRequests[disputeId] = true;
+
+        // Increment nonce to invalidate any old signatures
+        proposalNonces[disputeId]++;
+
+        emit ProposalReset(disputeId, oldHash, reason);
+    }
+
+    /**
+     * @notice Emergency cancel a pending request
+     * @dev Prevents disputes from being stuck if oracle is unavailable
+     * @param disputeId The dispute ID to cancel
+     */
+    function cancelPendingRequest(uint256 disputeId) external onlyOwner {
+        require(pendingRequests[disputeId], "No pending request");
+        pendingRequests[disputeId] = false;
+        emit ProposalRequested(disputeId, bytes32(0), 0); // Emit with zero values to indicate cancellation
+    }
+
     /**
      * @notice Update oracle's public key hash
      * @param oracle Oracle address

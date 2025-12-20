@@ -109,6 +109,12 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
     /// @notice Whether warrant has been attested in hybrid mode
     mapping(uint256 => bool) private _isHybridAttested;
 
+    /// @notice Governance timelock address for emergency mode override
+    address public governanceTimelock;
+
+    /// @notice Emitted when governance timelock is set
+    event GovernanceTimelockSet(address indexed oldTimelock, address indexed newTimelock);
+
     // ============ Constructor ============
 
     constructor(
@@ -160,6 +166,38 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         ExecutionMode oldMode = executionMode;
 
         // STRICT_ONCHAIN requires BLS precompiles
+        if (newMode == ExecutionMode.STRICT_ONCHAIN) {
+            require(_blsPrecompilesAvailable, "BLS precompiles required for STRICT_ONCHAIN");
+        }
+
+        executionMode = newMode;
+        emit ExecutionModeChanged(oldMode, newMode, msg.sender, reason);
+    }
+
+    /**
+     * @notice Set governance timelock address
+     * @dev FIX: Enables governance override if admin key is lost
+     * @param _timelock New governance timelock address
+     */
+    function setGovernanceTimelock(address _timelock) external onlyRole(ADMIN_ROLE) {
+        require(_timelock != address(0), "Invalid timelock address");
+        emit GovernanceTimelockSet(governanceTimelock, _timelock);
+        governanceTimelock = _timelock;
+    }
+
+    /**
+     * @notice Emergency governance override for execution mode
+     * @dev FIX: Allows governance timelock to recover from DISABLED mode if admin key is lost
+     * @param newMode The new execution mode
+     * @param reason Human-readable reason for override
+     */
+    function governanceOverrideMode(ExecutionMode newMode, string calldata reason) external {
+        require(msg.sender == governanceTimelock, "Only governance timelock");
+        require(governanceTimelock != address(0), "Governance timelock not set");
+
+        ExecutionMode oldMode = executionMode;
+
+        // STRICT_ONCHAIN still requires BLS precompiles
         if (newMode == ExecutionMode.STRICT_ONCHAIN) {
             require(_blsPrecompilesAvailable, "BLS precompiles required for STRICT_ONCHAIN");
         }
@@ -757,19 +795,66 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
 
     /**
      * @notice Update aggregated public key from all active members
+     * @dev FIX CRITICAL: Properly aggregate all member public keys using BLS G1 addition
+     *      aggregatedPK = sum(pk_i) for all active members
      */
     function _updateAggregatedPublicKey() internal {
-        // In production, this would aggregate all member public keys
-        // using G1 addition: aggregatedPK = sum(pk_i)
-        // For now, use first active member's key as placeholder
+        // Reset aggregated key
+        _aggregatedPublicKey = BLSPublicKey({x: bytes32(0), y: bytes32(0)});
+
+        bool firstKey = true;
 
         for (uint256 i = 0; i < _memberAddresses.length; i++) {
             if (_members[_memberAddresses[i]].isActive) {
-                _aggregatedPublicKey = _members[_memberAddresses[i]].publicKey;
-                break;
+                BLSPublicKey memory memberKey = _members[_memberAddresses[i]].publicKey;
+
+                if (firstKey) {
+                    // First key becomes the base
+                    _aggregatedPublicKey = memberKey;
+                    firstKey = false;
+                } else if (_blsPrecompilesAvailable) {
+                    // Use G1 addition precompile to aggregate keys
+                    // Input format: pk1.x (32 bytes) || pk1.y (32 bytes) || pk2.x (32 bytes) || pk2.y (32 bytes)
+                    (bool success, bytes memory result) = BLS_G1_ADD.staticcall(
+                        abi.encodePacked(
+                            _aggregatedPublicKey.x,
+                            _aggregatedPublicKey.y,
+                            memberKey.x,
+                            memberKey.y
+                        )
+                    );
+
+                    if (success && result.length == 64) {
+                        // Parse result: x (32 bytes) || y (32 bytes)
+                        bytes32 newX;
+                        bytes32 newY;
+                        assembly {
+                            newX := mload(add(result, 32))
+                            newY := mload(add(result, 64))
+                        }
+                        _aggregatedPublicKey.x = newX;
+                        _aggregatedPublicKey.y = newY;
+                    }
+                    // If precompile call fails, continue without aggregation
+                    // This is safe because verification will fail in STRICT_ONCHAIN mode
+                } else {
+                    // Without precompiles, store concatenated hash as placeholder
+                    // Actual verification must be done off-chain in HYBRID_ATTESTED mode
+                    _aggregatedPublicKey.x = keccak256(abi.encodePacked(
+                        _aggregatedPublicKey.x,
+                        memberKey.x
+                    ));
+                    _aggregatedPublicKey.y = keccak256(abi.encodePacked(
+                        _aggregatedPublicKey.y,
+                        memberKey.y
+                    ));
+                }
             }
         }
     }
+
+    /// @notice Event for aggregated public key updates
+    event AggregatedPublicKeyUpdated(bytes32 x, bytes32 y, uint256 memberCount);
 
     /**
      * @notice Get the message to be signed for a warrant

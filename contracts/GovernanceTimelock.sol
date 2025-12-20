@@ -6,6 +6,11 @@ import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "./interfaces/IGovernanceTimelock.sol";
 
+/// @notice Simple interface for checking pausable contracts
+interface IPausable {
+    function paused() external view returns (bool);
+}
+
 /**
  * @title GovernanceTimelock
  * @notice NatLangChain protocol governance with multi-sig and timelock
@@ -520,21 +525,61 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
         delete _pendingIndex[id];
     }
 
+    /// @notice Emitted when a contract pause operation completes
+    event ContractPauseResult(address indexed target, bool success, bool isPause);
+
     /**
      * @notice Pause a contract
+     * @dev FIX: Now emits event with success status for transparency
      */
     function _pauseContract(address target) internal {
         (bool success,) = target.call(abi.encodeWithSignature("pause()"));
-        // Don't revert if pause fails (contract might not be pausable or already paused)
-        success; // Silence unused variable warning
+        emit ContractPauseResult(target, success, true);
     }
 
     /**
      * @notice Unpause a contract
+     * @dev FIX: Now emits event with success status for transparency
      */
     function _unpauseContract(address target) internal {
         (bool success,) = target.call(abi.encodeWithSignature("unpause()"));
-        success; // Silence unused variable warning
+        emit ContractPauseResult(target, success, false);
+    }
+
+    /**
+     * @notice Get pause status of all registered contracts
+     * @dev Allows admins to verify pause state
+     * @return ilrmPaused ILRM contract paused state
+     * @return treasuryPaused Treasury contract paused state
+     * @return multiPartyPaused MultiPartyILRM contract paused state
+     * @return councilPaused ComplianceCouncil contract paused state
+     */
+    function getPauseStatus() external view returns (
+        bool ilrmPaused,
+        bool treasuryPaused,
+        bool multiPartyPaused,
+        bool councilPaused
+    ) {
+        if (_protocolContracts.ilrm != address(0)) {
+            try IPausable(_protocolContracts.ilrm).paused() returns (bool p) {
+                ilrmPaused = p;
+            } catch {}
+        }
+        if (_protocolContracts.treasury != address(0)) {
+            try IPausable(_protocolContracts.treasury).paused() returns (bool p) {
+                treasuryPaused = p;
+            } catch {}
+        }
+        if (_protocolContracts.multiPartyILRM != address(0)) {
+            try IPausable(_protocolContracts.multiPartyILRM).paused() returns (bool p) {
+                multiPartyPaused = p;
+            } catch {}
+        }
+        if (_protocolContracts.complianceCouncil != address(0)) {
+            try IPausable(_protocolContracts.complianceCouncil).paused() returns (bool p) {
+                councilPaused = p;
+            } catch {}
+        }
     }
 
     /**
