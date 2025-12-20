@@ -262,11 +262,22 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
         }
 
         // Verify participant is the counterparty (defender, not initiator)
+        // FIX: Also check dispute is not resolved and counterparty hasn't staked yet
         (
             address initiator,
             address counterparty,
-            ,,,,,,,,,,
+            ,
+            uint256 counterpartyStake,
+            ,,,,,
+            bool resolved,
+            ,,
         ) = IILRM(ilrm).disputes(disputeId);
+
+        // Dispute must be active (not resolved)
+        require(!resolved, "Dispute already resolved");
+
+        // Counterparty must not have staked yet (subsidy is to HELP them stake)
+        require(counterpartyStake == 0, "Counterparty already staked");
 
         if (participant != counterparty) {
             revert NotCounterparty(participant, counterparty);

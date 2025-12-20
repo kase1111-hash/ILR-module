@@ -454,6 +454,19 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
             "Insufficient signatures"
         );
 
+        // FIX: When BLS precompiles are available, require verified signatures
+        // This prevents malicious members from submitting fake signatures
+        if (_blsPrecompilesAvailable) {
+            uint256 verifiedCount = 0;
+            SignatureSubmission[] storage sigs = _warrantSignatures[warrantId];
+            for (uint256 i = 0; i < sigs.length; i++) {
+                if (sigs[i].verified) {
+                    verifiedCount++;
+                }
+            }
+            require(verifiedCount >= _config.threshold, "Insufficient verified signatures");
+        }
+
         // Mark as executed
         warrant.status = WarrantStatus.Executed;
 
