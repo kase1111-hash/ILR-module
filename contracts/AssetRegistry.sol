@@ -80,6 +80,8 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable {
 
     /**
      * @inheritdoc IAssetRegistry
+     * @dev FIX H-05: Only the owner can register assets for themselves
+     *      This prevents attackers from registering fake assets under victim's address
      */
     function registerAsset(
         bytes32 assetId,
@@ -87,6 +89,9 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable {
         bytes32 licenseTermsHash
     ) external override nonReentrant {
         if (owner == address(0)) revert InvalidAddress();
+        // FIX H-05: Only owner can register their own assets
+        // Prevents attack where attacker registers fake assets under victim's address
+        if (msg.sender != owner) revert NotAssetOwner(msg.sender, owner);
         if (_assets[assetId].owner != address(0)) revert AssetAlreadyExists(assetId);
 
         _assets[assetId] = Asset({

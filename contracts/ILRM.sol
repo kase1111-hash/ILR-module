@@ -75,8 +75,11 @@ contract ILRM is IILRM, ReentrancyGuard, Ownable {
     /// @notice Harassment score for repeat frivolous initiators
     mapping(address => uint256) public harassmentScore;
 
-    /// @notice Treasury balance from burns/fees (for subsidies)
+    /// @notice ETH Treasury balance from counter-fees
     uint256 public treasury;
+
+    /// @notice Token reserves for initiator incentives
+    uint256 public tokenReserves;
 
     // ============ Constructor ============
 
@@ -397,14 +400,13 @@ contract ILRM is IILRM, ReentrancyGuard, Ownable {
         // Calculate initiator incentive (10% of expected counterparty stake)
         uint256 incentive = (d.initiatorStake * INITIATOR_INCENTIVE_BPS) / 10000;
 
-        // Return initiator stake + incentive (from treasury)
-        if (treasury >= incentive) {
-            treasury -= incentive;
-            token.safeTransfer(d.initiator, d.initiatorStake);
-            // Transfer incentive separately if treasury has tokens
-            // Note: In production, treasury would hold tokens, not just track balance
+        // Return initiator stake + incentive (from token reserves)
+        // FIX C-01: Actually transfer the incentive when reserves are sufficient
+        if (tokenReserves >= incentive) {
+            tokenReserves -= incentive;
+            token.safeTransfer(d.initiator, d.initiatorStake + incentive);
         } else {
-            // If treasury insufficient, just return stake
+            // If reserves insufficient, just return stake
             token.safeTransfer(d.initiator, d.initiatorStake);
         }
 
@@ -457,13 +459,27 @@ contract ILRM is IILRM, ReentrancyGuard, Ownable {
     // ============ Admin Functions ============
 
     /**
+     * @notice Deposit tokens into reserves for initiator incentives
+     * @dev Anyone can contribute to the incentive pool
+     * @param _amount Amount of tokens to deposit
+     */
+    function depositTokenReserves(uint256 _amount) external nonReentrant {
+        require(_amount > 0, "Zero amount");
+        token.safeTransferFrom(msg.sender, address(this), _amount);
+        tokenReserves += _amount;
+        emit TokenReservesDeposited(msg.sender, _amount);
+    }
+
+    /**
      * @notice Update harassment score for a participant
      * @dev Only owner can update; used for off-chain analysis integration
      * @param _participant Address to update
      * @param _score New harassment score
      */
     function updateHarassmentScore(address _participant, uint256 _score) external onlyOwner {
+        uint256 oldScore = harassmentScore[_participant];
         harassmentScore[_participant] = _score;
+        emit HarassmentScoreUpdated(_participant, oldScore, _score);
     }
 
     /**
