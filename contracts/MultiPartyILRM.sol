@@ -571,9 +571,10 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable {
             if (stake > 0) {
                 token.safeTransfer(party, stake);
             }
-            // Unfreeze assets
-            assetRegistry.unfreezeAssets(disputeId, bytes(d.llmProposal));
         }
+
+        // FIX: Call unfreezeAssets once (not in loop) to avoid redundant calls
+        assetRegistry.unfreezeAssets(disputeId, bytes(d.llmProposal));
 
         emit MultiPartyResolved(disputeId, MultiPartyOutcome.QuorumAccepted, 0);
     }
@@ -597,9 +598,12 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable {
             if (info.hasStaked && info.stake > 0) {
                 // Return stake plus proportional share from non-participation
                 token.safeTransfer(party, info.stake);
-                assetRegistry.unfreezeAssets(disputeId, abi.encode(d.outcome));
             }
         }
+
+        // FIX: Unfreeze assets for ALL parties (including non-stakers)
+        // This prevents soft lock where non-staking parties have frozen assets
+        assetRegistry.unfreezeAssets(disputeId, abi.encode(d.outcome));
 
         // Apply fallback license
         assetRegistry.applyFallbackLicense(disputeId, d.fallback.termsHash);
@@ -631,8 +635,10 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable {
             if (_partyInfo[disputeId][party].hasStaked) {
                 token.safeTransfer(party, returnPerParty);
             }
-            assetRegistry.unfreezeAssets(disputeId, abi.encode(d.outcome));
         }
+
+        // FIX: Call unfreezeAssets once (not in loop) for all parties
+        assetRegistry.unfreezeAssets(disputeId, abi.encode(d.outcome));
 
         // Handle dust
         uint256 dust = remainder - (returnPerParty * partyCount);

@@ -1110,6 +1110,10 @@ The oracle is a **governed actor** with explicit responsibilities:
 3. **Bug Bounty Program** - Post-audit launch
 4. **Execution Mode Testing** - L2/fork/non-standard EVM coverage
 
+### Suggested Audit Response
+
+> These findings do not represent exploitable vulnerabilities, but rather trust and execution-mode considerations. The protocol explicitly documents when cryptographic enforcement (on-chain BLS, decentralized oracle quorum) is required versus when operational trust is assumed. Execution modes, capability gating, and oracle governance controls are formalized to prevent silent degradation and ensure transparency.
+
 ---
 
 ## Roadmap Alignment

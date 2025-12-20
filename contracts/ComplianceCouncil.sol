@@ -432,6 +432,39 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         emit AppealFiled(warrantId, msg.sender, reason);
     }
 
+    /**
+     * @notice Cancel a warrant that is stuck or invalid
+     * @dev FIX: Prevents soft lock of warrants in Approved/Executing/Appealed states
+     * @param warrantId The warrant to cancel
+     * @param reason Human-readable reason for cancellation
+     */
+    function cancelWarrant(
+        uint256 warrantId,
+        string calldata reason
+    ) external onlyRole(ADMIN_ROLE) {
+        WarrantRequest storage warrant = _warrants[warrantId];
+
+        require(warrant.id != 0, "Warrant not found");
+        require(
+            warrant.status != WarrantStatus.Executed &&
+            warrant.status != WarrantStatus.Rejected,
+            "Cannot cancel executed or rejected warrant"
+        );
+
+        WarrantStatus oldStatus = warrant.status;
+        warrant.status = WarrantStatus.Rejected;
+
+        emit WarrantCancelled(warrantId, oldStatus, msg.sender, reason);
+    }
+
+    /// @notice Emitted when a warrant is cancelled by admin
+    event WarrantCancelled(
+        uint256 indexed warrantId,
+        WarrantStatus oldStatus,
+        address indexed cancelledBy,
+        string reason
+    );
+
     /// @inheritdoc IComplianceCouncil
     function getWarrant(uint256 warrantId) external view override returns (WarrantRequest memory) {
         return _warrants[warrantId];
