@@ -108,6 +108,19 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 | Multi-Party Timeout | ✅ | `MultiPartyILRM.sol:420-445` | Proportional burns |
 | Configurable Quorum | ✅ | `MultiPartyILRM.sol:450-470` | Unanimous/Super/Simple/Custom |
 
+### Batch Queue Contract
+
+| Feature | Status | Location | Notes |
+|---------|--------|----------|-------|
+| Transaction Queuing | ✅ | `BatchQueue.sol:115-175` | Multiple tx types |
+| Batch Release Logic | ✅ | `BatchQueue.sol:195-275` | Time + count based |
+| Batch Execution | ✅ | `BatchQueue.sol:280-320` | On target contract |
+| Order Randomization | ✅ | `BatchQueue.sol:385-395` | Fisher-Yates shuffle |
+| Chainlink Automation | ✅ | `BatchQueue.sol:325-345` | checkUpkeep/performUpkeep |
+| Token/ETH Escrow | ✅ | `BatchQueue.sol:350-375` | During queue period |
+| Cancellation Support | ✅ | `BatchQueue.sol:180-195` | Configurable |
+| Expiration Handling | ✅ | `BatchQueue.sol:245-250` | Auto-refund |
+
 ### Treasury Contract
 
 | Feature | Status | Location | Notes |
@@ -243,10 +256,24 @@ The following features are documented in the project documentation but not yet i
 - ILRM integration for viewing key commitments
 
 #### 1.3 Batch Transaction Queue (dispute-membership-circuit.md)
-**Status:** ❌ Not Implemented
+**Status:** ✅ IMPLEMENTED
 **Source:** `dispute-membership-circuit.md:71-75`
 
 **Description:** Buffer submissions and release in batches to prevent timing-based inference attacks.
+
+**Implementation:**
+- Contract: `contracts/BatchQueue.sol`
+- Interface: `contracts/interfaces/IBatchQueue.sol`
+
+**Features Implemented:**
+- Configurable batch size (min/max) and release intervals
+- Transaction queuing for disputes, stakes, acceptances, ZK proofs
+- Chainlink Automation compatible (checkUpkeep/performUpkeep)
+- Optional order randomization within batches
+- Token and ETH escrow during queue
+- Cancellation support (configurable)
+- Commitment hashes for verification
+- Expiration handling for stale transactions
 
 #### 1.4 Dummy Transactions (dispute-membership-circuit.md)
 **Status:** ❌ Not Implemented
