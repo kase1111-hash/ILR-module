@@ -133,6 +133,22 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 | Random Interval Logic | ✅ | `DummyTransactionGenerator.sol:345-375` | VRF-compatible with fallback |
 | Period-Based Limits | ✅ | `DummyTransactionGenerator.sol:380-400` | Max txs and spend per period |
 
+### Compliance Council Contract
+
+| Feature | Status | Location | Notes |
+|---------|--------|----------|-------|
+| Council Member Management | ✅ | `ComplianceCouncil.sol:115-185` | Add/remove with BLS keys |
+| Member Role Types | ✅ | `IComplianceCouncil.sol:35-42` | 5 roles: User, DAO, Auditor, Legal, Regulator |
+| Warrant Request Submission | ✅ | `ComplianceCouncil.sol:195-235` | With document hash and jurisdiction |
+| Threshold Voting | ✅ | `ComplianceCouncil.sol:240-290` | m-of-n approval/rejection |
+| Appeal Mechanism | ✅ | `ComplianceCouncil.sol:310-325` | Before execution delay expires |
+| BLS Signature Submission | ✅ | `ComplianceCouncil.sol:335-390` | Per-member signatures |
+| Signature Aggregation | ✅ | `ComplianceCouncil.sol:395-415` | Lagrange interpolation |
+| Threshold Verification | ✅ | `ComplianceCouncil.sol:420-440` | Aggregated signature check |
+| Key Reconstruction | ✅ | `ComplianceCouncil.sol:445-475` | Execute reveal after threshold |
+| BLS12-381 Precompiles | ✅ | `ComplianceCouncil.sol:25-35` | EIP-2537 with fallback detection |
+| Pausable Operations | ✅ | `ComplianceCouncil.sol:490-500` | Emergency pause support |
+
 ### Treasury Contract
 
 | Feature | Status | Location | Notes |
@@ -308,10 +324,25 @@ The following features are documented in the project documentation but not yet i
 - Batch generation for low-activity periods
 
 #### 1.5 Threshold Decryption for Compliance (dispute-membership-circuit.md)
-**Status:** ❌ Not Implemented
+**Status:** ✅ IMPLEMENTED
 **Source:** `dispute-membership-circuit.md:83-88`
 
 **Description:** BLS/FROST threshold signatures for decentralized compliance council. Legal warrants require m-of-n signatures to reveal data.
+
+**Implementation:**
+- Contract: `contracts/ComplianceCouncil.sol`
+- Interface: `contracts/interfaces/IComplianceCouncil.sol`
+- SDK: `sdk/threshold-bls.ts`
+
+**Features Implemented:**
+- Council member management with 5 role types (User, DAO, Auditor, Legal, Regulator)
+- BLS12-381 threshold signatures with m-of-n requirement
+- Warrant request and voting system with governance
+- Signature aggregation for key reconstruction
+- Appeal window and execution delay
+- Time-limited signature collection
+- BLS precompile support (EIP-2537) with fallback
+- Full TypeScript SDK for distributed key generation and signing
 
 ### Category 2: Hardware Security (High Priority)
 
@@ -769,6 +800,85 @@ contract LicenseEntropyOracle {
 #### External Dependencies:
 - OpenZeppelin `TimelockController`
 - Gnosis Safe
+
+---
+
+### Plan 9: Threshold Decryption (Compliance Council)
+
+**Priority:** High
+**Status:** ✅ COMPLETED
+**Dependencies:** BLS12-381 libraries, AccessControl
+
+#### Implemented Files:
+
+| File | Description |
+|------|-------------|
+| `contracts/ComplianceCouncil.sol` | Full compliance council with BLS threshold signatures |
+| `contracts/interfaces/IComplianceCouncil.sol` | Interface with all types and events |
+| `sdk/threshold-bls.ts` | TypeScript SDK for distributed key generation and signing |
+
+#### Core Data Structures:
+
+| Struct | Description |
+|--------|-------------|
+| `BLSPublicKey` | G1 point coordinates (x, y) |
+| `BLSSignature` | G2 point coordinates (Fp2) |
+| `ThresholdSignature` | Aggregated sig with signer indices |
+| `CouncilMember` | Member details with BLS key and role |
+| `CouncilConfig` | Threshold, voting period, delays |
+| `WarrantRequest` | Legal request with status tracking |
+
+#### Key Functions:
+
+| Function | Description |
+|----------|-------------|
+| `addMember()` | Add council member with BLS public key |
+| `removeMember()` | Remove member (maintains threshold) |
+| `submitWarrantRequest()` | Submit legal compliance request |
+| `castVote()` | Vote approve/reject on warrant |
+| `concludeVoting()` | Finalize voting after period ends |
+| `fileAppeal()` | Appeal approved warrant |
+| `submitSignature()` | Submit partial BLS signature |
+| `aggregateSignatures()` | Combine partial signatures |
+| `executeReconstruction()` | Reconstruct key after threshold |
+
+#### Member Roles:
+
+| Role | Description |
+|------|-------------|
+| UserRepresentative | Elected by protocol users |
+| ProtocolGovernance | DAO governance multisig |
+| IndependentAuditor | Third-party auditor |
+| LegalCounsel | Legal advisor |
+| RegulatoryLiaison | Regulatory body liaison |
+
+#### Warrant Flow:
+
+| Step | Action | Status |
+|------|--------|--------|
+| 1 | Authority submits warrant request | Pending |
+| 2 | Council members vote (threshold required) | Pending → Approved/Rejected |
+| 3 | Execution delay for appeal window | Approved |
+| 4 | Council members submit BLS signatures | Executing |
+| 5 | Threshold reached, key reconstructed | Executed |
+
+#### SDK Features:
+
+| Feature | Description |
+|---------|-------------|
+| `generateKeyShares()` | FROST-style DKG with Feldman VSS |
+| `verifyShare()` | Verify share against commitments |
+| `signPartial()` | Create partial BLS signature |
+| `aggregateSignatures()` | Lagrange coefficient aggregation |
+| `verifyThresholdSignature()` | Verify aggregated signature |
+| `reconstructSecret()` | Reconstruct master secret from shares |
+| `decryptViewingKey()` | Decrypt viewing key using reconstructed secret |
+
+#### Remaining Tasks:
+- [ ] Integration tests with full council flow
+- [ ] Trusted setup for BLS verification
+- [ ] Frontend for council member operations
+- [ ] Integration with ComplianceEscrow
 
 ---
 
