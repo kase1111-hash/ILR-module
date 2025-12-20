@@ -95,6 +95,19 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 | FIDO Accept (ILRM) | ✅ | `ILRM.sol:918-977` | Hardware-backed acceptance |
 | FIDO Counter-propose (ILRM) | ✅ | `ILRM.sol:987-1030` | Hardware-backed counters |
 
+### Multi-Party ILRM Contract
+
+| Feature | Status | Location | Notes |
+|---------|--------|----------|-------|
+| Multi-Party Dispute Creation | ✅ | `MultiPartyILRM.sol:98-185` | 2-255 parties |
+| Late Join Support | ✅ | `MultiPartyILRM.sol:190-215` | Optional per dispute |
+| Per-Party Stake Tracking | ✅ | `MultiPartyILRM.sol:220-245` | Symmetric stakes |
+| Evidence Aggregation | ✅ | `MultiPartyILRM.sol:250-270` | Hash aggregation |
+| Quorum-Based Acceptance | ✅ | `MultiPartyILRM.sol:305-340` | 4 quorum types |
+| Rejection with Impossibility | ✅ | `MultiPartyILRM.sol:345-365` | Detects failed quorum |
+| Multi-Party Timeout | ✅ | `MultiPartyILRM.sol:420-445` | Proportional burns |
+| Configurable Quorum | ✅ | `MultiPartyILRM.sol:450-470` | Unanimous/Super/Simple/Custom |
+
 ### Treasury Contract
 
 | Feature | Status | Location | Notes |
@@ -308,10 +321,23 @@ contract LicenseEntropyOracle {
 ### Category 4: Multi-Party & Scaling (Medium Priority)
 
 #### 4.1 Multi-Party Reconciliation (NatLangChain-Roadmap.md)
-**Status:** ❌ Not Implemented
+**Status:** ✅ IMPLEMENTED
 **Source:** `NatLangChain-Roadmap.md:117`
 
 **Description:** Extend ILRM to handle disputes with more than 2 parties. Requires modified acceptance logic (multisig-style quorum).
+
+**Implementation:**
+- Contract: `contracts/MultiPartyILRM.sol`
+- Interface: `contracts/interfaces/IMultiPartyILRM.sol`
+
+**Features Implemented:**
+- Support for 2-255 parties per dispute
+- Configurable quorum types: Unanimous, SuperMajority (2/3), SimpleMajority (51%), Custom
+- Per-party stake tracking with symmetric stakes
+- Per-party evidence submission and aggregation
+- Late-join support (optional per dispute)
+- Proportional stake burns on timeout
+- Quorum-based acceptance with real-time tracking
 
 #### 4.2 Decentralized Identity (DID) Integration (NatLangChain-Roadmap.md)
 **Status:** ❌ Not Implemented
@@ -547,34 +573,60 @@ contract LicenseEntropyOracle {
 ### Plan 5: Multi-Party Reconciliation
 
 **Priority:** Medium
-**Estimated Complexity:** High
+**Status:** ✅ COMPLETED
 **Dependencies:** Core ILRM stable
 
-#### Implementation Steps:
+#### Implemented Files:
 
-1. **Struct Modifications**
-   - Replace `initiator/counterparty` with `address[] parties`
-   - Replace acceptance booleans with `mapping(address => bool)`
-   - Add `uint256 requiredAcceptances` field
+| File | Description |
+|------|-------------|
+| `contracts/MultiPartyILRM.sol` | Full multi-party dispute resolution contract |
+| `contracts/interfaces/IMultiPartyILRM.sol` | Interface with structs and events |
 
-2. **Stake Logic**
-   - Symmetric stakes across all parties
-   - Modified `depositStake()` to track multiple deposits
-   - Quorum-based resolution (e.g., 2/3 majority)
+#### Core Data Structures:
 
-3. **Proposal Logic**
-   - Multi-party evidence aggregation
-   - LLM prompt template for N-party disputes
-   - Per-party acceptance tracking
+| Struct | Description |
+|--------|-------------|
+| `MultiPartyDispute` | Full dispute state with dynamic party support |
+| `PartyInfo` | Per-party tracking (stake, acceptance, evidence) |
+| `DisputeConfig` | Quorum type, windows, party limits |
+| `QuorumType` | Unanimous, SuperMajority, SimpleMajority, Custom |
 
-4. **Resolution Logic**
-   - Configurable quorum (default: unanimous)
-   - Proportional stake burns on timeout
-   - Fallback license applies to all parties
+#### Key Functions:
 
-#### Files to Modify:
-- `contracts/ILRM.sol` (major refactor)
-- `contracts/interfaces/IILRM.sol`
+| Function | Description |
+|----------|-------------|
+| `createMultiPartyDispute()` | Create dispute with initial parties |
+| `joinDispute()` | Late-join support (if enabled) |
+| `depositStake()` | Per-party stake deposit |
+| `submitEvidence()` | Per-party evidence with aggregation |
+| `acceptProposal()` | Accept with quorum tracking |
+| `rejectProposal()` | Reject with impossibility detection |
+| `counterPropose()` | Counter-proposal with exponential fees |
+| `enforceTimeout()` | Timeout resolution with proportional burns |
+
+#### Quorum Logic:
+
+| Type | Calculation |
+|------|-------------|
+| Unanimous | All parties (100%) |
+| SuperMajority | 67% of parties (2/3) |
+| SimpleMajority | 51% of parties |
+| Custom | User-defined BPS (e.g., 7500 = 75%) |
+
+#### Resolution Outcomes:
+
+| Outcome | Description |
+|---------|-------------|
+| QuorumAccepted | Quorum reached, stakes returned |
+| TimeoutWithBurn | Timeout, 50% burned proportionally |
+| PartialResolution | Not all staked, fallback applied |
+| Cancelled | All parties agree to cancel |
+
+#### Remaining Tasks:
+- [ ] Integration tests with 3+ parties
+- [ ] LLM prompt template for N-party disputes
+- [ ] Frontend for multi-party dispute management
 
 ---
 
