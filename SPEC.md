@@ -37,6 +37,7 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 | 🔶 | Partially Implemented |
 | ❌ | Not Implemented |
 | 🔧 | Requires Fixes |
+| 🔮 | Future Module (separate implementation) |
 
 ---
 
@@ -385,37 +386,40 @@ The following features are documented in the project documentation but not yet i
 ### Category 3: Analytics & Prediction (Medium Priority)
 
 #### 3.1 License Entropy Oracle (Updated-Mechanics.md, NatLangChain-Roadmap.md)
-**Status:** ❌ Not Implemented
+**Status:** 🔮 Future Module
 **Source:** `Updated-Mechanics.md:119-144`, `NatLangChain-Roadmap.md:107-113`
 
 **Description:** Scores contract clauses (0-100) based on historical dispute rates, timeouts, and burns. Predicts likelihood of future disputes.
 
-**Contract Skeleton:**
-```solidity
-contract LicenseEntropyOracle {
-    mapping(bytes32 => uint256) public entropyScores;
-    function scoreClause(bytes32 clauseHash) external view returns (uint256);
-    // Fed via oracle updates from dispute analytics
-}
-```
+**Note:** This feature will be implemented as a separate analytics module that can be plugged into the ILRM protocol. The module will include:
+- On-chain scoring contract
+- Off-chain analytics pipeline
+- The Graph subgraph for dispute data indexing
+- ML-based entropy calculation
 
 #### 3.2 Clause-Pattern Clustering (NatLangChain-Roadmap.md)
-**Status:** ❌ Not Implemented
+**Status:** 🔮 Future Module
 **Source:** `NatLangChain-Roadmap.md:121`
 
 **Description:** ML-based analysis of which contract clause patterns cause disputes. Off-chain analysis with on-chain score exposure.
 
+**Note:** Part of the License Entropy Oracle module.
+
 #### 3.3 Automated Clause Hardening (NatLangChain-Roadmap.md)
-**Status:** ❌ Not Implemented
+**Status:** 🔮 Future Module
 **Source:** `NatLangChain-Roadmap.md:157`
 
 **Description:** During negotiation, automatically suggest improvements to high-entropy clauses based on historical data.
 
+**Note:** Part of the License Entropy Oracle module. Requires entropy scoring to be operational.
+
 #### 3.4 Predictive Warnings (NatLangChain-Roadmap.md)
-**Status:** ❌ Not Implemented
+**Status:** 🔮 Future Module
 **Source:** `NatLangChain-Roadmap.md:158`
 
 **Description:** Real-time warnings during contract drafting for terms predicted to cause disputes.
+
+**Note:** Part of the License Entropy Oracle module. Requires clause-pattern clustering to be operational.
 
 ### Category 4: Multi-Party & Scaling (Medium Priority)
 
@@ -683,36 +687,38 @@ contract LicenseEntropyOracle {
 ### Plan 4: License Entropy Oracle
 
 **Priority:** Medium
-**Estimated Complexity:** Medium
-**Dependencies:** Historical dispute data, Chainlink
+**Status:** 🔮 FUTURE MODULE
+**Dependencies:** Historical dispute data, Chainlink, The Graph
 
-#### Implementation Steps:
+**Note:** The License Entropy Oracle will be developed as a separate pluggable analytics module. This module is not part of the core ILRM implementation.
 
-1. **Oracle Contract**
-   - Create `contracts/LicenseEntropyOracle.sol`
-   - Implement `entropyScores` mapping (bytes32 → uint256)
-   - Add `scoreClause()` view function
-   - Owner-controlled `updateScores()` for batch updates
+#### Module Scope:
 
-2. **Data Pipeline**
-   - Index ILRM events via The Graph
-   - Aggregate clause hash → outcome data
-   - Calculate entropy score formula: `(timeouts / total) * risk_factors`
+| Component | Description |
+|-----------|-------------|
+| LicenseEntropyOracle.sol | On-chain scoring contract |
+| Subgraph | The Graph indexer for dispute events |
+| Analytics Pipeline | Off-chain ML-based scoring |
+| Integration API | Query interface for NatLangChain |
 
-3. **Integration Points**
-   - ILRM emits `ClauseUsed(bytes32 clauseHash)` on initiation
-   - Oracle updates scores periodically
-   - Optional: Chainlink Automation for score updates
+#### Features Planned:
 
-4. **NatLangChain Integration**
-   - Query oracle during contract drafting
-   - Display warnings for high-entropy (>50) clauses
-   - Suggest low-entropy alternatives
+- Clause entropy scoring (0-100)
+- Historical dispute rate analysis
+- Clause-pattern clustering (ML)
+- Automated clause hardening suggestions
+- Predictive warnings during drafting
 
-#### Files to Create:
-- `contracts/LicenseEntropyOracle.sol`
-- `subgraph/schema.graphql`
-- `scripts/calculate-entropy.ts`
+#### Integration Points (Future):
+
+When implemented, the module will integrate with ILRM via:
+- `ClauseUsed(bytes32 clauseHash)` event emission on dispute initiation
+- Oracle query interface for score lookups
+- Optional Chainlink Automation for score updates
+
+#### Timeline:
+
+To be developed after Phase 1 core stabilization is complete.
 
 ---
 
