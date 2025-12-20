@@ -137,11 +137,13 @@ contract NatLangChainOracle is IOracle, Ownable {
 
         bytes32 proposalHash = keccak256(bytes(proposal));
 
-        // Verify signature if provided
-        if (signature.length > 0) {
-            if (!verifySignature(disputeId, proposalHash, signature)) {
-                revert InvalidSignature();
-            }
+        // FIX C-02: Signature is REQUIRED, not optional
+        // Empty signature must revert - no bypass allowed
+        if (signature.length == 0) {
+            revert InvalidSignature();
+        }
+        if (!verifySignature(disputeId, proposalHash, signature)) {
+            revert InvalidSignature();
         }
 
         // Mark as processed

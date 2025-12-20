@@ -95,6 +95,19 @@ interface IILRM {
         DisputeOutcome outcome
     );
 
+    /// @notice Emitted when tokens are deposited to reserves for incentives
+    event TokenReservesDeposited(
+        address indexed depositor,
+        uint256 amount
+    );
+
+    /// @notice Emitted when harassment score is updated
+    event HarassmentScoreUpdated(
+        address indexed participant,
+        uint256 oldScore,
+        uint256 newScore
+    );
+
     // ============ Core Functions ============
 
     /**

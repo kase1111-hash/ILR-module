@@ -195,21 +195,25 @@ contract NatLangChainTreasury is ReentrancyGuard, Ownable {
         }
         if (stakeNeeded == 0) revert ZeroAmount();
 
-        // Verify participant is the counterparty (defender, not initiator)
-        if (ilrm != address(0)) {
-            (
-                address initiator,
-                address counterparty,
-                ,,,,,,,,,,
-            ) = IILRM(ilrm).disputes(disputeId);
+        // FIX H-02: ILRM MUST be set before subsidies can be requested
+        // Without ILRM validation, anyone could drain treasury with fake disputes
+        if (ilrm == address(0)) {
+            revert InvalidAddress();
+        }
 
-            if (participant != counterparty) {
-                revert NotCounterparty(participant, counterparty);
-            }
-            // Initiators cannot receive subsidies (they're the attackers)
-            if (participant == initiator) {
-                revert NotCounterparty(participant, counterparty);
-            }
+        // Verify participant is the counterparty (defender, not initiator)
+        (
+            address initiator,
+            address counterparty,
+            ,,,,,,,,,,
+        ) = IILRM(ilrm).disputes(disputeId);
+
+        if (participant != counterparty) {
+            revert NotCounterparty(participant, counterparty);
+        }
+        // Initiators cannot receive subsidies (they're the attackers)
+        if (participant == initiator) {
+            revert NotCounterparty(participant, counterparty);
         }
 
         // Check harassment score
