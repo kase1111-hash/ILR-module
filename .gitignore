@@ -1,0 +1,37 @@
+# Compiler output
+out/
+cache/
+artifacts/
+
+# Dependencies
+lib/
+node_modules/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Coverage
+lcov.info
+coverage/
+
+# Broadcast (deployment artifacts)
+broadcast/
+
+# Gas snapshots
+.gas-snapshot
+
+# Slither
+slither-report/
