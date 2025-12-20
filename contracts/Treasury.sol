@@ -81,6 +81,26 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
     /// @notice Basis points denominator
     uint256 public constant BPS_DENOMINATOR = 10000;
 
+    // ============ Tiered Subsidy Variables ============
+
+    /// @notice Whether tiered subsidies are enabled
+    bool public tieredSubsidiesEnabled;
+
+    /// @notice Tier thresholds (harassment score boundaries)
+    /// @dev Tier 0: score < tier1Threshold → 100% subsidy
+    /// @dev Tier 1: tier1Threshold <= score < tier2Threshold → tier1Multiplier
+    /// @dev Tier 2: tier2Threshold <= score < tier3Threshold → tier2Multiplier
+    /// @dev Tier 3: tier3Threshold <= score < HARASSMENT_THRESHOLD → tier3Multiplier
+    /// @dev score >= HARASSMENT_THRESHOLD → 0% (blocked)
+    uint256 public tier1Threshold;
+    uint256 public tier2Threshold;
+    uint256 public tier3Threshold;
+
+    /// @notice Tier multipliers in basis points (10000 = 100%)
+    uint256 public tier1MultiplierBps;
+    uint256 public tier2MultiplierBps;
+    uint256 public tier3MultiplierBps;
+
     // ============ Events ============
 
     /// @notice Emitted when subsidy is granted
@@ -119,6 +139,17 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
         bool enabled,
         uint256 percentageBps,
         uint256 floor
+    );
+
+    /// @notice Emitted when tiered subsidy configuration is updated
+    event TieredSubsidyConfigUpdated(
+        bool enabled,
+        uint256 tier1Threshold,
+        uint256 tier2Threshold,
+        uint256 tier3Threshold,
+        uint256 tier1MultiplierBps,
+        uint256 tier2MultiplierBps,
+        uint256 tier3MultiplierBps
     );
 
     // ============ Errors ============
@@ -282,6 +313,12 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
             subsidyAmount = availableBalance;
         }
 
+        // Apply tiered subsidy multiplier based on harassment score
+        if (tieredSubsidiesEnabled) {
+            (uint256 multiplierBps,) = getSubsidyMultiplier(participant);
+            subsidyAmount = (subsidyAmount * multiplierBps) / BPS_DENOMINATOR;
+        }
+
         if (subsidyAmount == 0) revert NoSubsidyAvailable();
 
         // Update state
@@ -341,6 +378,12 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
             : 0;
         if (subsidyAmount > availableBalance) {
             subsidyAmount = availableBalance;
+        }
+
+        // Apply tiered subsidy multiplier based on harassment score
+        if (tieredSubsidiesEnabled) {
+            (uint256 multiplierBps,) = getSubsidyMultiplier(participant);
+            subsidyAmount = (subsidyAmount * multiplierBps) / BPS_DENOMINATOR;
         }
 
         eligible = subsidyAmount > 0;
@@ -457,6 +500,52 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
     }
 
     /**
+     * @notice Configure tiered subsidies
+     * @dev When enabled, subsidy amount is multiplied by tier-based percentage
+     * @param _enabled Whether tiered subsidies are enabled
+     * @param _tier1Threshold Harassment score threshold for tier 1 (e.g., 10)
+     * @param _tier2Threshold Harassment score threshold for tier 2 (e.g., 25)
+     * @param _tier3Threshold Harassment score threshold for tier 3 (e.g., 40)
+     * @param _tier1MultiplierBps Tier 1 multiplier in basis points (e.g., 7500 = 75%)
+     * @param _tier2MultiplierBps Tier 2 multiplier in basis points (e.g., 5000 = 50%)
+     * @param _tier3MultiplierBps Tier 3 multiplier in basis points (e.g., 2500 = 25%)
+     */
+    function setTieredSubsidyConfig(
+        bool _enabled,
+        uint256 _tier1Threshold,
+        uint256 _tier2Threshold,
+        uint256 _tier3Threshold,
+        uint256 _tier1MultiplierBps,
+        uint256 _tier2MultiplierBps,
+        uint256 _tier3MultiplierBps
+    ) external onlyOwner {
+        require(_tier1Threshold < _tier2Threshold, "Tier 1 must be < Tier 2");
+        require(_tier2Threshold < _tier3Threshold, "Tier 2 must be < Tier 3");
+        require(_tier3Threshold < HARASSMENT_THRESHOLD, "Tier 3 must be < threshold");
+        require(_tier1MultiplierBps <= BPS_DENOMINATOR, "Tier 1 multiplier too high");
+        require(_tier2MultiplierBps <= _tier1MultiplierBps, "Tier 2 must be <= Tier 1");
+        require(_tier3MultiplierBps <= _tier2MultiplierBps, "Tier 3 must be <= Tier 2");
+
+        tieredSubsidiesEnabled = _enabled;
+        tier1Threshold = _tier1Threshold;
+        tier2Threshold = _tier2Threshold;
+        tier3Threshold = _tier3Threshold;
+        tier1MultiplierBps = _tier1MultiplierBps;
+        tier2MultiplierBps = _tier2MultiplierBps;
+        tier3MultiplierBps = _tier3MultiplierBps;
+
+        emit TieredSubsidyConfigUpdated(
+            _enabled,
+            _tier1Threshold,
+            _tier2Threshold,
+            _tier3Threshold,
+            _tier1MultiplierBps,
+            _tier2MultiplierBps,
+            _tier3MultiplierBps
+        );
+    }
+
+    /**
      * @notice Emergency withdraw (DAO-controlled in production)
      * @param to Recipient address
      * @param amount Amount to withdraw
@@ -528,6 +617,44 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
 
         // Return the lower of configured and dynamic cap
         effectiveCap = dynamicCap < maxPerParticipant ? dynamicCap : maxPerParticipant;
+    }
+
+    /**
+     * @notice Get subsidy multiplier for a participant based on harassment score
+     * @dev Returns multiplier in basis points (10000 = 100%)
+     * @param participant The participant to check
+     * @return multiplierBps The subsidy multiplier in basis points
+     * @return tier The tier the participant falls into (0-3)
+     */
+    function getSubsidyMultiplier(address participant) public view returns (uint256 multiplierBps, uint256 tier) {
+        if (!tieredSubsidiesEnabled) {
+            return (BPS_DENOMINATOR, 0); // 100% if tiered subsidies disabled
+        }
+
+        uint256 score = harassmentScore[participant];
+
+        // Tier 0: score < tier1Threshold → 100% subsidy
+        if (score < tier1Threshold) {
+            return (BPS_DENOMINATOR, 0);
+        }
+
+        // Tier 1: tier1Threshold <= score < tier2Threshold
+        if (score < tier2Threshold) {
+            return (tier1MultiplierBps, 1);
+        }
+
+        // Tier 2: tier2Threshold <= score < tier3Threshold
+        if (score < tier3Threshold) {
+            return (tier2MultiplierBps, 2);
+        }
+
+        // Tier 3: tier3Threshold <= score < HARASSMENT_THRESHOLD
+        if (score < HARASSMENT_THRESHOLD) {
+            return (tier3MultiplierBps, 3);
+        }
+
+        // score >= HARASSMENT_THRESHOLD → blocked (0%)
+        return (0, 4);
     }
 
     /**
