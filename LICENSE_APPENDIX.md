@@ -2,18 +2,7 @@ LICENSE_APPENDIX.md
 
 Protocol Use Covenant & Trademark Notice
 
-Last updated: 
-𝑌
-𝑌
-𝑌
-𝑌
-−
-𝑀
-𝑀
-−
-𝐷
-𝐷
-YYYY−MM−DD
+Last updated: 2025-12-20
 
 1. Purpose of This Appendix
 
