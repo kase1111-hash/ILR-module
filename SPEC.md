@@ -56,6 +56,18 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 | Stake Escalation | ✅ | `ILRM.sol:366-377` | 1.5x for repeat disputes |
 | Harassment Score Tracking | ✅ | `ILRM.sol:78, 486-490` | Manual update by owner |
 | Pausable (Emergency) | ✅ | `ILRM.sol:513-523` | Owner can pause/unpause |
+| ZK Identity Mode | ✅ | `ILRM.sol:540-716` | Optional privacy-preserving disputes |
+| ZK Breach Dispute Initiation | ✅ | `ILRM.sol:562-624` | With identity hash registration |
+| ZK Proof Acceptance | ✅ | `ILRM.sol:633-676` | Groth16 verification |
+
+### Identity Verifier Contract
+
+| Feature | Status | Location | Notes |
+|---------|--------|----------|-------|
+| Groth16 Proof Verification | ✅ | `IdentityVerifier.sol:115-140` | BN254 curve |
+| Nonce Management | ✅ | `IdentityVerifier.sol:142-180` | Replay protection |
+| Proof Replay Detection | ✅ | `IdentityVerifier.sol:175-178` | Hash-based tracking |
+| Dispute-Bound Proofs | ✅ | `IdentityVerifier.sol:126-140` | Extended signals |
 
 ### Treasury Contract
 
@@ -151,16 +163,25 @@ The following features are documented in the project documentation but not yet i
 ### Category 1: Privacy & Identity (High Priority)
 
 #### 1.1 ZK Proof of Identity (dispute-membership-circuit.md)
-**Status:** ❌ Not Implemented
+**Status:** ✅ IMPLEMENTED
 **Source:** `dispute-membership-circuit.md:1-34`
 
 **Description:** Circom circuit using Poseidon hashing to prove identity without revealing addresses. Users can prove they are a party to a dispute without exposing their wallet address on-chain.
 
-**Technical Spec:**
+**Implementation:**
+- Circuit: `circuits/prove_identity.circom`
+- Verifier: `contracts/IdentityVerifier.sol`
+- Interface: `contracts/interfaces/IIdentityVerifier.sol`
+- SDK: `sdk/identity-proof.ts`
+- ILRM Integration: `ILRM.sol:540-716`
+
+**Features Implemented:**
 - Circom 2.1.6 circuit with Poseidon(1) hash
 - Private input: `identitySecret` (user's salt + address)
 - Public input: `identityManager` (on-chain hash from Dispute struct)
-- Verifier contract auto-generated via snarkjs
+- Groth16 proof verification on-chain (~200k gas)
+- Nonce-based replay protection
+- TypeScript SDK for proof generation
 
 #### 1.2 Viewing Key Infrastructure (dispute-membership-circuit.md)
 **Status:** ❌ Not Implemented
@@ -315,40 +336,34 @@ contract LicenseEntropyOracle {
 ### Plan 1: ZK Proof of Identity
 
 **Priority:** High
-**Estimated Complexity:** High
+**Status:** ✅ COMPLETED
 **Dependencies:** Circom, snarkjs, trusted setup
 
-#### Implementation Steps:
+#### Implemented Files:
 
-1. **Circuit Development**
-   - Create `circuits/prove_identity.circom` with Poseidon hash
-   - Include circomlib as dependency
-   - Define `identitySecret` (private) and `identityManager` (public) signals
+| File | Description |
+|------|-------------|
+| `circuits/prove_identity.circom` | Circom circuit with Poseidon hash |
+| `circuits/README.md` | Setup and compilation instructions |
+| `contracts/IdentityVerifier.sol` | Groth16 verifier contract |
+| `contracts/interfaces/IIdentityVerifier.sol` | Verifier interface |
+| `sdk/identity-proof.ts` | TypeScript SDK for proof generation |
 
-2. **Trusted Setup**
-   - Use Powers of Tau ceremony (ptau file)
-   - Generate proving and verification keys
-   - Document ceremony participants
+#### ILRM Integration (ILRM.sol):
 
-3. **Verifier Contract**
-   - Auto-generate Solidity verifier via snarkjs
-   - Deploy as separate `IdentityVerifier.sol`
-   - Add `verifyIdentityProof()` function
+| Function | Lines | Description |
+|----------|-------|-------------|
+| `setIdentityVerifier()` | 547-549 | Configure verifier contract |
+| `initiateZKBreachDispute()` | 562-624 | Privacy-preserving dispute initiation |
+| `acceptProposalWithZKProof()` | 633-676 | ZK-verified acceptance |
+| `registerCounterpartyZKIdentity()` | 684-699 | Register counterparty identity |
+| `getZKIdentity()` | 704-708 | Query identity hashes |
+| `isZKModeEnabled()` | 714-716 | Check ZK mode status |
 
-4. **ILRM Integration**
-   - Add `identityHash` field to Dispute struct
-   - Create `submitIdentityProof()` function
-   - Modify acceptance functions to optionally require ZK proof
-
-5. **Off-Chain SDK**
-   - JavaScript/TypeScript library for proof generation
-   - CLI tool for testing
-   - Integration with wallet providers
-
-#### Files to Create:
-- `circuits/prove_identity.circom`
-- `contracts/IdentityVerifier.sol`
-- `sdk/identity-proof.ts`
+#### Remaining Tasks:
+- [ ] Conduct trusted setup ceremony for mainnet
+- [ ] Professional security audit of circuit
+- [ ] Gas optimization for verifier
 
 ---
 
