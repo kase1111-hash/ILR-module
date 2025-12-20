@@ -159,7 +159,7 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 | Per-Participant Rolling Caps | ✅ | `Treasury.sol:247-250` | With window reset |
 | Harassment Score Checks | ✅ | `Treasury.sol:228-230` | Threshold: 50 |
 | Anti-Sybil (Single Subsidy/Dispute) | ✅ | `Treasury.sol:200-203` | Prevents double-claiming |
-| Dynamic Caps | ❌ | - | Scale caps with treasury size |
+| Dynamic Caps | ✅ | `Treasury.sol:497-531` | Scale caps with treasury size |
 | Tiered Subsidies | ❌ | - | Based on harassment score tiers |
 | Multi-Token Support | ❌ | - | Currently single ERC20 |
 
@@ -438,10 +438,22 @@ contract LicenseEntropyOracle {
 ### Category 5: Treasury Enhancements (Low Priority)
 
 #### 5.1 Dynamic Subsidy Caps (Treasury.md)
-**Status:** ❌ Not Implemented
+**Status:** ✅ IMPLEMENTED
 **Source:** `Treasury.md:122`
 
 **Description:** Scale `maxPerParticipant` based on current treasury balance to ensure sustainability.
+
+**Implementation:**
+- Location: `contracts/Treasury.sol:497-531`
+- Configuration: `setDynamicCapConfig(enabled, percentageBps, floor)`
+- View functions: `calculateDynamicCap()`, `getEffectiveMaxPerParticipant()`
+
+**Features Implemented:**
+- Toggle dynamic caps on/off via `dynamicCapEnabled`
+- Configurable percentage of treasury balance (basis points)
+- Configurable floor value (minimum cap even when treasury is low)
+- Automatic integration with `requestSubsidy()` and `calculateSubsidy()`
+- Uses lower of configured cap and dynamic cap when enabled
 
 #### 5.2 Tiered Subsidies (Treasury.md)
 **Status:** ❌ Not Implemented
@@ -717,30 +729,45 @@ contract LicenseEntropyOracle {
 ### Plan 6: Dynamic Treasury Caps
 
 **Priority:** Low
-**Estimated Complexity:** Low
+**Status:** ✅ COMPLETED
 **Dependencies:** None
 
-#### Implementation Steps:
+#### Implemented Changes:
 
-1. **Add Dynamic Cap Calculation**
-   ```solidity
-   function dynamicMaxPerParticipant() public view returns (uint256) {
-       uint256 balance = token.balanceOf(address(this));
-       // Cap at 10% of treasury or configured max, whichever is lower
-       uint256 dynamic = balance / 10;
-       return dynamic < maxPerParticipant ? dynamic : maxPerParticipant;
-   }
-   ```
+**New State Variables:**
+| Variable | Type | Description |
+|----------|------|-------------|
+| `dynamicCapEnabled` | `bool` | Toggle for dynamic caps |
+| `dynamicCapPercentageBps` | `uint256` | Percentage of treasury (basis points) |
+| `dynamicCapFloor` | `uint256` | Minimum cap floor |
 
-2. **Modify `requestSubsidy()`**
-   - Replace `maxPerParticipant` reference with dynamic calculation
-   - Add event for dynamic cap changes
+**New Functions:**
 
-3. **Add Configuration**
-   - `uint256 public dynamicCapPercentage` (default: 10%)
-   - Owner-settable threshold
+| Function | Description |
+|----------|-------------|
+| `setDynamicCapConfig()` | Configure dynamic cap settings |
+| `calculateDynamicCap()` | Calculate current dynamic cap from treasury balance |
+| `getEffectiveMaxPerParticipant()` | Get effective cap (considers dynamic when enabled) |
 
-#### Files to Modify:
+**Modified Functions:**
+
+| Function | Change |
+|----------|--------|
+| `requestSubsidy()` | Uses `getEffectiveMaxPerParticipant()` instead of `maxPerParticipant` |
+| `calculateSubsidy()` | Uses `getEffectiveMaxPerParticipant()` for preview |
+| `getRemainingAllowance()` | Uses effective cap for accurate allowance |
+
+**Configuration Example:**
+```solidity
+// Enable dynamic caps at 10% of treasury with 1 token floor
+treasury.setDynamicCapConfig(
+    true,           // enabled
+    1000,           // 10% (1000 bps)
+    1e18            // 1 token floor
+);
+```
+
+#### Files Modified:
 - `contracts/Treasury.sol`
 
 ---

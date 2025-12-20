@@ -67,6 +67,20 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
     /// @notice Total inflows received
     uint256 public totalInflows;
 
+    // ============ Dynamic Cap Variables ============
+
+    /// @notice Whether dynamic caps are enabled
+    bool public dynamicCapEnabled;
+
+    /// @notice Dynamic cap percentage of treasury balance (in basis points, e.g., 1000 = 10%)
+    uint256 public dynamicCapPercentageBps;
+
+    /// @notice Minimum dynamic cap (floor)
+    uint256 public dynamicCapFloor;
+
+    /// @notice Basis points denominator
+    uint256 public constant BPS_DENOMINATOR = 10000;
+
     // ============ Events ============
 
     /// @notice Emitted when subsidy is granted
@@ -98,6 +112,13 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
         uint256 maxPerDispute,
         uint256 maxPerParticipant,
         uint256 windowDuration
+    );
+
+    /// @notice Emitted when dynamic cap configuration is updated
+    event DynamicCapConfigUpdated(
+        bool enabled,
+        uint256 percentageBps,
+        uint256 floor
     );
 
     // ============ Errors ============
@@ -243,8 +264,11 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
             subsidyAmount = maxPerDispute;
         }
 
-        // Cap by per-participant rolling window
-        uint256 participantAvailable = maxPerParticipant - participantSubsidyUsed[participant];
+        // Cap by per-participant rolling window (use dynamic cap if enabled)
+        uint256 effectiveMaxPerParticipant = getEffectiveMaxPerParticipant();
+        uint256 participantAvailable = effectiveMaxPerParticipant > participantSubsidyUsed[participant]
+            ? effectiveMaxPerParticipant - participantSubsidyUsed[participant]
+            : 0;
         if (subsidyAmount > participantAvailable) {
             subsidyAmount = participantAvailable;
         }
@@ -297,13 +321,14 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
             subsidyAmount = maxPerDispute;
         }
 
-        // Check rolling window
+        // Check rolling window (use dynamic cap if enabled)
         uint256 usedInWindow = participantSubsidyUsed[participant];
         if (block.timestamp > participantWindowStart[participant] + windowDuration) {
             usedInWindow = 0; // Window expired, would reset
         }
-        uint256 participantAvailable = maxPerParticipant > usedInWindow
-            ? maxPerParticipant - usedInWindow
+        uint256 effectiveMaxPerParticipant = getEffectiveMaxPerParticipant();
+        uint256 participantAvailable = effectiveMaxPerParticipant > usedInWindow
+            ? effectiveMaxPerParticipant - usedInWindow
             : 0;
         if (subsidyAmount > participantAvailable) {
             subsidyAmount = participantAvailable;
@@ -411,6 +436,27 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
     }
 
     /**
+     * @notice Configure dynamic caps
+     * @dev When enabled, maxPerParticipant scales with treasury balance
+     * @param _enabled Whether dynamic caps are enabled
+     * @param _percentageBps Percentage of treasury balance (in basis points, e.g., 1000 = 10%)
+     * @param _floor Minimum cap even when treasury is low
+     */
+    function setDynamicCapConfig(
+        bool _enabled,
+        uint256 _percentageBps,
+        uint256 _floor
+    ) external onlyOwner {
+        require(_percentageBps <= BPS_DENOMINATOR, "Percentage too high");
+
+        dynamicCapEnabled = _enabled;
+        dynamicCapPercentageBps = _percentageBps;
+        dynamicCapFloor = _floor;
+
+        emit DynamicCapConfigUpdated(_enabled, _percentageBps, _floor);
+    }
+
+    /**
      * @notice Emergency withdraw (DAO-controlled in production)
      * @param to Recipient address
      * @param amount Amount to withdraw
@@ -449,14 +495,53 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
     }
 
     /**
+     * @notice Calculate dynamic cap based on current treasury balance
+     * @dev Returns percentage of treasury balance, with floor
+     * @return dynamicCap The calculated dynamic cap
+     */
+    function calculateDynamicCap() public view returns (uint256 dynamicCap) {
+        uint256 treasuryBalance = token.balanceOf(address(this));
+        uint256 availableBalance = treasuryBalance > minReserve
+            ? treasuryBalance - minReserve
+            : 0;
+
+        // Calculate percentage of available balance
+        dynamicCap = (availableBalance * dynamicCapPercentageBps) / BPS_DENOMINATOR;
+
+        // Apply floor
+        if (dynamicCap < dynamicCapFloor) {
+            dynamicCap = dynamicCapFloor;
+        }
+    }
+
+    /**
+     * @notice Get effective max per participant (considers dynamic caps)
+     * @dev Returns the lower of configured cap and dynamic cap when enabled
+     * @return effectiveCap The effective maximum per participant
+     */
+    function getEffectiveMaxPerParticipant() public view returns (uint256 effectiveCap) {
+        if (!dynamicCapEnabled) {
+            return maxPerParticipant;
+        }
+
+        uint256 dynamicCap = calculateDynamicCap();
+
+        // Return the lower of configured and dynamic cap
+        effectiveCap = dynamicCap < maxPerParticipant ? dynamicCap : maxPerParticipant;
+    }
+
+    /**
      * @notice Get participant's remaining subsidy allowance in current window
+     * @dev Uses effective cap (considers dynamic caps when enabled)
      */
     function getRemainingAllowance(address participant) external view returns (uint256) {
+        uint256 effectiveCap = getEffectiveMaxPerParticipant();
+
         if (block.timestamp > participantWindowStart[participant] + windowDuration) {
-            return maxPerParticipant; // Window expired
+            return effectiveCap; // Window expired
         }
-        return maxPerParticipant > participantSubsidyUsed[participant]
-            ? maxPerParticipant - participantSubsidyUsed[participant]
+        return effectiveCap > participantSubsidyUsed[participant]
+            ? effectiveCap - participantSubsidyUsed[participant]
             : 0;
     }
 
