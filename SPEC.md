@@ -121,6 +121,18 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 | Cancellation Support | ✅ | `BatchQueue.sol:180-195` | Configurable |
 | Expiration Handling | ✅ | `BatchQueue.sol:245-250` | Auto-refund |
 
+### Dummy Transaction Generator
+
+| Feature | Status | Location | Notes |
+|---------|--------|----------|-------|
+| Probability-Based Generation | ✅ | `DummyTransactionGenerator.sol:95-140` | Configurable BPS threshold |
+| Multiple Dummy Tx Types | ✅ | `DummyTransactionGenerator.sol:285-340` | Voluntary, BatchQueue, ViewingKey |
+| Dummy Address Registry | ✅ | `DummyTransactionGenerator.sol:175-220` | Excluded from analytics |
+| Treasury Funding | ✅ | `DummyTransactionGenerator.sol:225-260` | Per-period spending limits |
+| Chainlink Automation | ✅ | `DummyTransactionGenerator.sol:145-165` | checkUpkeep/performUpkeep |
+| Random Interval Logic | ✅ | `DummyTransactionGenerator.sol:345-375` | VRF-compatible with fallback |
+| Period-Based Limits | ✅ | `DummyTransactionGenerator.sol:380-400` | Max txs and spend per period |
+
 ### Treasury Contract
 
 | Feature | Status | Location | Notes |
@@ -276,10 +288,24 @@ The following features are documented in the project documentation but not yet i
 - Expiration handling for stale transactions
 
 #### 1.4 Dummy Transactions (dispute-membership-circuit.md)
-**Status:** ❌ Not Implemented
+**Status:** ✅ IMPLEMENTED
 **Source:** `dispute-membership-circuit.md:76-79`
 
 **Description:** Treasury-funded automated "noop" calls at random intervals to obscure real transaction patterns.
+
+**Implementation:**
+- Contract: `contracts/DummyTransactionGenerator.sol`
+- Interface: `contracts/interfaces/IDummyTransactionGenerator.sol`
+
+**Features Implemented:**
+- Configurable probability-based generation (basis points threshold)
+- Multiple dummy tx types: VoluntaryRequest, BatchQueueEntry, ViewingKeyCommit
+- Dedicated dummy address registry (excluded from analytics)
+- Treasury-funded with per-period spending limits
+- Chainlink Automation compatible (checkUpkeep/performUpkeep)
+- VRF-compatible randomness (with pseudo-random fallback)
+- Configurable min/max intervals and per-period limits
+- Batch generation for low-activity periods
 
 #### 1.5 Threshold Decryption for Compliance (dispute-membership-circuit.md)
 **Status:** ❌ Not Implemented
