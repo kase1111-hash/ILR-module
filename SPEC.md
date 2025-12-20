@@ -37,6 +37,7 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 | 🔶 | Partially Implemented |
 | ❌ | Not Implemented |
 | 🔧 | Requires Fixes |
+| 🔮 | Future Module (separate implementation) |
 
 ---
 
@@ -162,6 +163,21 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 | Dynamic Caps | ✅ | `Treasury.sol:497-531` | Scale caps with treasury size |
 | Tiered Subsidies | ✅ | `Treasury.sol:617-646` | Based on harassment score tiers |
 | Multi-Token Support | ❌ | - | Currently single ERC20 |
+
+### Governance Timelock Contract
+
+| Feature | Status | Location | Notes |
+|---------|--------|----------|-------|
+| TimelockController Extension | ✅ | `GovernanceTimelock.sol:35-45` | Extends OpenZeppelin |
+| Multi-Sig Proposer | ✅ | `GovernanceTimelock.sol:65-75` | PROPOSER_ROLE for multi-sig |
+| Configurable Delays | ✅ | `GovernanceTimelock.sol:80-95` | min, emergency, long delays |
+| Operation Scheduling | ✅ | `GovernanceTimelock.sol:100-175` | Single and batch operations |
+| Long Delay Scheduling | ✅ | `GovernanceTimelock.sol:180-210` | For critical changes |
+| Emergency Actions | ✅ | `GovernanceTimelock.sol:220-280` | Reduced delay bypass |
+| Emergency Pause All | ✅ | `GovernanceTimelock.sol:285-330` | Pause all protocol contracts |
+| Protocol Contract Registry | ✅ | `GovernanceTimelock.sol:340-400` | Register/manage contracts |
+| Ownership Transfer Support | ✅ | `GovernanceTimelock.sol:405-420` | Ownable2Step compatible |
+| Operation Cancellation | ✅ | `GovernanceTimelock.sol:190-200` | CANCELLER_ROLE |
 
 ### Oracle Contract
 
@@ -370,37 +386,40 @@ The following features are documented in the project documentation but not yet i
 ### Category 3: Analytics & Prediction (Medium Priority)
 
 #### 3.1 License Entropy Oracle (Updated-Mechanics.md, NatLangChain-Roadmap.md)
-**Status:** ❌ Not Implemented
+**Status:** 🔮 Future Module
 **Source:** `Updated-Mechanics.md:119-144`, `NatLangChain-Roadmap.md:107-113`
 
 **Description:** Scores contract clauses (0-100) based on historical dispute rates, timeouts, and burns. Predicts likelihood of future disputes.
 
-**Contract Skeleton:**
-```solidity
-contract LicenseEntropyOracle {
-    mapping(bytes32 => uint256) public entropyScores;
-    function scoreClause(bytes32 clauseHash) external view returns (uint256);
-    // Fed via oracle updates from dispute analytics
-}
-```
+**Note:** This feature will be implemented as a separate analytics module that can be plugged into the ILRM protocol. The module will include:
+- On-chain scoring contract
+- Off-chain analytics pipeline
+- The Graph subgraph for dispute data indexing
+- ML-based entropy calculation
 
 #### 3.2 Clause-Pattern Clustering (NatLangChain-Roadmap.md)
-**Status:** ❌ Not Implemented
+**Status:** 🔮 Future Module
 **Source:** `NatLangChain-Roadmap.md:121`
 
 **Description:** ML-based analysis of which contract clause patterns cause disputes. Off-chain analysis with on-chain score exposure.
 
+**Note:** Part of the License Entropy Oracle module.
+
 #### 3.3 Automated Clause Hardening (NatLangChain-Roadmap.md)
-**Status:** ❌ Not Implemented
+**Status:** 🔮 Future Module
 **Source:** `NatLangChain-Roadmap.md:157`
 
 **Description:** During negotiation, automatically suggest improvements to high-entropy clauses based on historical data.
 
+**Note:** Part of the License Entropy Oracle module. Requires entropy scoring to be operational.
+
 #### 3.4 Predictive Warnings (NatLangChain-Roadmap.md)
-**Status:** ❌ Not Implemented
+**Status:** 🔮 Future Module
 **Source:** `NatLangChain-Roadmap.md:158`
 
 **Description:** Real-time warnings during contract drafting for terms predicted to cause disputes.
+
+**Note:** Part of the License Entropy Oracle module. Requires clause-pattern clustering to be operational.
 
 ### Category 4: Multi-Party & Scaling (Medium Priority)
 
@@ -485,16 +504,36 @@ contract LicenseEntropyOracle {
 ### Category 6: Governance & Security (Low Priority)
 
 #### 6.1 Multi-Sig/Timelock Governance (SECURITY_AUDIT.md)
-**Status:** ❌ Not Implemented
+**Status:** ✅ IMPLEMENTED
 **Source:** `SECURITY_AUDIT.md:299-315`
 
 **Description:** Replace single owner with multi-sig and add timelock for admin operations.
 
+**Implementation:**
+- Contract: `contracts/GovernanceTimelock.sol`
+- Interface: `contracts/interfaces/IGovernanceTimelock.sol`
+- Deployment: `scripts/deploy-governance.ts`
+
+**Features Implemented:**
+- Extends OpenZeppelin TimelockController
+- Multi-sig as proposer (PROPOSER_ROLE)
+- Configurable delays: minDelay, emergencyDelay, longDelay
+- Operation scheduling (single and batch)
+- Emergency bypass with reduced delay
+- Emergency pause/unpause all protocol contracts
+- Protocol contract registry
+- Ownable2Step compatible ownership transfer
+- Operation cancellation support
+
 #### 6.2 Ownable2Step Migration (SECURITY_AUDIT.md)
-**Status:** ❌ Not Implemented
+**Status:** ✅ IMPLEMENTED (via GovernanceTimelock)
 **Source:** `SECURITY_AUDIT.md:473-475`
 
 **Description:** Use OpenZeppelin's `Ownable2Step` for safer ownership transfers.
+
+**Implementation:**
+- GovernanceTimelock supports `acceptContractOwnership()` for Ownable2Step contracts
+- Two-step ownership transfer: current owner initiates, timelock accepts
 
 #### 6.3 Contract Upgradability (SECURITY_AUDIT.md)
 **Status:** ❌ Not Implemented
@@ -648,36 +687,38 @@ contract LicenseEntropyOracle {
 ### Plan 4: License Entropy Oracle
 
 **Priority:** Medium
-**Estimated Complexity:** Medium
-**Dependencies:** Historical dispute data, Chainlink
+**Status:** 🔮 FUTURE MODULE
+**Dependencies:** Historical dispute data, Chainlink, The Graph
 
-#### Implementation Steps:
+**Note:** The License Entropy Oracle will be developed as a separate pluggable analytics module. This module is not part of the core ILRM implementation.
 
-1. **Oracle Contract**
-   - Create `contracts/LicenseEntropyOracle.sol`
-   - Implement `entropyScores` mapping (bytes32 → uint256)
-   - Add `scoreClause()` view function
-   - Owner-controlled `updateScores()` for batch updates
+#### Module Scope:
 
-2. **Data Pipeline**
-   - Index ILRM events via The Graph
-   - Aggregate clause hash → outcome data
-   - Calculate entropy score formula: `(timeouts / total) * risk_factors`
+| Component | Description |
+|-----------|-------------|
+| LicenseEntropyOracle.sol | On-chain scoring contract |
+| Subgraph | The Graph indexer for dispute events |
+| Analytics Pipeline | Off-chain ML-based scoring |
+| Integration API | Query interface for NatLangChain |
 
-3. **Integration Points**
-   - ILRM emits `ClauseUsed(bytes32 clauseHash)` on initiation
-   - Oracle updates scores periodically
-   - Optional: Chainlink Automation for score updates
+#### Features Planned:
 
-4. **NatLangChain Integration**
-   - Query oracle during contract drafting
-   - Display warnings for high-entropy (>50) clauses
-   - Suggest low-entropy alternatives
+- Clause entropy scoring (0-100)
+- Historical dispute rate analysis
+- Clause-pattern clustering (ML)
+- Automated clause hardening suggestions
+- Predictive warnings during drafting
 
-#### Files to Create:
-- `contracts/LicenseEntropyOracle.sol`
-- `subgraph/schema.graphql`
-- `scripts/calculate-entropy.ts`
+#### Integration Points (Future):
+
+When implemented, the module will integrate with ILRM via:
+- `ClauseUsed(bytes32 clauseHash)` event emission on dispute initiation
+- Oracle query interface for score lookups
+- Optional Chainlink Automation for score updates
+
+#### Timeline:
+
+To be developed after Phase 1 core stabilization is complete.
 
 ---
 
@@ -845,30 +886,62 @@ treasury.setTieredSubsidyConfig(
 ### Plan 8: Governance Upgrade (Multi-Sig + Timelock)
 
 **Priority:** Low
-**Estimated Complexity:** Medium
-**Dependencies:** OpenZeppelin Governor, Timelock
+**Status:** ✅ COMPLETED
+**Dependencies:** OpenZeppelin TimelockController
 
-#### Implementation Steps:
+#### Implemented Files:
 
-1. **Deploy Governance Infrastructure**
-   - Deploy `TimelockController` (2-day delay)
-   - Deploy multi-sig (Gnosis Safe recommended)
-   - Set multi-sig as Timelock proposer
+| File | Description |
+|------|-------------|
+| `contracts/GovernanceTimelock.sol` | Timelock controller with protocol-specific features |
+| `contracts/interfaces/IGovernanceTimelock.sol` | Interface with types and events |
+| `scripts/deploy-governance.ts` | Deployment script for governance infrastructure |
 
-2. **Transfer Ownership**
-   - Transfer ILRM ownership to Timelock
-   - Transfer Treasury ownership to Timelock
-   - Transfer Oracle ownership to Timelock
-   - Transfer AssetRegistry ownership to Timelock
+#### Features:
 
-3. **Document Procedures**
-   - Governance proposal format
-   - Emergency procedures (multi-sig bypass)
-   - Key rotation procedures
+| Feature | Description |
+|---------|-------------|
+| TimelockController | Extends OpenZeppelin's TimelockController |
+| Multi-Sig Proposer | Only multi-sig can propose operations |
+| Configurable Delays | minDelay, emergencyDelay, longDelay |
+| Operation Types | ParameterChange, ContractUpgrade, OwnershipTransfer, EmergencyAction, etc. |
+| Batch Operations | Schedule and execute multiple operations atomically |
+| Emergency Bypass | Reduced delay for security emergencies |
+| Emergency Pause | Pause all protocol contracts at once |
+| Contract Registry | Register and manage protocol contracts |
+| Ownership Transfer | Ownable2Step compatible via acceptContractOwnership() |
+
+#### Delay Configuration:
+
+| Delay Type | Default | Use Case |
+|------------|---------|----------|
+| minDelay | 2 days | Standard parameter changes |
+| emergencyDelay | 12 hours | Security emergencies |
+| longDelay | 4 days | Contract upgrades, ownership transfers |
+
+#### Governance Flow:
+
+| Step | Actor | Action |
+|------|-------|--------|
+| 1 | Multi-sig | Propose operation via scheduleOperation() |
+| 2 | Community | Review during timelock delay |
+| 3 | Anyone* | Execute after delay via executeOperation() |
+| 4 | Multi-sig | Cancel if needed via cancelOperation() |
+
+*If openExecutor is enabled
+
+#### Deployment Steps:
+
+1. Deploy Gnosis Safe multi-sig
+2. Deploy GovernanceTimelock with multi-sig as proposer
+3. Register all protocol contracts
+4. Transfer ownership of each contract to timelock
+5. Timelock accepts ownership (via multi-sig proposal)
+6. Renounce deployer's admin role
 
 #### External Dependencies:
 - OpenZeppelin `TimelockController`
-- Gnosis Safe
+- Gnosis Safe (recommended for multi-sig)
 
 ---
 
