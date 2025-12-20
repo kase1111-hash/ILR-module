@@ -9,6 +9,7 @@ import "@openzeppelin/contracts/access/Ownable.sol";
 import "./interfaces/IILRM.sol";
 import "./interfaces/IOracle.sol";
 import "./interfaces/IAssetRegistry.sol";
+import "./interfaces/IIdentityVerifier.sol";
 
 /**
  * @title ILRM - IP & Licensing Reconciliation Module
@@ -82,6 +83,15 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable {
 
     /// @notice Token reserves for initiator incentives
     uint256 public tokenReserves;
+
+    /// @notice Optional ZK identity verifier (address(0) if disabled)
+    IIdentityVerifier public identityVerifier;
+
+    /// @notice ZK identity hashes for disputes: disputeId => isInitiator => identityHash
+    mapping(uint256 => mapping(bool => bytes32)) private _zkIdentities;
+
+    /// @notice Whether ZK mode is enabled for a dispute
+    mapping(uint256 => bool) private _zkModeEnabled;
 
     // ============ Constructor ============
 
@@ -525,5 +535,183 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable {
     /// @notice Accept ETH for treasury (from external sources)
     receive() external payable {
         treasury += msg.value;
+    }
+
+    // ============ ZK Identity Functions ============
+
+    /**
+     * @notice Set the identity verifier contract
+     * @dev Only owner can set; address(0) disables ZK mode
+     * @param _verifier The identity verifier contract address
+     */
+    function setIdentityVerifier(address _verifier) external onlyOwner {
+        identityVerifier = IIdentityVerifier(_verifier);
+    }
+
+    /**
+     * @notice Initiate a breach dispute with ZK identity (privacy-preserving)
+     * @dev Initiator registers their identity hash instead of address
+     * @param _counterparty The counterparty's address (or address(0) if using ZK for both)
+     * @param _initiatorIdentityHash Poseidon hash of initiator's identity secret
+     * @param _counterpartyIdentityHash Poseidon hash of counterparty's identity secret (optional)
+     * @param _stakeAmount Base stake amount
+     * @param _evidenceHash Hash of canonicalized evidence bundle
+     * @param _fallback Fallback license terms
+     * @return disputeId The unique dispute identifier
+     */
+    function initiateZKBreachDispute(
+        address _counterparty,
+        bytes32 _initiatorIdentityHash,
+        bytes32 _counterpartyIdentityHash,
+        uint256 _stakeAmount,
+        bytes32 _evidenceHash,
+        FallbackLicense calldata _fallback
+    ) external nonReentrant whenNotPaused returns (uint256 disputeId) {
+        require(address(identityVerifier) != address(0), "ZK mode not enabled");
+        require(_initiatorIdentityHash != bytes32(0), "Invalid initiator identity");
+        require(_stakeAmount > 0, "Zero stake");
+        require(_fallback.nonExclusive, "Fallback must be non-exclusive");
+
+        // Calculate escalated stake if applicable
+        uint256 escalatedStake = _counterparty != address(0)
+            ? _getEscalatedStake(msg.sender, _counterparty, _stakeAmount)
+            : _stakeAmount;
+
+        // Transfer stake from initiator
+        token.safeTransferFrom(msg.sender, address(this), escalatedStake);
+
+        disputeId = _disputeCounter++;
+
+        // Store dispute with addresses (msg.sender for stake tracking)
+        _disputes[disputeId] = Dispute({
+            initiator: msg.sender,
+            counterparty: _counterparty,
+            initiatorStake: escalatedStake,
+            counterpartyStake: 0,
+            startTime: block.timestamp,
+            evidenceHash: _evidenceHash,
+            llmProposal: "",
+            initiatorAccepted: false,
+            counterpartyAccepted: false,
+            resolved: false,
+            outcome: DisputeOutcome.Pending,
+            fallback: _fallback,
+            counterCount: 0
+        });
+
+        // Enable ZK mode and store identity hashes
+        _zkModeEnabled[disputeId] = true;
+        _zkIdentities[disputeId][true] = _initiatorIdentityHash;
+
+        if (_counterpartyIdentityHash != bytes32(0)) {
+            _zkIdentities[disputeId][false] = _counterpartyIdentityHash;
+        }
+
+        // Freeze assets via registry
+        assetRegistry.freezeAssets(disputeId, msg.sender);
+
+        // Update cooldown tracking if counterparty is known
+        if (_counterparty != address(0)) {
+            lastDisputeTime[msg.sender][_counterparty] = block.timestamp;
+        }
+
+        emit DisputeInitiated(disputeId, msg.sender, _counterparty, _evidenceHash);
+        emit ZKIdentityRegistered(disputeId, _initiatorIdentityHash, true);
+
+        if (_counterpartyIdentityHash != bytes32(0)) {
+            emit ZKIdentityRegistered(disputeId, _counterpartyIdentityHash, false);
+        }
+    }
+
+    /**
+     * @notice Accept proposal using ZK proof of identity
+     * @dev Verifies ZK proof that caller knows the identity secret
+     * @param _disputeId The dispute to accept
+     * @param _proof Groth16 proof components
+     * @param _identityHash The identity hash being proven
+     */
+    function acceptProposalWithZKProof(
+        uint256 _disputeId,
+        IIdentityVerifier.Proof calldata _proof,
+        bytes32 _identityHash
+    ) external nonReentrant {
+        require(address(identityVerifier) != address(0), "ZK mode not enabled");
+        require(_zkModeEnabled[_disputeId], "Dispute not in ZK mode");
+
+        Dispute storage d = _disputes[_disputeId];
+        require(!d.resolved, "Dispute resolved");
+        require(bytes(d.llmProposal).length > 0, "No proposal yet");
+        require(block.timestamp <= d.startTime + RESOLUTION_TIMEOUT, "Timeout passed");
+
+        // Verify the ZK proof
+        IIdentityVerifier.IdentityPublicSignals memory signals = IIdentityVerifier
+            .IdentityPublicSignals({identityManager: uint256(_identityHash)});
+
+        require(
+            identityVerifier.verifyIdentityProof(_proof, signals),
+            "Invalid ZK proof"
+        );
+
+        // Determine which party this proof is for
+        bool isInitiator = _zkIdentities[_disputeId][true] == _identityHash;
+        bool isCounterparty = _zkIdentities[_disputeId][false] == _identityHash;
+
+        require(isInitiator || isCounterparty, "Identity not registered for dispute");
+
+        if (isInitiator) {
+            require(!d.initiatorAccepted, "Already accepted");
+            d.initiatorAccepted = true;
+        } else {
+            require(!d.counterpartyAccepted, "Already accepted");
+            d.counterpartyAccepted = true;
+        }
+
+        emit ZKProofAcceptance(_disputeId, _identityHash);
+        emit AcceptanceSignaled(_disputeId, msg.sender);
+
+        // Resolve if both accepted
+        if (d.initiatorAccepted && d.counterpartyAccepted) {
+            _resolveAccepted(_disputeId, d);
+        }
+    }
+
+    /**
+     * @notice Register counterparty's ZK identity for an existing dispute
+     * @dev Only counterparty can register their identity
+     * @param _disputeId The dispute ID
+     * @param _identityHash The counterparty's identity hash
+     */
+    function registerCounterpartyZKIdentity(
+        uint256 _disputeId,
+        bytes32 _identityHash
+    ) external nonReentrant {
+        require(_zkModeEnabled[_disputeId], "Dispute not in ZK mode");
+        require(_identityHash != bytes32(0), "Invalid identity hash");
+
+        Dispute storage d = _disputes[_disputeId];
+        require(msg.sender == d.counterparty, "Not counterparty");
+        require(_zkIdentities[_disputeId][false] == bytes32(0), "Already registered");
+        require(!d.resolved, "Dispute resolved");
+
+        _zkIdentities[_disputeId][false] = _identityHash;
+
+        emit ZKIdentityRegistered(_disputeId, _identityHash, false);
+    }
+
+    /**
+     * @inheritdoc IILRM
+     */
+    function getZKIdentity(
+        uint256 _disputeId,
+        bool _isInitiator
+    ) external view override returns (bytes32) {
+        return _zkIdentities[_disputeId][_isInitiator];
+    }
+
+    /**
+     * @inheritdoc IILRM
+     */
+    function isZKModeEnabled(uint256 _disputeId) external view override returns (bool) {
+        return _zkModeEnabled[_disputeId];
     }
 }
