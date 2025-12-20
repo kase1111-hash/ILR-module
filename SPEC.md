@@ -13,8 +13,9 @@
 3. [Core Contracts](#core-contracts)
 4. [Unimplemented Features](#unimplemented-features)
 5. [Implementation Plans](#implementation-plans)
-6. [Security Considerations](#security-considerations)
-7. [Roadmap Alignment](#roadmap-alignment)
+6. [Trust Model & Execution Modes](#trust-model--execution-modes)
+7. [Security Considerations](#security-considerations)
+8. [Roadmap Alignment](#roadmap-alignment)
 
 ---
 
@@ -138,17 +139,20 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 
 | Feature | Status | Location | Notes |
 |---------|--------|----------|-------|
-| Council Member Management | ✅ | `ComplianceCouncil.sol:115-185` | Add/remove with BLS keys |
+| Council Member Management | ✅ | `ComplianceCouncil.sol:215-285` | Add/remove with BLS keys |
 | Member Role Types | ✅ | `IComplianceCouncil.sol:35-42` | 5 roles: User, DAO, Auditor, Legal, Regulator |
-| Warrant Request Submission | ✅ | `ComplianceCouncil.sol:195-235` | With document hash and jurisdiction |
-| Threshold Voting | ✅ | `ComplianceCouncil.sol:240-290` | m-of-n approval/rejection |
-| Appeal Mechanism | ✅ | `ComplianceCouncil.sol:310-325` | Before execution delay expires |
-| BLS Signature Submission | ✅ | `ComplianceCouncil.sol:335-390` | Per-member signatures |
-| Signature Aggregation | ✅ | `ComplianceCouncil.sol:395-415` | Lagrange interpolation |
-| Threshold Verification | ✅ | `ComplianceCouncil.sol:420-440` | Aggregated signature check |
-| Key Reconstruction | ✅ | `ComplianceCouncil.sol:445-475` | Execute reveal after threshold |
-| BLS12-381 Precompiles | ✅ | `ComplianceCouncil.sol:25-35` | EIP-2537 with fallback detection |
-| Pausable Operations | ✅ | `ComplianceCouncil.sol:490-500` | Emergency pause support |
+| Warrant Request Submission | ✅ | `ComplianceCouncil.sol:295-335` | With document hash and jurisdiction |
+| Threshold Voting | ✅ | `ComplianceCouncil.sol:340-390` | m-of-n approval/rejection |
+| Appeal Mechanism | ✅ | `ComplianceCouncil.sol:410-425` | Before execution delay expires |
+| BLS Signature Submission | ✅ | `ComplianceCouncil.sol:435-495` | Per-member signatures |
+| Signature Aggregation | ✅ | `ComplianceCouncil.sol:515-535` | Lagrange interpolation |
+| Threshold Verification | ✅ | `ComplianceCouncil.sol:536-550` | Aggregated signature check |
+| Key Reconstruction | ✅ | `ComplianceCouncil.sol:552-600` | Execute reveal after threshold |
+| BLS12-381 Precompiles | ✅ | `ComplianceCouncil.sol:20-24` | EIP-2537 with fallback detection |
+| **Execution Modes** | ✅ | `ComplianceCouncil.sol:29-52` | DISABLED, STRICT_ONCHAIN, HYBRID_ATTESTED |
+| **Mode Governance** | ✅ | `ComplianceCouncil.sol:159-169` | Admin-controlled with reason logging |
+| **Hybrid Attestation** | ✅ | `ComplianceCouncil.sol:178-195` | Operator confirmation for off-chain verification |
+| Pausable Operations | ✅ | `ComplianceCouncil.sol:590-610` | Emergency pause support |
 
 ### Treasury Contract
 
@@ -1024,6 +1028,53 @@ treasury.setTieredSubsidyConfig(
 
 ---
 
+## Trust Model & Execution Modes
+
+### Trust Choke Points
+
+The ILRM protocol is cryptographically sound but contains explicit trust assumptions:
+
+| Component | Trust Type | Mitigation |
+|-----------|-----------|------------|
+| Oracle | Trusted actor | Bonded stake, slashing, multi-sig rotation |
+| ComplianceCouncil | Threshold trust | BLS signatures, quorum voting, execution modes |
+| AssetRegistry | Trusted registrar | Ownership verification, freeze controls |
+| GovernanceTimelock | Multi-sig | Time delays, emergency bypass with audit trail |
+
+### ComplianceCouncil Execution Modes
+
+The ComplianceCouncil implements explicit execution modes to prevent silent trust degradation:
+
+| Mode | Trust Model | When to Use |
+|------|-------------|-------------|
+| `DISABLED` | No execution | Pre-deployment, emergency state |
+| `STRICT_ONCHAIN` | Cryptographic finality | Mainnet (requires BLS precompiles) |
+| `HYBRID_ATTESTED` | Operational trust | L2s without precompiles, with operator attestation |
+
+**Mode Selection Rules:**
+- `STRICT_ONCHAIN` auto-enabled if BLS precompiles detected at deployment
+- `HYBRID_ATTESTED` requires explicit governance action + reason
+- Mode changes emit `ExecutionModeChanged` event for audit trail
+- `attestHybridVerification()` required before execution in hybrid mode
+
+### Oracle Governance
+
+The oracle is a **governed actor** with explicit responsibilities:
+
+| Failure Type | Example | Mitigation |
+|-------------|---------|------------|
+| Byzantine | Malicious data | Signature verification, multi-oracle quorum |
+| Silent | No updates | Circuit breaker, timeout fallback |
+| Key Compromise | Stolen signer | Emergency rotation via GovernanceTimelock |
+| Governance Capture | Oracle collusion | Multi-party approval, appeal window |
+
+**Oracle Events (Transparency Requirements):**
+- All oracle payloads emitted via `ProposalSubmitted`
+- Signer identity bound to signature verification
+- Confidence/quorum metadata in extended proposal format
+
+---
+
 ## Security Considerations
 
 ### Audit Status
@@ -1037,20 +1088,31 @@ treasury.setTieredSubsidyConfig(
 | H-03: Oracle-ILRM architecture mismatch | High | ✅ Fixed |
 | H-04: Unbounded loop DoS | High | ✅ Fixed |
 | H-05: Anyone can register assets | High | ✅ Fixed |
+| H-06: Treasury subsidy for resolved disputes | High | ✅ Fixed |
+| H-07: Unverified signature execution | High | ✅ Fixed |
 | M-01: Treasury type confusion | Medium | 🔶 Acknowledged |
-| M-02: Centralization risk | Medium | ❌ Pending (Plan 8) |
+| M-02: Centralization risk | Medium | ✅ Fixed (Plan 8) |
 | M-03: Missing harassment score event | Medium | ✅ Fixed |
 | M-04: requestSubsidy caller not validated | Medium | ✅ Fixed |
 | M-05: Domain separator immutability | Medium | ✅ Fixed |
 | M-06: Counter-proposal timing manipulation | Medium | 🔶 Acknowledged |
 | M-07: Deployer auto-registered as oracle | Medium | ✅ Fixed |
 | M-08: Int256 overflow edge case | Medium | ✅ Fixed |
+| M-09: Uninitialized tier threshold | Medium | ✅ Fixed |
+| L-01: GovernanceTimelock infinite recursion | Low | ✅ Fixed |
+| L-02: ILRM dust tracking bug | Low | ✅ Fixed |
+| L-03: Dead code in FIDO verification | Low | ✅ Fixed |
 
 ### Remaining Security Tasks
 
 1. **Professional Third-Party Audit** - Required before mainnet
 2. **Formal Verification** - For critical stake/burn logic
 3. **Bug Bounty Program** - Post-audit launch
+4. **Execution Mode Testing** - L2/fork/non-standard EVM coverage
+
+### Suggested Audit Response
+
+> These findings do not represent exploitable vulnerabilities, but rather trust and execution-mode considerations. The protocol explicitly documents when cryptographic enforcement (on-chain BLS, decentralized oracle quorum) is required versus when operational trust is assumed. Execution modes, capability gating, and oracle governance controls are formalized to prevent silent degradation and ensure transparency.
 
 ---
 

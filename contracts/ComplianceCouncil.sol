@@ -12,25 +12,51 @@ import "./interfaces/IComplianceEscrow.sol";
  * @notice Decentralized compliance council with BLS threshold signatures
  * @dev Implements threshold decryption for legal compliance without central honeypot
  *
- * BLS12-381 Precompiles (EIP-2537):
- * - 0x0b: G1 Add
- * - 0x0c: G1 Mul
- * - 0x0d: G1 MultiExp
- * - 0x0e: G2 Add
- * - 0x0f: G2 Mul
- * - 0x10: G2 MultiExp
- * - 0x11: Pairing
- * - 0x12: Map to G1
- * - 0x13: Map to G2
+ * EXECUTION MODES (Trust Model):
+ * - STRICT_ONCHAIN: Requires BLS precompiles. Cryptographic finality. Default for mainnet.
+ * - HYBRID_ATTESTED: Allows off-chain verification with operator attestation. Audit trail required.
+ * - DISABLED: No execution allowed. Emergency or pre-deployment state.
  *
- * Note: If BLS precompiles unavailable, verification falls back to off-chain
+ * BLS12-381 Precompiles (EIP-2537):
+ * - 0x0b: G1 Add, 0x0c: G1 Mul, 0x0d: G1 MultiExp
+ * - 0x0e: G2 Add, 0x0f: G2 Mul, 0x10: G2 MultiExp
+ * - 0x11: Pairing, 0x12: Map to G1, 0x13: Map to G2
  */
 contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard, Pausable {
+    // ============ Execution Mode ============
+
+    /// @notice Execution mode determines trust model
+    enum ExecutionMode {
+        DISABLED,           // No execution allowed
+        STRICT_ONCHAIN,     // Requires BLS precompiles (cryptographic finality)
+        HYBRID_ATTESTED     // Off-chain verification with operator attestation
+    }
+
+    /// @notice Current execution mode
+    ExecutionMode public executionMode;
+
+    /// @notice Emitted when execution mode changes
+    event ExecutionModeChanged(
+        ExecutionMode indexed oldMode,
+        ExecutionMode indexed newMode,
+        address indexed changedBy,
+        string reason
+    );
+
+    /// @notice Emitted when hybrid execution is attested by operator
+    event HybridExecutionAttested(
+        uint256 indexed warrantId,
+        address indexed operator,
+        bytes32 attestationHash,
+        string verificationMethod
+    );
+
     // ============ Constants ============
 
     bytes32 public constant ADMIN_ROLE = keccak256("ADMIN_ROLE");
     bytes32 public constant MEMBER_ROLE = keccak256("MEMBER_ROLE");
     bytes32 public constant REQUESTER_ROLE = keccak256("REQUESTER_ROLE");
+    bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
 
     // BLS12-381 precompile addresses (EIP-2537)
     address constant BLS_G1_ADD = address(0x0b);
@@ -77,6 +103,12 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
     /// @notice Compliance escrow reference
     IComplianceEscrow public complianceEscrow;
 
+    /// @notice Hybrid attestations: warrantId => attestation hash
+    mapping(uint256 => bytes32) private _hybridAttestations;
+
+    /// @notice Whether warrant has been attested in hybrid mode
+    mapping(uint256 => bool) private _isHybridAttested;
+
     // ============ Constructor ============
 
     constructor(
@@ -104,6 +136,80 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
 
         // Check if BLS precompiles are available
         _blsPrecompilesAvailable = _checkBLSPrecompiles();
+
+        // Set execution mode based on precompile availability
+        // STRICT_ONCHAIN if precompiles available, DISABLED otherwise (requires explicit enablement)
+        if (_blsPrecompilesAvailable) {
+            executionMode = ExecutionMode.STRICT_ONCHAIN;
+            emit ExecutionModeChanged(ExecutionMode.DISABLED, ExecutionMode.STRICT_ONCHAIN, admin, "BLS precompiles available");
+        } else {
+            executionMode = ExecutionMode.DISABLED;
+            emit ExecutionModeChanged(ExecutionMode.DISABLED, ExecutionMode.DISABLED, admin, "BLS precompiles unavailable - manual mode selection required");
+        }
+    }
+
+    // ============ Execution Mode Management ============
+
+    /**
+     * @notice Set execution mode (governance controlled)
+     * @dev STRICT_ONCHAIN requires BLS precompiles to be available
+     * @param newMode The new execution mode
+     * @param reason Human-readable reason for mode change
+     */
+    function setExecutionMode(ExecutionMode newMode, string calldata reason) external onlyRole(ADMIN_ROLE) {
+        ExecutionMode oldMode = executionMode;
+
+        // STRICT_ONCHAIN requires BLS precompiles
+        if (newMode == ExecutionMode.STRICT_ONCHAIN) {
+            require(_blsPrecompilesAvailable, "BLS precompiles required for STRICT_ONCHAIN");
+        }
+
+        executionMode = newMode;
+        emit ExecutionModeChanged(oldMode, newMode, msg.sender, reason);
+    }
+
+    /**
+     * @notice Attest to off-chain signature verification for hybrid mode
+     * @dev Required before execution in HYBRID_ATTESTED mode
+     * @param warrantId The warrant being attested
+     * @param attestationHash Hash of off-chain verification artifacts
+     * @param verificationMethod Description of verification method used
+     */
+    function attestHybridVerification(
+        uint256 warrantId,
+        bytes32 attestationHash,
+        string calldata verificationMethod
+    ) external onlyRole(OPERATOR_ROLE) {
+        require(executionMode == ExecutionMode.HYBRID_ATTESTED, "Not in hybrid mode");
+        require(_warrants[warrantId].id != 0, "Warrant not found");
+        require(
+            _warrants[warrantId].status == WarrantStatus.Executing,
+            "Warrant not in executing state"
+        );
+        require(!_isHybridAttested[warrantId], "Already attested");
+
+        _hybridAttestations[warrantId] = attestationHash;
+        _isHybridAttested[warrantId] = true;
+
+        emit HybridExecutionAttested(warrantId, msg.sender, attestationHash, verificationMethod);
+    }
+
+    /**
+     * @notice Check if BLS precompiles are currently available
+     * @return available True if precompiles can be used
+     */
+    function areBLSPrecompilesAvailable() external view returns (bool available) {
+        return _blsPrecompilesAvailable;
+    }
+
+    /**
+     * @notice Get hybrid attestation for a warrant
+     * @param warrantId The warrant ID
+     * @return attested Whether the warrant has been attested
+     * @return attestationHash The attestation hash if attested
+     */
+    function getHybridAttestation(uint256 warrantId) external view returns (bool attested, bytes32 attestationHash) {
+        return (_isHybridAttested[warrantId], _hybridAttestations[warrantId]);
     }
 
     // ============ Member Management ============
@@ -326,6 +432,39 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         emit AppealFiled(warrantId, msg.sender, reason);
     }
 
+    /**
+     * @notice Cancel a warrant that is stuck or invalid
+     * @dev FIX: Prevents soft lock of warrants in Approved/Executing/Appealed states
+     * @param warrantId The warrant to cancel
+     * @param reason Human-readable reason for cancellation
+     */
+    function cancelWarrant(
+        uint256 warrantId,
+        string calldata reason
+    ) external onlyRole(ADMIN_ROLE) {
+        WarrantRequest storage warrant = _warrants[warrantId];
+
+        require(warrant.id != 0, "Warrant not found");
+        require(
+            warrant.status != WarrantStatus.Executed &&
+            warrant.status != WarrantStatus.Rejected,
+            "Cannot cancel executed or rejected warrant"
+        );
+
+        WarrantStatus oldStatus = warrant.status;
+        warrant.status = WarrantStatus.Rejected;
+
+        emit WarrantCancelled(warrantId, oldStatus, msg.sender, reason);
+    }
+
+    /// @notice Emitted when a warrant is cancelled by admin
+    event WarrantCancelled(
+        uint256 indexed warrantId,
+        WarrantStatus oldStatus,
+        address indexed cancelledBy,
+        string reason
+    );
+
     /// @inheritdoc IComplianceCouncil
     function getWarrant(uint256 warrantId) external view override returns (WarrantRequest memory) {
         return _warrants[warrantId];
@@ -445,6 +584,9 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
 
     /// @inheritdoc IComplianceCouncil
     function executeReconstruction(uint256 warrantId) external override nonReentrant returns (bytes32 decryptedKeyHash) {
+        // EXECUTION MODE GATING - Enforce trust model
+        require(executionMode != ExecutionMode.DISABLED, "Execution disabled");
+
         WarrantRequest storage warrant = _warrants[warrantId];
 
         require(warrant.id != 0, "Warrant not found");
@@ -453,6 +595,23 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
             _warrantSignatures[warrantId].length >= _config.threshold,
             "Insufficient signatures"
         );
+
+        // Mode-specific verification requirements
+        if (executionMode == ExecutionMode.STRICT_ONCHAIN) {
+            // STRICT_ONCHAIN: Require cryptographically verified signatures
+            require(_blsPrecompilesAvailable, "BLS precompiles required");
+            uint256 verifiedCount = 0;
+            SignatureSubmission[] storage sigs = _warrantSignatures[warrantId];
+            for (uint256 i = 0; i < sigs.length; i++) {
+                if (sigs[i].verified) {
+                    verifiedCount++;
+                }
+            }
+            require(verifiedCount >= _config.threshold, "Insufficient verified signatures");
+        } else if (executionMode == ExecutionMode.HYBRID_ATTESTED) {
+            // HYBRID_ATTESTED: Require operator attestation for off-chain verification
+            require(_isHybridAttested[warrantId], "Hybrid attestation required");
+        }
 
         // Mark as executed
         warrant.status = WarrantStatus.Executed;

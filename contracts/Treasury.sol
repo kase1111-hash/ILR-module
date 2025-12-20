@@ -262,11 +262,22 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
         }
 
         // Verify participant is the counterparty (defender, not initiator)
+        // FIX: Also check dispute is not resolved and counterparty hasn't staked yet
         (
             address initiator,
             address counterparty,
-            ,,,,,,,,,,
+            ,
+            uint256 counterpartyStake,
+            ,,,,,
+            bool resolved,
+            ,,
         ) = IILRM(ilrm).disputes(disputeId);
+
+        // Dispute must be active (not resolved)
+        require(!resolved, "Dispute already resolved");
+
+        // Counterparty must not have staked yet (subsidy is to HELP them stake)
+        require(counterpartyStake == 0, "Counterparty already staked");
 
         if (participant != counterparty) {
             revert NotCounterparty(participant, counterparty);
@@ -519,6 +530,11 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
         uint256 _tier2MultiplierBps,
         uint256 _tier3MultiplierBps
     ) external onlyOwner {
+        // FIX: Require tier1Threshold > 0 when enabling to ensure score 0 users get 100%
+        // Without this, score < 0 is always false for uint256, breaking tier 0
+        if (_enabled) {
+            require(_tier1Threshold > 0, "Tier 1 threshold must be > 0");
+        }
         require(_tier1Threshold < _tier2Threshold, "Tier 1 must be < Tier 2");
         require(_tier2Threshold < _tier3Threshold, "Tier 2 must be < Tier 3");
         require(_tier3Threshold < HARASSMENT_THRESHOLD, "Tier 3 must be < threshold");
