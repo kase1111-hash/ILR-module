@@ -69,6 +69,19 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 | Proof Replay Detection | ✅ | `IdentityVerifier.sol:175-178` | Hash-based tracking |
 | Dispute-Bound Proofs | ✅ | `IdentityVerifier.sol:126-140` | Extended signals |
 
+### Compliance Escrow Contract
+
+| Feature | Status | Location | Notes |
+|---------|--------|----------|-------|
+| Escrow Creation | ✅ | `ComplianceEscrow.sol:116-160` | With holder registration |
+| Share Commitment Submission | ✅ | `ComplianceEscrow.sol:165-178` | Proof of possession |
+| Reveal Request Creation | ✅ | `ComplianceEscrow.sol:185-213` | With voting period |
+| Threshold Voting | ✅ | `ComplianceEscrow.sol:218-256` | Approve/reject with quorum |
+| Share Submission for Reveal | ✅ | `ComplianceEscrow.sol:261-290` | Encrypted to coordinator |
+| Reveal Finalization | ✅ | `ComplianceEscrow.sol:295-320` | Records reconstruction |
+| Request Expiration | ✅ | `ComplianceEscrow.sol:325-335` | Timeout handling |
+| Viewing Key Commitment (ILRM) | ✅ | `ILRM.sol:759-777` | Dispute metadata privacy |
+
 ### Treasury Contract
 
 | Feature | Status | Location | Notes |
@@ -184,16 +197,24 @@ The following features are documented in the project documentation but not yet i
 - TypeScript SDK for proof generation
 
 #### 1.2 Viewing Key Infrastructure (dispute-membership-circuit.md)
-**Status:** ❌ Not Implemented
+**Status:** ✅ IMPLEMENTED
 **Source:** `dispute-membership-circuit.md:35-68`
 
 **Description:** ECIES encryption + Shamir's Secret Sharing for selective de-anonymization. Allows compliance reveals while maintaining default privacy.
 
-**Components:**
-- Pedersen commitments for evidence hashes
-- ECIES encryption (secp256k1) for viewing keys
-- m-of-n Shamir secret sharing (e.g., 3-of-5)
-- ComplianceEscrow contract for key share management
+**Implementation:**
+- Contract: `contracts/ComplianceEscrow.sol`
+- Interface: `contracts/interfaces/IComplianceEscrow.sol`
+- SDK: `sdk/viewing-keys.ts`, `sdk/shamir.ts`, `sdk/ecies.ts`
+- ILRM Integration: `ILRM.sol:728-858`
+
+**Features Implemented:**
+- ComplianceEscrow contract with m-of-n threshold voting
+- Shamir's Secret Sharing library (GF(2^8) with full test coverage)
+- ECIES encryption on secp256k1 (Ethereum-compatible)
+- Reveal request management with voting and expiration
+- Share submission and reconstruction flow
+- ILRM integration for viewing key commitments
 
 #### 1.3 Batch Transaction Queue (dispute-membership-circuit.md)
 **Status:** ❌ Not Implemented
@@ -370,34 +391,44 @@ contract LicenseEntropyOracle {
 ### Plan 2: Viewing Key Infrastructure
 
 **Priority:** High
-**Estimated Complexity:** High
-**Dependencies:** Plan 1, ECIES library, Shamir library
+**Status:** ✅ COMPLETED
+**Dependencies:** ECIES library, Shamir library
 
-#### Implementation Steps:
+#### Implemented Files:
 
-1. **ComplianceEscrow Contract**
-   - Create `contracts/ComplianceEscrow.sol`
-   - Implement m-of-n share storage
-   - Add `submitShare()` and `reconstructRequest()` functions
+| File | Description |
+|------|-------------|
+| `contracts/ComplianceEscrow.sol` | Threshold voting and share management |
+| `contracts/interfaces/IComplianceEscrow.sol` | Contract interface with types |
+| `sdk/shamir.ts` | Shamir's Secret Sharing in GF(2^8) |
+| `sdk/ecies.ts` | ECIES encryption on secp256k1 |
+| `sdk/viewing-keys.ts` | Complete viewing keys SDK |
 
-2. **ILRM Modifications**
-   - Add `viewingKeyCommitment` to Dispute struct
-   - Store Pedersen commitment for evidence
+#### ILRM Integration (ILRM.sol):
 
-3. **Off-Chain Key Management**
-   - ECIES encryption using `@noble/secp256k1`
-   - Shamir splitting using `secrets.js` or equivalent
-   - IPFS/Arweave storage for encrypted metadata
+| Function | Lines | Description |
+|----------|-------|-------------|
+| `setComplianceEscrow()` | 748-750 | Configure escrow contract |
+| `registerViewingKeyCommitment()` | 759-777 | Register commitment for dispute |
+| `createDisputeEscrow()` | 790-831 | Create escrow with holders |
+| `getViewingKeyCommitment()` | 838-840 | Query commitment |
+| `getEncryptedDataHash()` | 847-849 | Query encrypted data location |
+| `hasViewingKey()` | 856-858 | Check if viewing key exists |
 
-4. **Compliance Workflow**
-   - Governance vote contract for reveal requests
-   - Threshold signature collection
-   - Audit log for all reveals
+#### ComplianceEscrow Features:
 
-#### Files to Create:
-- `contracts/ComplianceEscrow.sol`
-- `sdk/viewing-keys.ts`
-- `sdk/shamir.ts`
+| Feature | Description |
+|---------|-------------|
+| Threshold Voting | m-of-n approval required for reveals |
+| Share Management | Encrypted share submission and storage |
+| Request Lifecycle | Pending → Approved/Rejected → Executed/Expired |
+| Holder Types | User, DAO, Auditor, LegalCounsel, Regulator |
+| Audit Trail | All actions emitted as events |
+
+#### Remaining Tasks:
+- [ ] Integration tests with full reveal flow
+- [ ] IPFS/Arweave storage integration
+- [ ] Frontend for share holders
 
 ---
 

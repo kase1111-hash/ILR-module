@@ -10,6 +10,7 @@ import "./interfaces/IILRM.sol";
 import "./interfaces/IOracle.sol";
 import "./interfaces/IAssetRegistry.sol";
 import "./interfaces/IIdentityVerifier.sol";
+import "./interfaces/IComplianceEscrow.sol";
 
 /**
  * @title ILRM - IP & Licensing Reconciliation Module
@@ -92,6 +93,15 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable {
 
     /// @notice Whether ZK mode is enabled for a dispute
     mapping(uint256 => bool) private _zkModeEnabled;
+
+    /// @notice Optional compliance escrow for viewing keys (address(0) if disabled)
+    IComplianceEscrow public complianceEscrow;
+
+    /// @notice Viewing key commitments for disputes: disputeId => commitment
+    mapping(uint256 => bytes32) private _viewingKeyCommitments;
+
+    /// @notice Encrypted data hashes for disputes: disputeId => hash (IPFS/Arweave)
+    mapping(uint256 => bytes32) private _encryptedDataHashes;
 
     // ============ Constructor ============
 
@@ -713,5 +723,137 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable {
      */
     function isZKModeEnabled(uint256 _disputeId) external view override returns (bool) {
         return _zkModeEnabled[_disputeId];
+    }
+
+    // ============ Viewing Key Functions ============
+
+    /// @notice Emitted when viewing key commitment is registered
+    event ViewingKeyCommitmentRegistered(
+        uint256 indexed disputeId,
+        bytes32 indexed commitment,
+        bytes32 encryptedDataHash
+    );
+
+    /// @notice Emitted when compliance escrow is created for a dispute
+    event ComplianceEscrowCreated(
+        uint256 indexed disputeId,
+        uint256 indexed escrowId
+    );
+
+    /**
+     * @notice Set the compliance escrow contract
+     * @dev Only owner can set; address(0) disables viewing key features
+     * @param _escrow The compliance escrow contract address
+     */
+    function setComplianceEscrow(address _escrow) external onlyOwner {
+        complianceEscrow = IComplianceEscrow(_escrow);
+    }
+
+    /**
+     * @notice Register viewing key commitment for a dispute
+     * @dev Either party can register; allows privacy-preserving metadata storage
+     * @param _disputeId The dispute to register for
+     * @param _viewingKeyCommitment Commitment to the viewing key
+     * @param _encryptedDataHash Hash of encrypted data location (IPFS/Arweave)
+     */
+    function registerViewingKeyCommitment(
+        uint256 _disputeId,
+        bytes32 _viewingKeyCommitment,
+        bytes32 _encryptedDataHash
+    ) external nonReentrant {
+        Dispute storage d = _disputes[_disputeId];
+        require(
+            msg.sender == d.initiator || msg.sender == d.counterparty,
+            "Not a party"
+        );
+        require(!d.resolved, "Dispute resolved");
+        require(_viewingKeyCommitment != bytes32(0), "Invalid commitment");
+        require(_viewingKeyCommitments[_disputeId] == bytes32(0), "Already registered");
+
+        _viewingKeyCommitments[_disputeId] = _viewingKeyCommitment;
+        _encryptedDataHashes[_disputeId] = _encryptedDataHash;
+
+        emit ViewingKeyCommitmentRegistered(_disputeId, _viewingKeyCommitment, _encryptedDataHash);
+    }
+
+    /**
+     * @notice Create a compliance escrow for a dispute with viewing key
+     * @dev Requires complianceEscrow to be set
+     * @param _disputeId The dispute to create escrow for
+     * @param _viewingKeyCommitment Commitment to the viewing key
+     * @param _encryptedDataHash Hash of encrypted data location
+     * @param _threshold Required shares for reconstruction (m)
+     * @param _holders Array of share holder addresses
+     * @param _holderTypes Array of holder types
+     * @return escrowId The created escrow ID
+     */
+    function createDisputeEscrow(
+        uint256 _disputeId,
+        bytes32 _viewingKeyCommitment,
+        bytes32 _encryptedDataHash,
+        uint8 _threshold,
+        address[] calldata _holders,
+        IComplianceEscrow.HolderType[] calldata _holderTypes
+    ) external nonReentrant whenNotPaused returns (uint256 escrowId) {
+        require(address(complianceEscrow) != address(0), "Escrow not configured");
+
+        Dispute storage d = _disputes[_disputeId];
+        require(
+            msg.sender == d.initiator || msg.sender == d.counterparty,
+            "Not a party"
+        );
+        require(!d.resolved, "Dispute resolved");
+
+        // Register commitment
+        if (_viewingKeyCommitments[_disputeId] == bytes32(0)) {
+            _viewingKeyCommitments[_disputeId] = _viewingKeyCommitment;
+            _encryptedDataHashes[_disputeId] = _encryptedDataHash;
+
+            emit ViewingKeyCommitmentRegistered(
+                _disputeId,
+                _viewingKeyCommitment,
+                _encryptedDataHash
+            );
+        }
+
+        // Create escrow
+        escrowId = complianceEscrow.createEscrow(
+            _disputeId,
+            _viewingKeyCommitment,
+            _encryptedDataHash,
+            _threshold,
+            uint8(_holders.length),
+            _holders,
+            _holderTypes
+        );
+
+        emit ComplianceEscrowCreated(_disputeId, escrowId);
+    }
+
+    /**
+     * @notice Get viewing key commitment for a dispute
+     * @param _disputeId The dispute ID
+     * @return commitment The viewing key commitment
+     */
+    function getViewingKeyCommitment(uint256 _disputeId) external view returns (bytes32 commitment) {
+        return _viewingKeyCommitments[_disputeId];
+    }
+
+    /**
+     * @notice Get encrypted data hash for a dispute
+     * @param _disputeId The dispute ID
+     * @return hash The encrypted data hash
+     */
+    function getEncryptedDataHash(uint256 _disputeId) external view returns (bytes32 hash) {
+        return _encryptedDataHashes[_disputeId];
+    }
+
+    /**
+     * @notice Check if viewing key is registered for a dispute
+     * @param _disputeId The dispute ID
+     * @return True if viewing key commitment exists
+     */
+    function hasViewingKey(uint256 _disputeId) external view returns (bool) {
+        return _viewingKeyCommitments[_disputeId] != bytes32(0);
     }
 }
