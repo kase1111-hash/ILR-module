@@ -6,7 +6,10 @@
     "compile": "hardhat compile",
     "test": "hardhat test",
     "coverage": "hardhat coverage",
-    "clean": "hardhat clean"
+    "clean": "hardhat clean",
+    "deploy": "hardhat run scripts/deploy.js",
+    "deploy:sepolia": "hardhat run scripts/deploy.js --network sepolia",
+    "deploy:optimism": "hardhat run scripts/deploy.js --network optimism"
   },
   "repository": {
     "type": "git",
