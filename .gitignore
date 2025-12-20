@@ -6,6 +6,10 @@ artifacts/
 # Dependencies
 lib/
 node_modules/
+package-lock.json
+
+# Hardhat/TypeChain
+typechain-types/
 
 # Environment
 .env

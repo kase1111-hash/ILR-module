@@ -1,0 +1,26 @@
+{
+  "name": "ilr-module",
+  "version": "1.0.0",
+  "description": "IP & Licensing Reconciliation Module - NatLangChain Protocol Implementation",
+  "scripts": {
+    "compile": "hardhat compile",
+    "test": "hardhat test",
+    "coverage": "hardhat coverage",
+    "clean": "hardhat clean",
+    "deploy": "hardhat run scripts/deploy.js",
+    "deploy:sepolia": "hardhat run scripts/deploy.js --network sepolia",
+    "deploy:optimism": "hardhat run scripts/deploy.js --network optimism"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/kase1111-hash/ILR-module"
+  },
+  "keywords": ["solidity", "ethereum", "ip", "licensing", "dispute-resolution", "natlangchain"],
+  "author": "",
+  "license": "Apache-2.0",
+  "devDependencies": {
+    "@nomicfoundation/hardhat-toolbox": "^4.0.0",
+    "@openzeppelin/contracts": "^5.4.0",
+    "hardhat": "^2.22.0"
+  }
+}
