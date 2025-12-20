@@ -160,7 +160,7 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 | Harassment Score Checks | ✅ | `Treasury.sol:228-230` | Threshold: 50 |
 | Anti-Sybil (Single Subsidy/Dispute) | ✅ | `Treasury.sol:200-203` | Prevents double-claiming |
 | Dynamic Caps | ✅ | `Treasury.sol:497-531` | Scale caps with treasury size |
-| Tiered Subsidies | ❌ | - | Based on harassment score tiers |
+| Tiered Subsidies | ✅ | `Treasury.sol:617-646` | Based on harassment score tiers |
 | Multi-Token Support | ❌ | - | Currently single ERC20 |
 
 ### Oracle Contract
@@ -456,10 +456,25 @@ contract LicenseEntropyOracle {
 - Uses lower of configured cap and dynamic cap when enabled
 
 #### 5.2 Tiered Subsidies (Treasury.md)
-**Status:** ❌ Not Implemented
+**Status:** ✅ IMPLEMENTED
 **Source:** `Treasury.md:125`
 
 **Description:** Low harassment score → full subsidy; higher score → partial subsidy (graduated scale).
+
+**Implementation:**
+- Location: `contracts/Treasury.sol:617-646`
+- Configuration: `setTieredSubsidyConfig(enabled, thresholds, multipliers)`
+- View function: `getSubsidyMultiplier(participant)`
+
+**Features Implemented:**
+- 4-tier system based on harassment score thresholds
+- Tier 0: score < tier1Threshold → 100% subsidy
+- Tier 1: tier1Threshold ≤ score < tier2Threshold → tier1MultiplierBps
+- Tier 2: tier2Threshold ≤ score < tier3Threshold → tier2MultiplierBps
+- Tier 3: tier3Threshold ≤ score < HARASSMENT_THRESHOLD → tier3MultiplierBps
+- score ≥ HARASSMENT_THRESHOLD → blocked (0%)
+- Configurable thresholds and multipliers via admin function
+- Automatic integration with `requestSubsidy()` and `calculateSubsidy()`
 
 #### 5.3 Multi-Token Support (Treasury.md)
 **Status:** ❌ Not Implemented
@@ -775,27 +790,54 @@ treasury.setDynamicCapConfig(
 ### Plan 7: Tiered Subsidies
 
 **Priority:** Low
-**Estimated Complexity:** Low
+**Status:** ✅ COMPLETED
 **Dependencies:** None
 
-#### Implementation Steps:
+#### Implemented Changes:
 
-1. **Define Tiers**
-   ```solidity
-   function getSubsidyMultiplier(address participant) public view returns (uint256) {
-       uint256 score = harassmentScore[participant];
-       if (score == 0) return 100;      // 100% subsidy
-       if (score < 25) return 75;       // 75% subsidy
-       if (score < 50) return 50;       // 50% subsidy
-       return 0;                        // No subsidy (blocked)
-   }
-   ```
+**New State Variables:**
+| Variable | Type | Description |
+|----------|------|-------------|
+| `tieredSubsidiesEnabled` | `bool` | Toggle for tiered subsidies |
+| `tier1Threshold` | `uint256` | Harassment score for tier 1 boundary |
+| `tier2Threshold` | `uint256` | Harassment score for tier 2 boundary |
+| `tier3Threshold` | `uint256` | Harassment score for tier 3 boundary |
+| `tier1MultiplierBps` | `uint256` | Tier 1 subsidy multiplier (basis points) |
+| `tier2MultiplierBps` | `uint256` | Tier 2 subsidy multiplier (basis points) |
+| `tier3MultiplierBps` | `uint256` | Tier 3 subsidy multiplier (basis points) |
 
-2. **Modify Subsidy Calculation**
-   - Apply multiplier to calculated subsidy
-   - Log tier used in event
+**New Functions:**
 
-#### Files to Modify:
+| Function | Description |
+|----------|-------------|
+| `setTieredSubsidyConfig()` | Configure tier thresholds and multipliers |
+| `getSubsidyMultiplier()` | Get multiplier and tier for a participant |
+
+**Tier System:**
+
+| Tier | Harassment Score Range | Default Multiplier |
+|------|----------------------|-------------------|
+| 0 | 0 - tier1Threshold | 100% (full subsidy) |
+| 1 | tier1Threshold - tier2Threshold | tier1MultiplierBps |
+| 2 | tier2Threshold - tier3Threshold | tier2MultiplierBps |
+| 3 | tier3Threshold - HARASSMENT_THRESHOLD | tier3MultiplierBps |
+| Blocked | ≥ HARASSMENT_THRESHOLD | 0% (no subsidy) |
+
+**Configuration Example:**
+```solidity
+// Enable tiered subsidies with graduated reduction
+treasury.setTieredSubsidyConfig(
+    true,    // enabled
+    10,      // tier1Threshold (score >= 10)
+    25,      // tier2Threshold (score >= 25)
+    40,      // tier3Threshold (score >= 40)
+    7500,    // tier1 = 75%
+    5000,    // tier2 = 50%
+    2500     // tier3 = 25%
+);
+```
+
+#### Files Modified:
 - `contracts/Treasury.sol`
 
 ---
