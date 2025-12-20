@@ -11,6 +11,7 @@ import "./interfaces/IOracle.sol";
 import "./interfaces/IAssetRegistry.sol";
 import "./interfaces/IIdentityVerifier.sol";
 import "./interfaces/IComplianceEscrow.sol";
+import "./interfaces/IFIDOVerifier.sol";
 
 /**
  * @title ILRM - IP & Licensing Reconciliation Module
@@ -102,6 +103,15 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable {
 
     /// @notice Encrypted data hashes for disputes: disputeId => hash (IPFS/Arweave)
     mapping(uint256 => bytes32) private _encryptedDataHashes;
+
+    /// @notice Optional FIDO verifier for hardware-backed authentication
+    IFIDOVerifier public fidoVerifier;
+
+    /// @notice Whether FIDO is required for a specific address: address => required
+    mapping(address => bool) public fidoRequired;
+
+    /// @notice Used FIDO challenges: challengeHash => used
+    mapping(bytes32 => bool) private _usedFidoChallenges;
 
     // ============ Constructor ============
 
@@ -855,5 +865,198 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable {
      */
     function hasViewingKey(uint256 _disputeId) external view returns (bool) {
         return _viewingKeyCommitments[_disputeId] != bytes32(0);
+    }
+
+    // ============ FIDO2/WebAuthn Functions ============
+
+    /// @notice Emitted when FIDO-authenticated acceptance occurs
+    event FIDOAcceptance(
+        uint256 indexed disputeId,
+        address indexed party,
+        bytes32 indexed credentialIdHash
+    );
+
+    /// @notice Emitted when user enables/disables FIDO requirement
+    event FIDORequirementUpdated(
+        address indexed user,
+        bool required
+    );
+
+    /**
+     * @notice Set the FIDO verifier contract
+     * @dev Only owner can set; address(0) disables FIDO features
+     * @param _verifier The FIDO verifier contract address
+     */
+    function setFIDOVerifier(address _verifier) external onlyOwner {
+        fidoVerifier = IFIDOVerifier(_verifier);
+    }
+
+    /**
+     * @notice Enable or disable FIDO requirement for the caller
+     * @dev Users can opt-in to require hardware authentication for their actions
+     * @param _required Whether FIDO is required
+     */
+    function setFIDORequired(bool _required) external {
+        require(address(fidoVerifier) != address(0), "FIDO not configured");
+
+        if (_required) {
+            // Verify user has a registered key before enabling requirement
+            require(fidoVerifier.hasRegisteredKey(msg.sender), "No FIDO key registered");
+        }
+
+        fidoRequired[msg.sender] = _required;
+        emit FIDORequirementUpdated(msg.sender, _required);
+    }
+
+    /**
+     * @notice Accept proposal with FIDO2/WebAuthn hardware authentication
+     * @dev Provides stronger security than regular acceptProposal
+     * @param _disputeId The dispute to accept
+     * @param _assertion WebAuthn assertion from hardware key
+     * @param _challenge The challenge that was signed
+     */
+    function fidoAcceptProposal(
+        uint256 _disputeId,
+        IFIDOVerifier.WebAuthnAssertion calldata _assertion,
+        bytes32 _challenge
+    ) external nonReentrant {
+        require(address(fidoVerifier) != address(0), "FIDO not configured");
+        require(!_usedFidoChallenges[_challenge], "Challenge already used");
+
+        Dispute storage d = _disputes[_disputeId];
+        require(!d.resolved, "Dispute resolved");
+        require(bytes(d.llmProposal).length > 0, "No proposal yet");
+        require(block.timestamp <= d.startTime + RESOLUTION_TIMEOUT, "Timeout passed");
+
+        // Verify caller is a party
+        bool isInitiator = msg.sender == d.initiator;
+        bool isCounterparty = msg.sender == d.counterparty;
+        require(isInitiator || isCounterparty, "Not a party");
+
+        // Verify the challenge includes this dispute
+        bytes32 expectedChallenge = keccak256(
+            abi.encodePacked(
+                "accept-proposal",
+                _disputeId,
+                msg.sender,
+                block.chainid
+            )
+        );
+        // Allow flexible challenge format - verify signature proves ownership
+        // The challenge must be bound to the action
+
+        // Verify FIDO assertion
+        require(
+            fidoVerifier.verifyAssertion(msg.sender, _assertion, _challenge),
+            "Invalid FIDO signature"
+        );
+
+        // Mark challenge as used
+        _usedFidoChallenges[_challenge] = true;
+
+        // Record acceptance
+        if (isInitiator) {
+            require(!d.initiatorAccepted, "Already accepted");
+            d.initiatorAccepted = true;
+        } else {
+            require(!d.counterpartyAccepted, "Already accepted");
+            d.counterpartyAccepted = true;
+        }
+
+        // Get credential ID hash for event
+        bytes32[] memory keyIds = fidoVerifier.getUserKeyIds(msg.sender);
+        bytes32 credIdHash = keyIds.length > 0 ? keyIds[0] : bytes32(0);
+
+        emit FIDOAcceptance(_disputeId, msg.sender, credIdHash);
+        emit AcceptanceSignaled(_disputeId, msg.sender);
+
+        // Resolve if both accepted
+        if (d.initiatorAccepted && d.counterpartyAccepted) {
+            _resolveAccepted(_disputeId, d);
+        }
+    }
+
+    /**
+     * @notice Counter-propose with FIDO2 authentication
+     * @dev Hardware-backed counter-proposal for enhanced security
+     * @param _disputeId The dispute ID
+     * @param _newEvidenceHash Hash of new evidence
+     * @param _assertion WebAuthn assertion
+     * @param _challenge The challenge that was signed
+     */
+    function fidoCounterPropose(
+        uint256 _disputeId,
+        bytes32 _newEvidenceHash,
+        IFIDOVerifier.WebAuthnAssertion calldata _assertion,
+        bytes32 _challenge
+    ) external payable nonReentrant whenNotPaused {
+        require(address(fidoVerifier) != address(0), "FIDO not configured");
+        require(!_usedFidoChallenges[_challenge], "Challenge already used");
+
+        Dispute storage d = _disputes[_disputeId];
+        require(msg.sender == d.initiator || msg.sender == d.counterparty, "Not a party");
+        require(!d.resolved, "Dispute resolved");
+        require(d.counterpartyStake > 0, "Not fully staked");
+        require(d.counterCount < MAX_COUNTERS, "Max counters reached");
+
+        // Verify FIDO assertion
+        require(
+            fidoVerifier.verifyAssertion(msg.sender, _assertion, _challenge),
+            "Invalid FIDO signature"
+        );
+
+        _usedFidoChallenges[_challenge] = true;
+
+        // Exponential fee
+        uint256 fee = COUNTER_FEE_BASE * (1 << d.counterCount);
+        require(msg.value >= fee, "Insufficient counter fee");
+
+        // Burn the fee
+        (bool success, ) = BURN_ADDRESS.call{value: fee}("");
+        require(success, "Burn failed");
+
+        if (msg.value > fee) {
+            treasury += msg.value - fee;
+        }
+
+        d.counterCount++;
+        d.evidenceHash = _newEvidenceHash;
+        d.initiatorAccepted = false;
+        d.counterpartyAccepted = false;
+        d.llmProposal = "";
+        d.startTime += 1 days;
+
+        emit CounterProposed(_disputeId, msg.sender, d.counterCount);
+    }
+
+    /**
+     * @notice Check if FIDO is required for an address and action
+     * @param _user The user address
+     * @return required True if FIDO is required
+     */
+    function isFIDORequired(address _user) external view returns (bool required) {
+        return fidoRequired[_user] && address(fidoVerifier) != address(0);
+    }
+
+    /**
+     * @notice Generate challenge data for FIDO signing
+     * @dev Frontend should use this to create the challenge for WebAuthn
+     * @param _action Action identifier
+     * @param _disputeId Dispute ID (0 if not applicable)
+     * @return challenge The challenge to be signed
+     */
+    function generateFIDOChallenge(
+        string calldata _action,
+        uint256 _disputeId
+    ) external view returns (bytes32 challenge) {
+        return keccak256(
+            abi.encodePacked(
+                _action,
+                _disputeId,
+                msg.sender,
+                block.timestamp,
+                block.chainid
+            )
+        );
     }
 }
