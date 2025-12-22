@@ -358,6 +358,55 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable {
     }
 
     /**
+     * @notice FIX M-04: Clean up revoked and expired credentials from DID's credential array
+     * @dev Removes credentials that are revoked or expired to prevent unbounded array growth
+     * @param did The DID to clean up credentials for
+     * @return removedCount Number of credentials removed
+     */
+    function cleanupCredentials(bytes32 did) external nonReentrant returns (uint256 removedCount) {
+        bytes32[] storage credIds = _didCredentials[did];
+        uint256 i = 0;
+
+        while (i < credIds.length) {
+            Credential storage cred = _credentials[credIds[i]];
+
+            // Check if credential should be removed (revoked or expired)
+            bool shouldRemove = cred.revoked ||
+                (cred.expiresAt != 0 && block.timestamp > cred.expiresAt);
+
+            if (shouldRemove) {
+                // Swap with last element and pop
+                credIds[i] = credIds[credIds.length - 1];
+                credIds.pop();
+                removedCount++;
+                // Don't increment i - check the swapped element
+            } else {
+                i++;
+            }
+        }
+
+        // Recalculate sybil score after cleanup
+        if (removedCount > 0) {
+            _updateSybilScore(did);
+        }
+    }
+
+    /**
+     * @notice Get count of active (non-revoked, non-expired) credentials
+     * @param did The DID to check
+     * @return count Number of active credentials
+     */
+    function getActiveCredentialCount(bytes32 did) external view returns (uint256 count) {
+        bytes32[] storage credIds = _didCredentials[did];
+        for (uint256 i = 0; i < credIds.length; i++) {
+            Credential storage cred = _credentials[credIds[i]];
+            if (!cred.revoked && (cred.expiresAt == 0 || block.timestamp <= cred.expiresAt)) {
+                count++;
+            }
+        }
+    }
+
+    /**
      * @inheritdoc IDIDRegistry
      */
     function verifyCredential(bytes32 credentialId) external view override returns (bool valid) {
