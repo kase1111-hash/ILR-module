@@ -36,6 +36,10 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable {
     /// @notice Default minimum sybil score for protocol participation
     uint256 public constant DEFAULT_MIN_SYBIL_SCORE = 20;
 
+    /// @notice FIX L-02: Maximum attestation types per issuer
+    /// @dev Prevents unbounded loops in _canIssueType. 6 types defined in enum.
+    uint256 public constant MAX_ATTESTATION_TYPES = 10;
+
     // ============ State Variables ============
 
     /// @notice DID document storage
@@ -513,6 +517,8 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable {
     ) external override onlyOwner {
         if (issuer == address(0)) revert InvalidDelegate(issuer);
         if (trustLevel > 100) trustLevel = 100;
+        // FIX L-02: Limit attestation types to prevent unbounded loops
+        require(allowedTypes.length <= MAX_ATTESTATION_TYPES, "Too many attestation types");
 
         _trustedIssuers[issuer] = TrustedIssuer({
             issuerAddress: issuer,
@@ -558,6 +564,8 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable {
     ) external override onlyOwner {
         if (!_trustedIssuers[issuer].active) revert NotTrustedIssuer(issuer);
         if (trustLevel > 100) trustLevel = 100;
+        // FIX L-02: Limit attestation types to prevent unbounded loops
+        require(allowedTypes.length <= MAX_ATTESTATION_TYPES, "Too many attestation types");
 
         _trustedIssuers[issuer].allowedTypes = allowedTypes;
         _trustedIssuers[issuer].trustLevel = trustLevel;

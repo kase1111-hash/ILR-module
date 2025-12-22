@@ -58,6 +58,10 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable {
     /// @notice Cooldown period between disputes with same counterparty
     uint256 public constant COOLDOWN_PERIOD = 30 days;
 
+    /// @notice FIX L-01: Maximum total time extension from counter-proposals (3 days)
+    /// @dev Prevents indefinite delays - one day per counter, capped at MAX_COUNTERS
+    uint256 public constant MAX_TIME_EXTENSION = 3 days;
+
     // ============ State Variables ============
 
     /// @notice NatLangChain stake token
@@ -350,8 +354,13 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable {
         d.counterpartyAccepted = false;
         d.llmProposal = "";
 
-        // Extend timeout by 1 day per counter
-        d.startTime += 1 days;
+        // FIX L-01: Extend timeout by 1 day per counter, but cap at MAX_TIME_EXTENSION
+        // This prevents indefinite delays while still allowing reasonable extensions
+        uint256 currentExtension = d.counterCount * 1 days; // counterCount already incremented
+        if (currentExtension <= MAX_TIME_EXTENSION) {
+            d.startTime += 1 days;
+        }
+        // If we've hit max extension, no further time added
 
         emit CounterProposed(_disputeId, msg.sender, d.counterCount);
     }
