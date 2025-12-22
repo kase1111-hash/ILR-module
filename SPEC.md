@@ -1,7 +1,7 @@
 # NatLangChain ILRM Protocol Specification
 
-**Version:** 1.2
-**Last Updated:** December 20, 2025
+**Version:** 1.3
+**Last Updated:** December 22, 2025
 **Status:** Testnet Ready
 
 ---
@@ -16,6 +16,11 @@
 6. [Trust Model & Execution Modes](#trust-model--execution-modes)
 7. [Security Considerations](#security-considerations)
 8. [Roadmap Alignment](#roadmap-alignment)
+9. [Success Metrics](#success-metrics)
+10. [LLM Prompt Template](#llm-prompt-template)
+11. [State Transition Diagram](#state-transition-diagram)
+12. [Future Modules](#future-modules)
+13. [Appendix: Constants Reference](#appendix-constants-reference)
 
 ---
 
@@ -584,6 +589,26 @@ The following features are documented in the project documentation but not yet i
 | `getZKIdentity()` | 704-708 | Query identity hashes |
 | `isZKModeEnabled()` | 714-716 | Check ZK mode status |
 
+#### Extended Circuits:
+
+The ZK identity system includes three circuit templates:
+
+| Circuit | Purpose | Private Inputs | Public Inputs |
+|---------|---------|----------------|---------------|
+| `ProveIdentity` | Basic identity proof | `identitySecret` | `identityManager` |
+| `ProveDisputeParty` | Role-bound identity | `identitySecret`, `role` | `identityManager`, `disputeId`, `expectedRole` |
+| `ProveIdentityWithNonce` | Replay-protected actions | `identitySecret` | `identityManager`, `nonce`, `action` + outputs `actionCommitment` |
+
+**ProveDisputeParty Features:**
+- Binds proof to specific dispute ID (prevents cross-dispute proof reuse)
+- Verifies role (0=initiator, 1=counterparty) matches expected
+- Enables role-specific actions without address revelation
+
+**ProveIdentityWithNonce Features:**
+- Includes nonce for replay protection (incremented per use)
+- Binds to specific action hash (e.g., "accept", "counter")
+- Outputs action commitment for on-chain verification
+
 #### Remaining Tasks:
 - [ ] Conduct trusted setup ceremony for mainnet
 - [ ] Professional security audit of circuit
@@ -1143,6 +1168,96 @@ The oracle is a **governed actor** with explicit responsibilities:
 - [ ] Economic parameter tuning
 - [ ] Pilot programs
 - [ ] Open-source release finalization
+
+---
+
+## Success Metrics
+
+The protocol tracks the following metrics to measure effectiveness:
+
+| Metric | Description | Target |
+|--------|-------------|--------|
+| Resolution Rate | % of conflicts resolved without timeout | > 70% |
+| Time-to-Resolution | Average days from initiation to resolution | < 5 days |
+| Repeat Usage | % of entities using protocol multiple times | > 40% |
+| Counter-Proposal Rate | Average counters per dispute | < 1.5 |
+| Burn Rate | % of total stakes burned on timeout | < 30% |
+| Subsidy Utilization | % of eligible parties using treasury subsidies | Monitoring |
+| Governance Participation | Active voters in warrant requests | > 50% of council |
+
+---
+
+## LLM Prompt Template
+
+The following template constrains LLM outputs to reconciliation-only proposals:
+
+**System Prompt:**
+```
+You are a neutral reconciliation engine for IP and licensing disputes. Analyze the provided canonicalized evidence (contract clauses, license grants, provenance, usage metrics, negotiation history). Generate 1-3 Pareto-improving proposals that minimize future conflict costs for both parties. Proposals must be forward-looking, executable via smart contract, and include only: license adjustments, royalty splits, retroactive cures, time-limited grants, or mutual releases. Do NOT assign fault, invalidate rights, or make legal conclusions. Output in JSON format: [{proposal_id: 1, description: '...', terms: {scope: '...', royalties: X%, duration: Y months, etc.}}]
+```
+
+**User Prompt:**
+```
+Evidence: [Insert canonicalized data here]
+```
+
+**Output Constraints:**
+- Maximum 3 proposals
+- Each proposal must be Pareto-improving
+- Terms must be smart-contract executable
+- No fault assignment, rights invalidation, or legal conclusions
+
+---
+
+## State Transition Diagram
+
+```
++-------------+
+|   Inactive  |
++-------------+
+       |
+       v
++-------------+  Initiate (Stake S, Evidence Hash, Fallback)
+|  Initiated  |<---------------- Counterparty Stakes within T_stake?
++-------------+                  Yes: Proceed to Active
+       |                         No: DefaultLicenseApplied → Resolved
+       v
++-------------+
+|    Active   |
++-------------+
+| Proposal Gen|
+| (LLM/Oracle)|
++-------------+
+       |
+       +--> Mutual Acceptance? Yes: AcceptedProposal → Resolved (Stakes Returned, Terms Executed)
+       |
+       +--> Counter? (Fee Burned, Window Extended, Max 3) → Back to Proposal Gen
+       |
+       v
+Timeout (T_resolution)? → TimeoutWithBurn (Burn %, Stakes Partial Return) → DefaultLicenseApplied → Resolved
+```
+
+---
+
+## Future Modules
+
+### Reconciliation & Rights Agent (RRA)
+
+**Status:** 🔮 Future Module
+**Source:** `FIDO-Yubi.md:22-30`
+
+**Description:** An autonomous agent that orchestrates actions across NatLangChain modules. The RRA will:
+- Coordinate between negotiation and reconciliation flows
+- Trigger automated market matching for rights
+- Enable hardware-backed agent control via FIDO2
+- Sign delegated commands securely
+
+**Priority:** Medium — Inherits security from ILRM and other modules; implement when handling sensitive automations.
+
+**Integration Points:**
+- FIDO2 authentication for user control of agent actions
+- On-chain verification of agent-signed executions
+- Delegation registry for authorized agent operations
 
 ---
 
