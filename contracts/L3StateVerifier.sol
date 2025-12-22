@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "./interfaces/IL3Bridge.sol";
 
 /**
@@ -15,8 +15,9 @@ import "./interfaces/IL3Bridge.sol";
  * - Exclusion proof verification (for fraud proofs)
  * - Batch verification for gas efficiency
  * - Sparse Merkle tree support for efficient updates
+ * - FIX I-02: Two-step ownership transfer via Ownable2Step
  */
-contract L3StateVerifier is Ownable {
+contract L3StateVerifier is Ownable2Step {
     // ============ Constants ============
 
     /// @notice Maximum tree depth (supports 2^32 disputes)

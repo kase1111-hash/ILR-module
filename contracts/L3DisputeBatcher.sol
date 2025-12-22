@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "./interfaces/IL3Bridge.sol";
 import "./interfaces/IILRM.sol";
 
@@ -16,8 +16,9 @@ import "./interfaces/IILRM.sol";
  * - Aggregate settlements for batch processing
  * - Gas-efficient batch operations
  * - Automatic batch triggers based on size/time
+ * - FIX I-02: Two-step ownership transfer via Ownable2Step
  */
-contract L3DisputeBatcher is ReentrancyGuard, Ownable {
+contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
     // ============ Constants ============
 
     /// @notice Maximum disputes per batch
