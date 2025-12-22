@@ -25,6 +25,10 @@ contract L3StateVerifier is Ownable {
     /// @notice Empty leaf value
     bytes32 public constant EMPTY_LEAF = bytes32(0);
 
+    /// @notice FIX L-03: Maximum batch size for verification
+    /// @dev Prevents gas limit issues with large batches
+    uint256 public constant MAX_BATCH_VERIFY_SIZE = 50;
+
     // ============ State Variables ============
 
     /// @notice L3 Bridge contract
@@ -148,6 +152,8 @@ contract L3StateVerifier is Ownable {
         bytes32[] calldata proofs,
         uint256 proofDepth
     ) external returns (bool valid) {
+        // FIX L-03: Limit batch size to prevent gas limit issues
+        require(states.length <= MAX_BATCH_VERIFY_SIZE, "Batch size exceeds maximum");
         require(states.length == leafIndices.length, "Length mismatch");
         require(proofs.length == states.length * proofDepth, "Invalid proofs length");
 
