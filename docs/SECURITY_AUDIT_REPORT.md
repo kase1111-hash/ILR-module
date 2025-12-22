@@ -17,7 +17,7 @@ This security audit identified **3 critical**, **4 high**, **5 medium**, and **3
 |----------|-------|-------|
 | Critical | 3 | 3 ✓ |
 | High | 4 | 4 ✓ |
-| Medium | 5 | 3 ✓ |
+| Medium | 5 | 5 ✓ |
 | Low | 3 | 0 (by design) |
 
 ---
@@ -178,56 +178,47 @@ function emergencyWithdrawETH(address to, uint256 amount) external onlyOwner non
 ### M-02: pendingSettlementsCount Never Updated
 
 **File:** `L3Bridge.sol:102`
-**Status:** ⚠️ Known Issue
+**Status:** ✅ Fixed
 
 **Description:**
-The `pendingSettlementsCount` state variable is declared but never modified. `getPendingSettlementsCount()` always returns 0.
+The `pendingSettlementsCount` state variable was declared but never modified.
 
-**Impact:**
-Low - view function returns incorrect data but doesn't affect core logic.
-
-**Recommendation:**
-Remove unused variable or implement tracking if needed.
+**Fix Applied:**
+- Increment counter in `bridgeDisputeToL3()` when dispute is bridged
+- Decrement counter in `_processSettlement()` when dispute is settled
+- Counter now accurately tracks disputes awaiting settlement
 
 ---
 
 ### M-03: State Commitment Chain Fork Risk
 
 **File:** `L3Bridge.sol:258-261`
-**Status:** ⚠️ Known Risk
+**Status:** ✅ Fixed
 
 **Description:**
-Multiple state commitments can reference the same `previousRoot` if submitted before the first one finalizes, creating potential chain forks.
+Multiple state commitments could reference the same `previousRoot` if submitted before the first one finalizes, creating potential chain forks.
 
-**Current Check:**
-```solidity
-if (latestFinalizedRoot != bytes32(0)) {
-    require(commitment.previousRoot == latestFinalizedRoot, "Invalid chain");
-}
-```
-
-**Issue:**
-Before first finalization, any root can point to genesis (`bytes32(0)`).
-
-**Recommendation:**
-Add tracking of unfinalized commitments and require chaining from latest *committed* root, not just *finalized*.
+**Fix Applied:**
+- Added `latestCommittedRoot` state variable to track most recent commitment
+- Updated chain validation to check against `latestCommittedRoot` first
+- When fraud proof succeeds, `latestCommittedRoot` resets to allow valid rebuild
+- Prevents fork attacks by enforcing linear commitment chain
 
 ---
 
 ### M-04: Unbounded Credential Array Growth
 
 **File:** `DIDRegistry.sol:341-358`
-**Status:** ⚠️ Known Issue
+**Status:** ✅ Fixed
 
 **Description:**
-Revoked credentials remain in the `_didCredentials[did]` array. Over time, this grows unboundedly.
+Revoked credentials remained in the `_didCredentials[did]` array, causing unbounded growth.
 
-**Impact:**
-- Increased gas costs for `_updateSybilScore()` (iterates up to 50 credentials)
-- Storage bloat
-
-**Recommendation:**
-Consider implementing credential cleanup or using a more efficient data structure.
+**Fix Applied:**
+- Added `cleanupCredentials(did)` function to remove revoked/expired credentials
+- Uses swap-and-pop pattern for gas-efficient removal
+- Added `getActiveCredentialCount(did)` view function
+- Users or protocols can periodically call cleanup to prevent bloat
 
 ---
 

@@ -98,8 +98,13 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable {
     /// @notice Total processed settlements
     uint256 public totalSettlements;
 
-    /// @notice Pending settlements count
+    /// @notice Pending settlements count (bridged but not yet settled)
+    /// @dev FIX M-02: Now properly tracked when disputes are bridged/settled
     uint256 public pendingSettlementsCount;
+
+    /// @notice Latest committed (but possibly unfinalized) state root
+    /// @dev FIX M-03: Tracks latest commitment to prevent chain forks
+    bytes32 public latestCommittedRoot;
 
     /// @notice Challenger bonds
     mapping(address => uint256) public challengerBonds;
@@ -168,6 +173,8 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable {
         _bridgedDisputes[l2Id] = message;
 
         totalBridgedDisputes++;
+        // FIX M-02: Track pending (unsettled) disputes
+        pendingSettlementsCount++;
 
         emit DisputeBridgedToL3(l2Id, l3DisputeId, message.initiator, message.stakeAmount);
     }
@@ -227,6 +234,10 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable {
         // Mark as settled
         _settledDisputes[l2Id] = true;
         totalSettlements++;
+        // FIX M-02: Decrement pending count when settled
+        if (pendingSettlementsCount > 0) {
+            pendingSettlementsCount--;
+        }
 
         emit DisputeSettledFromL3(
             l2Id,
@@ -255,10 +266,16 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable {
             revert StateRootAlreadyCommitted(root);
         }
 
-        // Verify chain integrity (except for genesis)
-        if (latestFinalizedRoot != bytes32(0)) {
-            require(commitment.previousRoot == latestFinalizedRoot, "Invalid chain");
+        // FIX M-03: Verify chain integrity against latest COMMITTED root (not just finalized)
+        // This prevents forks where multiple commitments point to the same previousRoot
+        if (latestCommittedRoot != bytes32(0)) {
+            // Must chain from the latest committed root
+            require(commitment.previousRoot == latestCommittedRoot, "Invalid chain: must reference latest committed root");
+        } else if (latestFinalizedRoot != bytes32(0)) {
+            // If no pending commitments, chain from latest finalized
+            require(commitment.previousRoot == latestFinalizedRoot, "Invalid chain: must reference latest finalized root");
         }
+        // else: genesis case - no previous root required
 
         // Verify sequencer signature
         bytes32 messageHash = keccak256(abi.encodePacked(
@@ -278,6 +295,8 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable {
         // Store commitment
         _stateCommitments[root] = commitment;
         _commitmentTimestamps[root] = block.timestamp;
+        // FIX M-03: Track latest committed root for chain integrity
+        latestCommittedRoot = root;
 
         emit StateCommitmentSubmitted(
             root,
@@ -382,6 +401,12 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable {
         // Valid fraud proof!
         // Mark state as challenged
         _activeChallenges[claimedRoot] = msg.sender;
+
+        // FIX M-03: Reset latestCommittedRoot to the challenged state's previous root
+        // This allows the chain to be rebuilt from a valid point
+        if (latestCommittedRoot == claimedRoot) {
+            latestCommittedRoot = _stateCommitments[claimedRoot].previousRoot;
+        }
 
         emit FraudProofSubmitted(claimedRoot, proof.disputeId, msg.sender);
 
