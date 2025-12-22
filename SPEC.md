@@ -1,6 +1,6 @@
 # NatLangChain ILRM Protocol Specification
 
-**Version:** 1.4
+**Version:** 1.5
 **Last Updated:** December 22, 2025
 **Status:** Testnet Ready
 
@@ -226,6 +226,21 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 | Trusted Issuer Framework | ✅ | `DIDRegistry.sol:430-480` | With trust levels and types |
 | ILRM Integration | ✅ | `ILRM.sol:1089-1264` | DID-verified disputes |
 | Treasury Integration | ✅ | `Treasury.sol:812-1044` | DID-based subsidies |
+
+### L3 Bridge Contracts
+
+| Feature | Status | Location | Notes |
+|---------|--------|----------|-------|
+| Dispute Bridging (L2→L3) | ✅ | `L3Bridge.sol:135-165` | ILRM-authorized |
+| Settlement Processing (L3→L2) | ✅ | `L3Bridge.sol:170-215` | Sequencer-signed |
+| Batch Settlements | ✅ | `L3Bridge.sol:185-195` | Up to 100 per batch |
+| State Commitment | ✅ | `L3Bridge.sol:220-275` | With challenge period |
+| State Finalization | ✅ | `L3Bridge.sol:280-310` | After 7-day period |
+| Fraud Proof System | ✅ | `L3Bridge.sol:315-380` | With challenger bonds |
+| Merkle Proof Verification | ✅ | `L3StateVerifier.sol:55-110` | Sparse tree support |
+| Batch Verification | ✅ | `L3StateVerifier.sol:115-160` | Gas-efficient |
+| Dispute Queue | ✅ | `L3DisputeBatcher.sol:75-130` | Auto-trigger |
+| Settlement Queue | ✅ | `L3DisputeBatcher.sol:135-160` | Authorized submitters |
 
 ### Protocol Safety Invariants
 
@@ -494,10 +509,47 @@ The following features are documented in the project documentation but not yet i
 - Configurable minimum sybil score requirements
 
 #### 4.3 L3/App-Specific Rollups (NatLangChain-Roadmap.md)
-**Status:** ❌ Not Implemented
+**Status:** ✅ IMPLEMENTED
 **Source:** `NatLangChain-Roadmap.md:162`
 
-**Description:** High-throughput dispute handling via dedicated rollups for IP disputes.
+**Description:** High-throughput dispute handling via dedicated L3 rollup with optimistic state commitments and fraud proofs.
+
+**Implementation:**
+- Bridge Interface: `contracts/interfaces/IL3Bridge.sol`
+- Bridge Contract: `contracts/L3Bridge.sol`
+- State Verifier: `contracts/L3StateVerifier.sol`
+- Dispute Batcher: `contracts/L3DisputeBatcher.sol`
+
+**Architecture:**
+```
+L2 (Arbitrum/Optimism)          L3 (App-Specific Rollup)
+┌─────────────────┐             ┌─────────────────┐
+│      ILRM       │             │    L3 ILRM      │
+│  (Stakes, NFTs) │             │  (High Speed)   │
+└────────┬────────┘             └────────▲────────┘
+         │                               │
+         ▼                               │
+┌─────────────────┐             ┌────────┴────────┐
+│    L3Bridge     │◄───────────►│   L3 Sequencer  │
+│ (State Commits) │             │   (Batching)    │
+└─────────────────┘             └─────────────────┘
+```
+
+**Features Implemented:**
+- Dispute bridging from L2 to L3 (`bridgeDisputeToL3`)
+- State commitment with sequencer signatures
+- 7-day challenge period (configurable)
+- Merkle proof verification for dispute states
+- Fraud proof system with challenger bonds
+- Batch settlement processing (up to 100 per batch)
+- L3DisputeBatcher for queue management with auto-trigger
+- Sparse Merkle tree support for efficient updates
+
+**Security Model:**
+- Optimistic rollup: State assumed valid unless challenged
+- Challenger bond: 0.1 ETH minimum to prevent spam
+- Fraud reward: 50% of bond for valid challenges
+- State chain integrity: Each commitment links to previous root
 
 ### Category 5: Treasury Enhancements (Low Priority)
 
