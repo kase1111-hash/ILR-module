@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./interfaces/IIdentityVerifier.sol";
 
@@ -22,7 +22,7 @@ import "./interfaces/IIdentityVerifier.sol";
  * - Basic verification: ~200,000 gas
  * - With storage updates: ~220,000 gas
  */
-contract IdentityVerifier is IIdentityVerifier, ReentrancyGuard, Ownable {
+contract IdentityVerifier is IIdentityVerifier, ReentrancyGuard, Ownable2Step {
     // ============ Constants ============
 
     /// @notice Scalar field size for BN254 curve

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "./interfaces/IComplianceEscrow.sol";
@@ -25,7 +25,7 @@ import "./interfaces/IComplianceEscrow.sol";
  * 5. Off-chain coordinator reconstructs key and decrypts data
  * 6. Reconstruction is recorded on-chain for audit
  */
-contract ComplianceEscrow is IComplianceEscrow, ReentrancyGuard, Pausable, Ownable {
+contract ComplianceEscrow is IComplianceEscrow, ReentrancyGuard, Pausable, Ownable2Step {
     // ============ Constants ============
 
     /// @notice Maximum share holders per escrow

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
@@ -28,7 +28,7 @@ import "./interfaces/IBatchQueue.sol";
  * - Transactions can be cancelled (if enabled)
  * - Expired transactions are automatically cleaned
  */
-contract BatchQueue is IBatchQueue, Ownable, ReentrancyGuard, Pausable {
+contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
     using SafeERC20 for IERC20;
 
     // ============ Constants ============

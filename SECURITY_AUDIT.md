@@ -13,8 +13,8 @@
 |----------|-------|--------|
 | 🔴 Critical | 2 | ✅ ALL FIXED |
 | 🟠 High | 5 | ✅ ALL FIXED |
-| 🟡 Medium | 9 | ✅ ALL FIXED |
-| 🟢 Low | 8 | ✅ ALL FIXED |
+| 🟡 Medium | 10 | ✅ ALL FIXED |
+| 🟢 Low | 14 | ✅ ALL FIXED |
 | ℹ️ Informational | 4 | ✅ ALL FIXED |
 
 **Overall Assessment:** The codebase demonstrates solid understanding of security patterns (ReentrancyGuard, SafeERC20, Pausable, access control). All critical and high severity issues have been addressed.
@@ -49,6 +49,18 @@
 **Low:**
 - ✅ **L-NEW-01:** Oracle.sol upgraded to Ownable2Step (consistent with I-02 fix)
 - ✅ **L-NEW-02:** AssetRegistry.sol upgraded to Ownable2Step (consistent with I-02 fix)
+
+### V1.0 Final Sweep (December 22, 2025)
+**Medium:**
+- ✅ **M-FINAL-01:** MultiPartyILRM.counterPropose now applies MAX_TIME_EXTENSION check
+
+**Low (Ownable2Step Consistency - All contracts now use two-step ownership):**
+- ✅ **L-FINAL-01:** FIDOVerifier.sol upgraded to Ownable2Step
+- ✅ **L-FINAL-02:** ComplianceEscrow.sol upgraded to Ownable2Step
+- ✅ **L-FINAL-03:** IdentityVerifier.sol upgraded to Ownable2Step
+- ✅ **L-FINAL-04:** MultiPartyILRM.sol upgraded to Ownable2Step
+- ✅ **L-FINAL-05:** BatchQueue.sol upgraded to Ownable2Step
+- ✅ **L-FINAL-06:** DummyTransactionGenerator.sol upgraded to Ownable2Step
 
 ---
 

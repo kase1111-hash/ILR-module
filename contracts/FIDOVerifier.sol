@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./interfaces/IFIDOVerifier.sol";
 
@@ -26,7 +26,7 @@ import "./interfaces/IFIDOVerifier.sol";
  * - Falls back to pure Solidity verification
  * - Supports both compressed and uncompressed public keys
  */
-contract FIDOVerifier is IFIDOVerifier, Ownable, ReentrancyGuard {
+contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
     // ============ Constants ============
 
     /// @notice RIP-7212 P256VERIFY precompile address

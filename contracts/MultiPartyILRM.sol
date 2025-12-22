@@ -5,7 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "./interfaces/IMultiPartyILRM.sol";
 import "./interfaces/IOracle.sol";
 import "./interfaces/IAssetRegistry.sol";
@@ -29,7 +29,7 @@ import "./interfaces/IAssetRegistry.sol";
  * - Quorum required for acceptance
  * - Proportional burns on timeout
  */
-contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable {
+contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2Step {
     using SafeERC20 for IERC20;
 
     // ============ Constants ============
@@ -60,6 +60,9 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable {
 
     /// @notice Basis points denominator
     uint256 public constant BPS_DENOMINATOR = 10000;
+
+    /// @notice FIX M-FINAL-01: Maximum time extension to prevent indefinite delays
+    uint256 public constant MAX_TIME_EXTENSION = 3 days;
 
     // ============ State Variables ============
 
@@ -421,8 +424,11 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable {
             _partyInfo[disputeId][parties[i]].hasRejected = false;
         }
 
-        // Extend timeout
-        d.startTime += 1 days;
+        // FIX M-FINAL-01: Extend timeout only if within MAX_TIME_EXTENSION
+        uint256 currentExtension = d.counterCount * 1 days;
+        if (currentExtension <= MAX_TIME_EXTENSION) {
+            d.startTime += 1 days;
+        }
     }
 
     /**
