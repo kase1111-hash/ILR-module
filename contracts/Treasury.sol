@@ -982,7 +982,9 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
         // Check treasury balance
         uint256 balance = token.balanceOf(address(this));
         if (balance < subsidyAmount + minReserve) {
-            revert InsufficientTreasuryBalance(balance - minReserve, subsidyAmount);
+            // FIX: Prevent underflow in error message when balance < minReserve
+            uint256 available = balance > minReserve ? balance - minReserve : 0;
+            revert InsufficientTreasuryBalance(available, subsidyAmount);
         }
 
         // Update state

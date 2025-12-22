@@ -1243,8 +1243,9 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable {
      * @param _participant Address to verify
      */
     function _verifyDIDRequirement(address _participant) internal view {
-        if (!didRequired && minDIDSybilScore == 0) {
-            return; // DID not required
+        // FIX: If DID is not required, skip all validation
+        if (!didRequired) {
+            return;
         }
 
         if (!didRegistry.hasDID(_participant)) {

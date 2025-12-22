@@ -158,7 +158,11 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable {
     /**
      * @inheritdoc IDIDRegistry
      */
-    function suspendDID(bytes32 did, string calldata) external override nonReentrant {
+    function suspendDID(bytes32 did, string calldata) external override nonReentrant whenNotPaused {
+        // FIX: Check DID exists before _requireController (which only checks msg.sender)
+        if (_didDocuments[did].controller == address(0)) {
+            revert DIDNotFound(did);
+        }
         _requireController(did);
 
         DIDStatus oldStatus = _didDocuments[did].status;
@@ -173,7 +177,11 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable {
     /**
      * @inheritdoc IDIDRegistry
      */
-    function reactivateDID(bytes32 did) external override nonReentrant {
+    function reactivateDID(bytes32 did) external override nonReentrant whenNotPaused {
+        // FIX: Check DID exists
+        if (_didDocuments[did].controller == address(0)) {
+            revert DIDNotFound(did);
+        }
         _requireController(did);
 
         DIDStatus oldStatus = _didDocuments[did].status;
@@ -188,7 +196,11 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable {
     /**
      * @inheritdoc IDIDRegistry
      */
-    function revokeDID(bytes32 did, string calldata) external override nonReentrant {
+    function revokeDID(bytes32 did, string calldata) external override nonReentrant whenNotPaused {
+        // FIX: Check DID exists
+        if (_didDocuments[did].controller == address(0)) {
+            revert DIDNotFound(did);
+        }
         _requireController(did);
 
         DIDStatus oldStatus = _didDocuments[did].status;
@@ -417,14 +429,13 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable {
             totalWeight += cred.weight;
         }
 
-        // Normalize score to 0-100 range
-        // Score = (weightedScore / totalWeight) with diminishing returns for many credentials
+        // FIX: Properly normalize score to 0-100 range using weighted average
         if (totalWeight > 0) {
-            // Base score from weighted average
-            score = weightedScore;
+            // Compute weighted average: (sum of contributions * 100) / totalWeight
+            // This normalizes to a 0-100 scale based on average trust level
+            score = (weightedScore * 100) / totalWeight;
 
-            // Apply diminishing returns: score = 100 * (1 - e^(-score/50))
-            // Approximated as: min(score, 100)
+            // Cap at maximum score
             if (score > MAX_SYBIL_SCORE) {
                 score = MAX_SYBIL_SCORE;
             }

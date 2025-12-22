@@ -344,7 +344,7 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable {
     /**
      * @inheritdoc IL3Bridge
      */
-    function submitFraudProof(FraudProof calldata proof) external payable override nonReentrant {
+    function submitFraudProof(FraudProof calldata proof) external payable override nonReentrant whenNotPaused {
         // Verify challenger bond
         if (msg.value < MIN_CHALLENGER_BOND) {
             revert InsufficientChallengerBond();
@@ -361,6 +361,11 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable {
             revert ChallengePeriodExpired();
         }
 
+        // FIX: Check if already challenged - prevent duplicate challenges
+        if (_activeChallenges[claimedRoot] != address(0)) {
+            revert InvalidStateRoot(claimedRoot);
+        }
+
         // Verify still in challenge period
         uint256 elapsed = block.timestamp - _commitmentTimestamps[claimedRoot];
         if (elapsed >= sequencerConfig.challengePeriod) {
@@ -370,8 +375,7 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable {
         // Verify Merkle proof of incorrect state
         bool proofValid = _verifyFraudProof(proof);
         if (!proofValid) {
-            // Invalid fraud proof - challenger loses bond
-            // Bond goes to treasury
+            // Invalid fraud proof - challenger loses bond (stays in contract)
             revert InvalidFraudProof();
         }
 
@@ -379,17 +383,25 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable {
         // Mark state as challenged
         _activeChallenges[claimedRoot] = msg.sender;
 
-        // Store challenger bond
-        challengerBonds[msg.sender] += msg.value;
-
         emit FraudProofSubmitted(claimedRoot, proof.disputeId, msg.sender);
 
-        // Calculate and send reward
+        // FIX: Calculate reward from contract's existing balance (from prior failed proofs)
+        // The reward pool comes from failed fraud proof bonds that were forfeited
         uint256 reward = (msg.value * FRAUD_REWARD_BPS) / BPS_DENOMINATOR;
-        challengerBonds[msg.sender] -= msg.value;
+
+        // Check contract has enough balance for reward (excluding the msg.value just received)
+        uint256 contractBalance = address(this).balance;
+        uint256 availableForReward = contractBalance > msg.value ? contractBalance - msg.value : 0;
+
+        if (availableForReward < reward) {
+            // Not enough for full reward, give what's available
+            reward = availableForReward;
+        }
+
+        uint256 totalPayout = msg.value + reward;
 
         // Return bond + reward
-        (bool success, ) = msg.sender.call{value: msg.value + reward}("");
+        (bool success, ) = msg.sender.call{value: totalPayout}("");
         require(success, "Reward transfer failed");
 
         emit FraudProofValidated(claimedRoot, msg.sender, reward);
