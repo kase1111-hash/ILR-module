@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "./interfaces/IDummyTransactionGenerator.sol";
@@ -28,7 +28,7 @@ import "./interfaces/IDummyTransactionGenerator.sol";
  * - Maximum spend limits per period
  * - Owner can pause/disable at any time
  */
-contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable, ReentrancyGuard, Pausable {
+contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, ReentrancyGuard, Pausable {
     // ============ Constants ============
 
     /// @notice Minimum generation interval (1 minute)
