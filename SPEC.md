@@ -1,6 +1,6 @@
 # NatLangChain ILRM Protocol Specification
 
-**Version:** 1.3
+**Version:** 1.4
 **Last Updated:** December 22, 2025
 **Status:** Testnet Ready
 
@@ -209,6 +209,23 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 | Dispute Asset Unfreezing | ✅ | `AssetRegistry.sol:248-269` | With outcome data |
 | Fallback License Application | ✅ | `AssetRegistry.sol:274-290` | Updates license terms |
 | Max Assets Per Owner | ✅ | `AssetRegistry.sol:23` | 100 limit (DoS prevention) |
+
+### DID Registry Contract
+
+| Feature | Status | Location | Notes |
+|---------|--------|----------|-------|
+| DID Registration | ✅ | `DIDRegistry.sol:95-115` | One DID per address |
+| DID Document Management | ✅ | `DIDRegistry.sol:120-145` | ERC-725 compatible |
+| Controller Transfer | ✅ | `DIDRegistry.sol:150-165` | Ownership transfer |
+| DID Status Management | ✅ | `DIDRegistry.sol:170-200` | Active/Suspended/Revoked |
+| Delegate Management | ✅ | `DIDRegistry.sol:210-260` | Max 10 delegates |
+| Credential Issuance | ✅ | `DIDRegistry.sol:270-320` | With weight and expiry |
+| Credential Revocation | ✅ | `DIDRegistry.sol:325-350` | By issuer or controller |
+| Credential Verification | ✅ | `DIDRegistry.sol:355-370` | Checks expiry and revocation |
+| Sybil Score Calculation | ✅ | `DIDRegistry.sol:380-420` | Based on credentials and trust |
+| Trusted Issuer Framework | ✅ | `DIDRegistry.sol:430-480` | With trust levels and types |
+| ILRM Integration | ✅ | `ILRM.sol:1089-1264` | DID-verified disputes |
+| Treasury Integration | ✅ | `Treasury.sol:812-1044` | DID-based subsidies |
 
 ### Protocol Safety Invariants
 
@@ -452,10 +469,29 @@ The following features are documented in the project documentation but not yet i
 - Quorum-based acceptance with real-time tracking
 
 #### 4.2 Decentralized Identity (DID) Integration (NatLangChain-Roadmap.md)
-**Status:** ❌ Not Implemented
+**Status:** ✅ IMPLEMENTED
 **Source:** `NatLangChain-Roadmap.md:105`
 
-**Description:** Sybil-resistant participation via DID standards. Integrate with existing DID frameworks (e.g., ERC-725, Verifiable Credentials).
+**Description:** Sybil-resistant participation via DID standards. ERC-725 compatible identity management with Verifiable Credentials support.
+
+**Implementation:**
+- Contract: `contracts/DIDRegistry.sol`
+- Interface: `contracts/interfaces/IDIDRegistry.sol`
+- ILRM Integration: `contracts/ILRM.sol:1089-1264`
+- Treasury Integration: `contracts/Treasury.sol:812-1044`
+
+**Features Implemented:**
+- DID Format: `did:nlc:<chain-id>:<address>` (ERC-725 compatible)
+- One DID per address with controller management
+- Delegate support for key rotation (max 10 delegates per DID)
+- Verifiable Credentials with trusted issuer framework
+- Sybil score calculation based on credential weights and issuer trust levels
+- 6 attestation types: Identity, KYC, Reputation, Governance, Professional, Custom
+- 5 member role types for issuers: User, DAO, Auditor, Legal, Regulator
+- DID-verified dispute initiation (`initiateBreachDisputeWithDID`)
+- DID-verified stake deposit (`depositStakeWithDID`)
+- DID-based subsidy eligibility with bonus multipliers in Treasury
+- Configurable minimum sybil score requirements
 
 #### 4.3 L3/App-Specific Rollups (NatLangChain-Roadmap.md)
 **Status:** ❌ Not Implemented

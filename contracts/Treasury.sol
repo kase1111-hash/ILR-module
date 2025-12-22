@@ -7,6 +7,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/access/Ownable.sol";
 import "./interfaces/IILRM.sol";
+import "./interfaces/IDIDRegistry.sol";
 
 /**
  * @title NatLangChainTreasury
@@ -110,6 +111,24 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
     uint256 public tier2MultiplierBps;
     uint256 public tier3MultiplierBps;
 
+    // ============ DID Integration Variables ============
+
+    /// @notice Optional DID registry for sybil-resistant subsidies
+    IDIDRegistry public didRegistry;
+
+    /// @notice Whether DID verification is required for subsidies
+    bool public didRequiredForSubsidy;
+
+    /// @notice Minimum sybil score for subsidy eligibility
+    uint256 public minDIDSybilScoreForSubsidy;
+
+    /// @notice Subsidy bonus multiplier for high sybil scores (in basis points)
+    /// @dev e.g., 1500 = 15% bonus for participants with high sybil scores
+    uint256 public didBonusMultiplierBps;
+
+    /// @notice Sybil score threshold for bonus eligibility
+    uint256 public didBonusThreshold;
+
     // ============ Events ============
 
     /// @notice Emitted when subsidy is granted
@@ -171,6 +190,19 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
     error NotILRM(address caller);
     error NotCounterparty(address caller, address expected);
     error InvalidAddress();
+    error DIDRequirementNotMet(address participant);
+    error InsufficientDIDSybilScore(address participant, uint256 required, uint256 actual);
+
+    /// @notice Emitted when DID registry is set
+    event DIDRegistrySet(address indexed registry);
+
+    /// @notice Emitted when DID subsidy configuration is updated
+    event DIDSubsidyConfigUpdated(
+        bool required,
+        uint256 minScore,
+        uint256 bonusMultiplierBps,
+        uint256 bonusThreshold
+    );
 
     // ============ Constructor ============
 
@@ -775,5 +807,239 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
      */
     function unpause() external onlyOwner {
         _unpause();
+    }
+
+    // ============ DID Integration Functions ============
+
+    /**
+     * @notice Set the DID registry contract
+     * @dev Only owner can set; address(0) disables DID verification
+     * @param _registry The DID registry contract address
+     */
+    function setDIDRegistry(address _registry) external onlyOwner {
+        didRegistry = IDIDRegistry(_registry);
+        emit DIDRegistrySet(_registry);
+    }
+
+    /**
+     * @notice Configure DID-based subsidy requirements
+     * @dev DID verification adds sybil resistance to subsidies
+     * @param _required Whether DID is required for subsidies
+     * @param _minScore Minimum sybil score required (0-100)
+     * @param _bonusMultiplierBps Bonus multiplier for high sybil scores (e.g., 1500 = 15%)
+     * @param _bonusThreshold Sybil score threshold for bonus eligibility
+     */
+    function setDIDSubsidyConfig(
+        bool _required,
+        uint256 _minScore,
+        uint256 _bonusMultiplierBps,
+        uint256 _bonusThreshold
+    ) external onlyOwner {
+        didRequiredForSubsidy = _required;
+        minDIDSybilScoreForSubsidy = _minScore;
+        didBonusMultiplierBps = _bonusMultiplierBps;
+        didBonusThreshold = _bonusThreshold;
+
+        emit DIDSubsidyConfigUpdated(_required, _minScore, _bonusMultiplierBps, _bonusThreshold);
+    }
+
+    /**
+     * @notice Check if participant meets DID requirements for subsidy
+     * @param participant The participant to check
+     * @return meetsRequirement Whether they meet DID requirements
+     * @return sybilScore Their sybil score (0 if no DID)
+     * @return eligibleForBonus Whether they qualify for bonus multiplier
+     */
+    function checkDIDSubsidyEligibility(address participant) public view returns (
+        bool meetsRequirement,
+        uint256 sybilScore,
+        bool eligibleForBonus
+    ) {
+        if (address(didRegistry) == address(0)) {
+            // No DID registry set
+            return (!didRequiredForSubsidy, 0, false);
+        }
+
+        if (!didRegistry.hasDID(participant)) {
+            // No DID registered
+            return (!didRequiredForSubsidy, 0, false);
+        }
+
+        bytes32 did = didRegistry.addressToDID(participant);
+        IDIDRegistry.DIDDocument memory doc = didRegistry.getDIDDocument(did);
+
+        // Must have active DID
+        if (doc.status != IDIDRegistry.DIDStatus.Active) {
+            return (false, 0, false);
+        }
+
+        sybilScore = doc.sybilScore;
+        meetsRequirement = sybilScore >= minDIDSybilScoreForSubsidy;
+        eligibleForBonus = sybilScore >= didBonusThreshold && didBonusMultiplierBps > 0;
+    }
+
+    /**
+     * @notice Calculate DID-adjusted subsidy amount
+     * @dev Applies DID bonus multiplier if eligible
+     * @param baseAmount The base subsidy amount
+     * @param participant The participant requesting subsidy
+     * @return adjustedAmount The adjusted amount with DID bonus
+     */
+    function calculateDIDAdjustedSubsidy(
+        uint256 baseAmount,
+        address participant
+    ) public view returns (uint256 adjustedAmount) {
+        (, uint256 sybilScore, bool eligibleForBonus) = checkDIDSubsidyEligibility(participant);
+
+        if (eligibleForBonus && sybilScore >= didBonusThreshold) {
+            // Apply bonus: baseAmount * (1 + bonusMultiplier/10000)
+            adjustedAmount = baseAmount + (baseAmount * didBonusMultiplierBps) / BPS_DENOMINATOR;
+        } else {
+            adjustedAmount = baseAmount;
+        }
+    }
+
+    /**
+     * @notice Request subsidy with DID verification
+     * @dev Enhanced subsidy request with sybil resistance
+     * @param disputeId The dispute ID
+     * @param stakeNeeded Amount of stake required
+     * @param participant The participant requesting
+     * @return subsidyAmount The final subsidy amount (may include DID bonus)
+     */
+    function requestSubsidyWithDID(
+        uint256 disputeId,
+        uint256 stakeNeeded,
+        address participant
+    ) external nonReentrant whenNotPaused returns (uint256 subsidyAmount) {
+        // Verify caller is the participant
+        if (msg.sender != participant) {
+            revert NotCounterparty(msg.sender, participant);
+        }
+
+        // Check DID requirements
+        if (address(didRegistry) != address(0) && didRequiredForSubsidy) {
+            (bool meetsRequirement, uint256 sybilScore, ) = checkDIDSubsidyEligibility(participant);
+
+            if (!meetsRequirement) {
+                if (!didRegistry.hasDID(participant)) {
+                    revert DIDRequirementNotMet(participant);
+                }
+                revert InsufficientDIDSybilScore(participant, minDIDSybilScoreForSubsidy, sybilScore);
+            }
+        }
+
+        // Validate request
+        if (disputeSubsidized[disputeId]) {
+            revert DisputeAlreadySubsidized(disputeId);
+        }
+        if (stakeNeeded == 0) revert ZeroAmount();
+
+        // ILRM must be set
+        if (ilrm == address(0)) {
+            revert InvalidAddress();
+        }
+
+        // Verify participant is the counterparty
+        (
+            address initiator,
+            address counterparty,
+            ,
+            uint256 counterpartyStake,
+            ,,,,,
+            bool resolved,
+            ,,
+        ) = IILRM(ilrm).disputes(disputeId);
+
+        require(!resolved, "Dispute already resolved");
+        require(counterpartyStake == 0, "Counterparty already staked");
+
+        if (participant != counterparty) {
+            revert NotCounterparty(participant, counterparty);
+        }
+        if (participant == initiator) {
+            revert NotCounterparty(participant, counterparty);
+        }
+
+        // Check harassment score
+        uint256 effectiveScore = getEffectiveHarassmentScore(participant);
+        if (effectiveScore >= HARASSMENT_THRESHOLD) {
+            revert ParticipantFlaggedForAbuse(participant, effectiveScore);
+        }
+
+        // Calculate base subsidy
+        uint256 baseSubsidy = _calculateBaseSubsidy(stakeNeeded, participant);
+
+        // Apply DID bonus if eligible
+        subsidyAmount = calculateDIDAdjustedSubsidy(baseSubsidy, participant);
+
+        // Cap at max per dispute
+        uint256 effectiveCap = getEffectiveMaxPerParticipant();
+        if (subsidyAmount > effectiveCap) {
+            subsidyAmount = effectiveCap;
+        }
+
+        // Check treasury balance
+        uint256 balance = token.balanceOf(address(this));
+        if (balance < subsidyAmount + minReserve) {
+            revert InsufficientTreasuryBalance(balance - minReserve, subsidyAmount);
+        }
+
+        // Update state
+        disputeSubsidized[disputeId] = true;
+        disputeSubsidyRecipient[disputeId] = participant;
+        _updateParticipantWindow(participant, subsidyAmount);
+        totalSubsidiesDistributed += subsidyAmount;
+
+        // Transfer subsidy
+        token.safeTransfer(participant, subsidyAmount);
+
+        emit SubsidyFunded(participant, disputeId, subsidyAmount);
+    }
+
+    /**
+     * @notice Internal function to calculate base subsidy amount
+     */
+    function _calculateBaseSubsidy(uint256 stakeNeeded, address participant) internal view returns (uint256) {
+        uint256 effectiveCap = getEffectiveMaxPerParticipant();
+        uint256 subsidyAmount = stakeNeeded;
+
+        // Apply per-dispute cap
+        if (subsidyAmount > maxPerDispute) {
+            subsidyAmount = maxPerDispute;
+        }
+
+        // Check participant window
+        if (block.timestamp > participantWindowStart[participant] + windowDuration) {
+            // Window expired, reset
+            if (subsidyAmount > effectiveCap) {
+                subsidyAmount = effectiveCap;
+            }
+        } else {
+            uint256 available = effectiveCap > participantSubsidyUsed[participant]
+                ? effectiveCap - participantSubsidyUsed[participant]
+                : 0;
+            if (subsidyAmount > available) {
+                subsidyAmount = available;
+            }
+        }
+
+        // Apply tiered subsidy multiplier
+        (uint256 multiplier, ) = getSubsidyMultiplier(participant);
+        subsidyAmount = (subsidyAmount * multiplier) / BPS_DENOMINATOR;
+
+        return subsidyAmount;
+    }
+
+    /**
+     * @notice Update participant's subsidy usage window
+     */
+    function _updateParticipantWindow(address participant, uint256 amount) internal {
+        if (block.timestamp > participantWindowStart[participant] + windowDuration) {
+            participantWindowStart[participant] = block.timestamp;
+            participantSubsidyUsed[participant] = amount;
+        } else {
+            participantSubsidyUsed[participant] += amount;
+        }
     }
 }

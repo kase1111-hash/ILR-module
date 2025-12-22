@@ -12,6 +12,7 @@ import "./interfaces/IAssetRegistry.sol";
 import "./interfaces/IIdentityVerifier.sol";
 import "./interfaces/IComplianceEscrow.sol";
 import "./interfaces/IFIDOVerifier.sol";
+import "./interfaces/IDIDRegistry.sol";
 
 /**
  * @title ILRM - IP & Licensing Reconciliation Module
@@ -112,6 +113,42 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable {
 
     /// @notice Used FIDO challenges: challengeHash => used
     mapping(bytes32 => bool) private _usedFidoChallenges;
+
+    // ============ DID Integration Variables ============
+
+    /// @notice Optional DID registry for sybil-resistant identity
+    IDIDRegistry public didRegistry;
+
+    /// @notice Whether DID verification is required for dispute participation
+    bool public didRequired;
+
+    /// @notice Minimum sybil score required for dispute participation
+    uint256 public minDIDSybilScore;
+
+    /// @notice DID associated with each dispute party: disputeId => isInitiator => did
+    mapping(uint256 => mapping(bool => bytes32)) private _disputeDIDs;
+
+    /// @notice Event emitted when DID registry is set
+    event DIDRegistrySet(address indexed registry);
+
+    /// @notice Event emitted when DID requirement is changed
+    event DIDRequirementChanged(bool required, uint256 minScore);
+
+    /// @notice Event emitted when a DID is associated with a dispute
+    event DIDAssociatedWithDispute(
+        uint256 indexed disputeId,
+        bytes32 indexed did,
+        bool isInitiator
+    );
+
+    /// @notice Error for invalid DID
+    error InvalidDID(address participant);
+
+    /// @notice Error for insufficient sybil score
+    error InsufficientSybilScore(address participant, uint256 required, uint256 actual);
+
+    /// @notice Error for DID not meeting requirements
+    error DIDRequirementNotMet(address participant);
 
     // ============ Constructor ============
 
@@ -1047,5 +1084,182 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable {
                 block.chainid
             )
         );
+    }
+
+    // ============ DID Integration Functions ============
+
+    /**
+     * @notice Set the DID registry contract
+     * @dev Only owner can set; address(0) disables DID verification
+     * @param _registry The DID registry contract address
+     */
+    function setDIDRegistry(address _registry) external onlyOwner {
+        didRegistry = IDIDRegistry(_registry);
+        emit DIDRegistrySet(_registry);
+    }
+
+    /**
+     * @notice Enable or disable DID requirement for disputes
+     * @dev When enabled, parties must have a valid DID with sufficient sybil score
+     * @param _required Whether DID verification is required
+     * @param _minScore Minimum sybil score required (0-100)
+     */
+    function setDIDRequirement(bool _required, uint256 _minScore) external onlyOwner {
+        didRequired = _required;
+        minDIDSybilScore = _minScore;
+        emit DIDRequirementChanged(_required, _minScore);
+    }
+
+    /**
+     * @notice Initiate a breach dispute with DID verification
+     * @dev Requires both parties to have valid DIDs with sufficient sybil scores
+     * @param _counterparty The opposing party
+     * @param _stakeAmount Base stake amount (may be escalated)
+     * @param _evidenceHash Hash of canonicalized evidence bundle
+     * @param _fallbackTerms Fallback license applied on timeout
+     * @return disputeId The unique dispute identifier
+     */
+    function initiateBreachDisputeWithDID(
+        address _counterparty,
+        uint256 _stakeAmount,
+        bytes32 _evidenceHash,
+        FallbackLicense calldata _fallbackTerms
+    ) external nonReentrant whenNotPaused returns (uint256 disputeId) {
+        require(address(didRegistry) != address(0), "DID registry not set");
+        require(_counterparty != address(0), "Invalid counterparty");
+        require(_counterparty != msg.sender, "Cannot dispute self");
+        require(_stakeAmount > 0, "Zero stake");
+        require(_fallbackTerms.nonExclusive, "Fallback must be non-exclusive");
+
+        // Verify initiator has valid DID with sufficient sybil score
+        _verifyDIDRequirement(msg.sender);
+
+        // Calculate escalated stake for repeat disputes
+        uint256 escalatedStake = _getEscalatedStake(msg.sender, _counterparty, _stakeAmount);
+
+        // Transfer stake from initiator
+        token.safeTransferFrom(msg.sender, address(this), escalatedStake);
+
+        disputeId = _disputeCounter++;
+        _disputes[disputeId] = Dispute({
+            initiator: msg.sender,
+            counterparty: _counterparty,
+            initiatorStake: escalatedStake,
+            counterpartyStake: 0,
+            startTime: block.timestamp,
+            evidenceHash: _evidenceHash,
+            llmProposal: "",
+            initiatorAccepted: false,
+            counterpartyAccepted: false,
+            resolved: false,
+            outcome: DisputeOutcome.Pending,
+            fallback: _fallbackTerms,
+            counterCount: 0
+        });
+
+        // Store initiator's DID
+        bytes32 initiatorDID = didRegistry.addressToDID(msg.sender);
+        _disputeDIDs[disputeId][true] = initiatorDID;
+
+        // Freeze assets via registry
+        assetRegistry.freezeAssets(disputeId, msg.sender);
+
+        // Update cooldown tracking
+        lastDisputeTime[msg.sender][_counterparty] = block.timestamp;
+
+        emit DisputeInitiated(disputeId, msg.sender, _counterparty, _evidenceHash);
+        emit DIDAssociatedWithDispute(disputeId, initiatorDID, true);
+    }
+
+    /**
+     * @notice Deposit stake for a dispute with DID verification
+     * @dev Counterparty must have valid DID with sufficient sybil score
+     * @param _disputeId The dispute ID
+     */
+    function depositStakeWithDID(uint256 _disputeId) external nonReentrant whenNotPaused {
+        require(address(didRegistry) != address(0), "DID registry not set");
+
+        Dispute storage d = _disputes[_disputeId];
+        require(msg.sender == d.counterparty, "Not counterparty");
+        require(d.counterpartyStake == 0, "Already staked");
+        require(!d.resolved, "Dispute resolved");
+        require(block.timestamp <= d.startTime + STAKE_WINDOW, "Stake window closed");
+
+        // Verify counterparty has valid DID with sufficient sybil score
+        _verifyDIDRequirement(msg.sender);
+
+        // Match initiator's stake (symmetric)
+        token.safeTransferFrom(msg.sender, address(this), d.initiatorStake);
+        d.counterpartyStake = d.initiatorStake;
+
+        // Store counterparty's DID
+        bytes32 counterpartyDID = didRegistry.addressToDID(msg.sender);
+        _disputeDIDs[_disputeId][false] = counterpartyDID;
+
+        emit StakeDeposited(_disputeId, msg.sender, d.initiatorStake);
+        emit DIDAssociatedWithDispute(_disputeId, counterpartyDID, false);
+    }
+
+    /**
+     * @notice Check if a participant meets DID requirements
+     * @param _participant Address to check
+     * @return hasDID Whether they have a DID
+     * @return did The DID identifier
+     * @return sybilScore Their sybil score
+     * @return meetsRequirement Whether they meet the minimum score
+     */
+    function checkDIDRequirement(address _participant) external view returns (
+        bool hasDID,
+        bytes32 did,
+        uint256 sybilScore,
+        bool meetsRequirement
+    ) {
+        if (address(didRegistry) == address(0)) {
+            return (false, bytes32(0), 0, !didRequired);
+        }
+
+        hasDID = didRegistry.hasDID(_participant);
+        if (!hasDID) {
+            return (false, bytes32(0), 0, !didRequired);
+        }
+
+        did = didRegistry.addressToDID(_participant);
+        sybilScore = didRegistry.getSybilScore(did);
+        meetsRequirement = sybilScore >= minDIDSybilScore;
+    }
+
+    /**
+     * @notice Get the DID associated with a party in a dispute
+     * @param _disputeId The dispute ID
+     * @param _isInitiator True for initiator, false for counterparty
+     * @return The DID identifier
+     */
+    function getDisputeDID(uint256 _disputeId, bool _isInitiator) external view returns (bytes32) {
+        return _disputeDIDs[_disputeId][_isInitiator];
+    }
+
+    /**
+     * @notice Internal function to verify DID requirement
+     * @param _participant Address to verify
+     */
+    function _verifyDIDRequirement(address _participant) internal view {
+        if (!didRequired && minDIDSybilScore == 0) {
+            return; // DID not required
+        }
+
+        if (!didRegistry.hasDID(_participant)) {
+            revert InvalidDID(_participant);
+        }
+
+        bytes32 did = didRegistry.addressToDID(_participant);
+        IDIDRegistry.DIDDocument memory doc = didRegistry.getDIDDocument(did);
+
+        if (doc.status != IDIDRegistry.DIDStatus.Active) {
+            revert InvalidDID(_participant);
+        }
+
+        if (doc.sybilScore < minDIDSybilScore) {
+            revert InsufficientSybilScore(_participant, minDIDSybilScore, doc.sybilScore);
+        }
     }
 }
