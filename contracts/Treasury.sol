@@ -5,7 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "./interfaces/IILRM.sol";
 import "./interfaces/IDIDRegistry.sol";
 
@@ -20,8 +20,9 @@ import "./interfaces/IDIDRegistry.sol";
  * - Anti-Sybil protections (single subsidy per dispute, rolling caps, reputation)
  * - Fully algorithmic - no discretionary human control
  * - FIX L-05: Pausable for emergency stops
+ * - FIX I-02: Two-step ownership transfer via Ownable2Step
  */
-contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
+contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
     using SafeERC20 for IERC20;
 
     // ============ State Variables ============

@@ -5,7 +5,7 @@ import "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "./interfaces/IILRM.sol";
 import "./interfaces/IOracle.sol";
 import "./interfaces/IAssetRegistry.sol";
@@ -25,8 +25,9 @@ import "./interfaces/IDIDRegistry.sol";
  * - Spec-compliant: Follows Protocol-Safety-Invariants.md
  * - Analytics-ready: Events for every state transition
  * - FIX L-05: Pausable for emergency stops
+ * - FIX I-02: Two-step ownership transfer via Ownable2Step
  */
-contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable {
+contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
     using SafeERC20 for IERC20;
 
     // ============ Constants (from Appendix A) ============

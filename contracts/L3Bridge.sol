@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import "./interfaces/IL3Bridge.sol";
@@ -20,6 +20,7 @@ import "./interfaces/IILRM.sol";
  * - Fraud proof system for invalid state challenges
  * - Batched settlements for gas efficiency
  * - Sequencer-based ordering with decentralization path
+ * - FIX I-02: Two-step ownership transfer via Ownable2Step
  *
  * Security Model:
  * - Challenge period allows fraud proof submission
@@ -27,7 +28,7 @@ import "./interfaces/IILRM.sol";
  * - State roots link to previous for chain integrity
  * - Sequencer signature verification
  */
-contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable {
+contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     using ECDSA for bytes32;
     using MessageHashUtils for bytes32;
 
@@ -540,6 +541,8 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable {
 
     /**
      * @notice Update ILRM contract address
+     * @dev Only callable by owner. Cannot set to zero address.
+     * @param _ilrm New ILRM contract address
      */
     function setILRM(address _ilrm) external onlyOwner {
         require(_ilrm != address(0), "Invalid ILRM");
@@ -599,6 +602,8 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable {
 
     /**
      * @notice Get bridged dispute data
+     * @param l2DisputeId The L2 dispute ID to query
+     * @return The dispute initiation message containing all bridged data
      */
     function getBridgedDispute(uint256 l2DisputeId) external view returns (DisputeInitiationMessage memory) {
         return _bridgedDisputes[l2DisputeId];
@@ -606,13 +611,17 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable {
 
     /**
      * @notice Check if dispute is settled
+     * @param l2DisputeId The L2 dispute ID to check
+     * @return True if the dispute has been settled
      */
     function isDisputeSettled(uint256 l2DisputeId) external view returns (bool) {
         return _settledDisputes[l2DisputeId];
     }
 
     /**
-     * @notice Get commitment timestamp
+     * @notice Get commitment timestamp for a state root
+     * @param stateRoot The state root to query
+     * @return The timestamp when the state was committed (0 if not committed)
      */
     function getCommitmentTimestamp(bytes32 stateRoot) external view returns (uint256) {
         return _commitmentTimestamps[stateRoot];
@@ -620,6 +629,8 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable {
 
     /**
      * @notice Get active challenge for a state root
+     * @param stateRoot The state root to query
+     * @return The address of the challenger (address(0) if no active challenge)
      */
     function getActiveChallenger(bytes32 stateRoot) external view returns (address) {
         return _activeChallenges[stateRoot];
@@ -628,26 +639,73 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable {
     // ============ Admin Functions ============
 
     /**
-     * @notice Pause the bridge
+     * @notice Pause the bridge - halts all state-changing operations
+     * @dev Only callable by owner. Use in emergency situations.
      */
     function pause() external onlyOwner {
         _pause();
     }
 
     /**
-     * @notice Unpause the bridge
+     * @notice Unpause the bridge - resumes normal operations
+     * @dev Only callable by owner.
      */
     function unpause() external onlyOwner {
         _unpause();
     }
 
     /**
-     * @notice Withdraw accumulated fees
+     * @notice Withdraw accumulated fees from failed fraud proofs
+     * @dev Only callable by owner. Cannot withdraw to zero address.
+     * @param to Recipient address
+     * @param amount Amount of ETH to withdraw
      */
     function withdrawFees(address to, uint256 amount) external onlyOwner {
         require(to != address(0), "Invalid recipient");
         (bool success, ) = to.call{value: amount}("");
         require(success, "Withdrawal failed");
+    }
+
+    // ============ Migration Helpers (FIX I-04) ============
+
+    /**
+     * @notice Get all critical state for migration to a new contract version
+     * @dev Only callable by owner. Returns state needed for migration.
+     * @return _latestFinalizedRoot Latest finalized state root
+     * @return _latestFinalizedBlock Block number of latest finalized state
+     * @return _latestCommittedRoot Latest committed (possibly unfinalized) root
+     * @return _totalBridged Total disputes bridged
+     * @return _totalSettled Total disputes settled
+     * @return _pendingCount Current pending count
+     */
+    function getMigrationState() external view onlyOwner returns (
+        bytes32 _latestFinalizedRoot,
+        uint256 _latestFinalizedBlock,
+        bytes32 _latestCommittedRoot,
+        uint256 _totalBridged,
+        uint256 _totalSettled,
+        uint256 _pendingCount
+    ) {
+        return (
+            latestFinalizedRoot,
+            latestFinalizedBlock,
+            latestCommittedRoot,
+            totalBridgedDisputes,
+            totalSettlements,
+            pendingSettlementsCount
+        );
+    }
+
+    /**
+     * @notice Deprecate this contract in favor of a new version
+     * @dev Pauses contract and emits deprecation event. Irreversible.
+     * @param newContract Address of the new contract version
+     */
+    function deprecate(address newContract) external onlyOwner {
+        require(newContract != address(0), "Invalid new contract");
+        _pause();
+        bridgeStatus = BridgeStatus.Deprecated;
+        emit BridgeStatusChanged(BridgeStatus.Active, BridgeStatus.Deprecated);
     }
 
     /// @notice Accept ETH for fraud proof rewards
