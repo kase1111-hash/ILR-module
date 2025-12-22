@@ -114,12 +114,13 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable {
 
     /**
      * @notice Queue a dispute initiation for batched bridging
+     * @dev Only authorized submitters can queue to prevent spam DoS attacks
      * @param message The dispute initiation data
      * @return position Position in current batch
      */
     function queueDisputeInitiation(
         IL3Bridge.DisputeInitiationMessage calldata message
-    ) external nonReentrant returns (uint256 position) {
+    ) external onlyAuthorizedSubmitter nonReentrant returns (uint256 position) {
         // Check batch capacity
         if (_pendingInitiations.length >= MAX_BATCH_SIZE) {
             revert BatchFull();

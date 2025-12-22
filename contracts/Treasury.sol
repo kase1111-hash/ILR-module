@@ -670,10 +670,11 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable {
 
     /**
      * @notice Emergency withdraw ETH
+     * @dev FIX: Added nonReentrant to prevent reentrancy attacks
      * @param to Recipient address
      * @param amount Amount to withdraw
      */
-    function emergencyWithdrawETH(address to, uint256 amount) external onlyOwner {
+    function emergencyWithdrawETH(address to, uint256 amount) external onlyOwner nonReentrant {
         if (to == address(0)) revert InvalidAddress();
         (bool success, ) = to.call{value: amount}("");
         require(success, "ETH transfer failed");

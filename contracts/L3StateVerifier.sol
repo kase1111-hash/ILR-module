@@ -352,9 +352,10 @@ contract L3StateVerifier is Ownable {
 
     /**
      * @notice Cache a verified proof for gas savings on repeat queries
+     * @dev Only owner can cache proofs - prevents malicious proof caching
      * @param proofHash Hash of the proof data
      */
-    function cacheVerifiedProof(bytes32 proofHash) external {
+    function cacheVerifiedProof(bytes32 proofHash) external onlyOwner {
         verifiedProofs[proofHash] = true;
     }
 
