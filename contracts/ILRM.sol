@@ -1060,7 +1060,13 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         d.initiatorAccepted = false;
         d.counterpartyAccepted = false;
         d.llmProposal = "";
-        d.startTime += 1 days;
+
+        // FIX M-NEW-01: Apply same MAX_TIME_EXTENSION check as counterPropose
+        // Prevents FIDO path from bypassing the L-01 fix
+        uint256 currentExtension = d.counterCount * 1 days;
+        if (currentExtension <= MAX_TIME_EXTENSION) {
+            d.startTime += 1 days;
+        }
 
         emit CounterProposed(_disputeId, msg.sender, d.counterCount);
     }

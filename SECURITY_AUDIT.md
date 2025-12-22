@@ -13,9 +13,9 @@
 |----------|-------|--------|
 | 🔴 Critical | 2 | ✅ ALL FIXED |
 | 🟠 High | 5 | ✅ ALL FIXED |
-| 🟡 Medium | 8 | ✅ 5 FIXED, 3 Low Priority |
-| 🟢 Low | 6 | ✅ 3 FIXED, 3 Remaining |
-| ℹ️ Informational | 4 | Best Practices |
+| 🟡 Medium | 9 | ✅ ALL FIXED |
+| 🟢 Low | 8 | ✅ ALL FIXED |
+| ℹ️ Informational | 4 | ✅ ALL FIXED |
 
 **Overall Assessment:** The codebase demonstrates solid understanding of security patterns (ReentrancyGuard, SafeERC20, Pausable, access control). All critical and high severity issues have been addressed.
 
@@ -41,6 +41,14 @@
 **Low:**
 - ✅ **L-02:** Added TreasuryWithdrawn and ILRMAuthorizationChanged events
 - ✅ **L-05:** Added Pausable pattern to ILRM and Treasury
+
+### Fresh Eyes Review (December 22, 2025)
+**Medium:**
+- ✅ **M-NEW-01:** fidoCounterPropose now applies MAX_TIME_EXTENSION check (was bypassing L-01 fix)
+
+**Low:**
+- ✅ **L-NEW-01:** Oracle.sol upgraded to Ownable2Step (consistent with I-02 fix)
+- ✅ **L-NEW-02:** AssetRegistry.sol upgraded to Ownable2Step (consistent with I-02 fix)
 
 ---
 

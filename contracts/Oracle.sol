@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
 import "./interfaces/IOracle.sol";
@@ -18,7 +18,11 @@ import "./interfaces/IILRM.sol";
  * - Signing and submitting verified proposals
  * - Ensuring proposal integrity via cryptographic signatures
  */
-contract NatLangChainOracle is IOracle, Ownable {
+/**
+ * FIX L-NEW-01: Added Ownable2Step for two-step ownership transfer
+ * Consistent with I-02 fix applied to other contracts
+ */
+contract NatLangChainOracle is IOracle, Ownable2Step {
     using ECDSA for bytes32;
     using MessageHashUtils for bytes32;
 

@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: Apache-2.0
 pragma solidity ^0.8.20;
 
-import "@openzeppelin/contracts/access/Ownable.sol";
+import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "./interfaces/IAssetRegistry.sol";
 
@@ -16,7 +16,11 @@ import "./interfaces/IAssetRegistry.sol";
  * - Freeze assets during disputes
  * - Apply fallback licenses on dispute resolution
  */
-contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable {
+/**
+ * FIX L-NEW-02: Added Ownable2Step for two-step ownership transfer
+ * Consistent with I-02 fix applied to other contracts
+ */
+contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable2Step {
     // ============ Constants ============
 
     /// @notice FIX H-04: Maximum assets per owner to prevent DoS in freeze/unfreeze loops
