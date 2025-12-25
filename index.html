@@ -3,6 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
   <title>ILRM - IP & Licensing Reconciliation Module</title>
   <style>
     :root {
@@ -487,12 +488,19 @@
     </div>
 
     <footer>
-      <p>ILRM Protocol v1.1 | <a href="https://github.com/kase1111-hash/ILR-module" target="_blank">GitHub</a> | Licensed under Apache-2.0</p>
+      <p>ILRM Protocol v1.1 | <a href="https://github.com/kase1111-hash/ILR-module" target="_blank" rel="noopener noreferrer">GitHub</a> | Licensed under Apache-2.0</p>
       <p style="margin-top: 0.5rem; font-size: 0.85rem;">Non-adjudicative coordination tool - Not a court or legally binding arbitration system</p>
     </footer>
   </div>
 
   <script>
+    // HTML escape function to prevent XSS
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
     // Simulate Web3 connection state
     let connected = false;
     let walletAddress = '';
@@ -532,8 +540,8 @@
         return;
       }
 
-      const counterparty = document.getElementById('counterparty').value;
-      const assetId = document.getElementById('assetId').value;
+      const counterparty = document.getElementById('counterparty').value.trim();
+      const assetId = document.getElementById('assetId').value.trim();
       const stakeAmount = document.getElementById('stakeAmount').value;
 
       // Validate Ethereum address format
@@ -543,7 +551,24 @@
         return;
       }
 
-      msg.textContent = `Dispute initiated! Asset: ${assetId}, Stake: ${stakeAmount} ETH. Transaction pending...`;
+      // Validate stake amount is a positive number
+      const stake = parseFloat(stakeAmount);
+      if (isNaN(stake) || stake < 0.01) {
+        msg.textContent = 'Invalid stake amount. Must be at least 0.01 ETH.';
+        msg.className = 'message error';
+        return;
+      }
+
+      // Sanitize assetId - only allow alphanumeric, hyphens, underscores
+      const sanitizedAssetId = assetId.replace(/[^a-zA-Z0-9\-_]/g, '');
+      if (sanitizedAssetId !== assetId || assetId.length === 0) {
+        msg.textContent = 'Invalid Asset ID. Use only letters, numbers, hyphens, and underscores.';
+        msg.className = 'message error';
+        return;
+      }
+
+      // Use textContent (safe) for success message
+      msg.textContent = `Dispute initiated! Asset: ${sanitizedAssetId}, Stake: ${stake.toFixed(2)} ETH. Transaction pending...`;
       msg.className = 'message success';
 
       // Clear form after success
@@ -562,27 +587,35 @@
     function showDisputeDetails(disputeId) {
       const details = document.getElementById('disputeDetails');
       const msg = document.getElementById('lookupMessage');
-      const dispute = mockDisputes[disputeId];
+
+      // Sanitize disputeId - only allow alphanumeric and hyphens
+      const sanitizedId = String(disputeId).replace(/[^a-zA-Z0-9\-]/g, '');
+      const dispute = mockDisputes[sanitizedId];
 
       if (!dispute) {
-        msg.textContent = `Dispute #${disputeId} not found.`;
+        msg.textContent = `Dispute #${sanitizedId} not found.`;
         msg.className = 'message error';
         details.innerHTML = '';
         return;
       }
 
       msg.className = 'message'; // Hide any error
-      const statusClass = dispute.status === 'Active' ? 'status-active' :
-                          dispute.status === 'Pending Stake' ? 'status-pending' : 'status-resolved';
 
+      // Validate status to prevent class injection
+      const validStatuses = ['Active', 'Pending Stake', 'Resolved'];
+      const safeStatus = validStatuses.includes(dispute.status) ? dispute.status : 'Unknown';
+      const statusClass = safeStatus === 'Active' ? 'status-active' :
+                          safeStatus === 'Pending Stake' ? 'status-pending' : 'status-resolved';
+
+      // Escape all dynamic content to prevent XSS
       details.innerHTML = `
         <div style="padding: 1rem; background: var(--bg); border-radius: 8px; margin-top: 1rem;">
-          <p><strong>Dispute ID:</strong> #${disputeId}</p>
-          <p><strong>Asset:</strong> ${dispute.asset}</p>
-          <p><strong>Status:</strong> <span class="status-badge ${statusClass}">${dispute.status}</span></p>
-          <p><strong>Stake:</strong> ${dispute.stake} ETH (each party)</p>
-          <p><strong>Time Remaining:</strong> ${dispute.timeRemaining}</p>
-          <p><strong>Counters Used:</strong> ${dispute.counters} of 3</p>
+          <p><strong>Dispute ID:</strong> #${escapeHtml(sanitizedId)}</p>
+          <p><strong>Asset:</strong> ${escapeHtml(dispute.asset)}</p>
+          <p><strong>Status:</strong> <span class="status-badge ${statusClass}">${escapeHtml(safeStatus)}</span></p>
+          <p><strong>Stake:</strong> ${escapeHtml(dispute.stake)} ETH (each party)</p>
+          <p><strong>Time Remaining:</strong> ${escapeHtml(dispute.timeRemaining)}</p>
+          <p><strong>Counters Used:</strong> ${escapeHtml(String(dispute.counters))} of 3</p>
         </div>
       `;
 
