@@ -1,0 +1,645 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self' 'unsafe-inline'; script-src 'self' 'unsafe-inline'">
+  <title>ILRM - IP & Licensing Reconciliation Module</title>
+  <style>
+    :root {
+      --primary: #6366f1;
+      --primary-dark: #4f46e5;
+      --bg: #0f172a;
+      --bg-card: #1e293b;
+      --bg-card-hover: #334155;
+      --text: #f8fafc;
+      --text-muted: #94a3b8;
+      --border: #334155;
+      --success: #22c55e;
+      --warning: #f59e0b;
+      --error: #ef4444;
+    }
+
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+      min-height: 100vh;
+      line-height: 1.6;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      padding: 2rem;
+    }
+
+    header {
+      text-align: center;
+      padding: 3rem 0;
+      border-bottom: 1px solid var(--border);
+      margin-bottom: 3rem;
+      position: relative;
+    }
+
+    .wallet-btn {
+      position: absolute;
+      top: 2rem;
+      right: 0;
+      padding: 0.6rem 1.2rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg-card);
+      color: var(--text);
+      font-size: 0.9rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .wallet-btn:hover {
+      border-color: var(--primary);
+      background: var(--bg-card-hover);
+    }
+
+    .wallet-btn.connected {
+      border-color: var(--success);
+      color: var(--success);
+    }
+
+    h1 {
+      font-size: 2.5rem;
+      font-weight: 700;
+      margin-bottom: 0.5rem;
+      background: linear-gradient(135deg, var(--primary), #a855f7);
+      -webkit-background-clip: text;
+      -webkit-text-fill-color: transparent;
+      background-clip: text;
+    }
+
+    header p {
+      color: var(--text-muted);
+      font-size: 1.1rem;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 1.5rem;
+      margin-bottom: 3rem;
+    }
+
+    .card {
+      background: var(--bg-card);
+      border-radius: 12px;
+      padding: 1.5rem;
+      border: 1px solid var(--border);
+      transition: transform 0.2s, border-color 0.2s;
+    }
+
+    .card:hover {
+      transform: translateY(-2px);
+      border-color: var(--primary);
+    }
+
+    .card h3 {
+      font-size: 1.1rem;
+      margin-bottom: 0.5rem;
+      display: flex;
+      align-items: center;
+      gap: 0.5rem;
+    }
+
+    .card p {
+      color: var(--text-muted);
+      font-size: 0.9rem;
+    }
+
+    .stat {
+      font-size: 2rem;
+      font-weight: 700;
+      color: var(--primary);
+      margin: 0.5rem 0;
+    }
+
+    .section-title {
+      font-size: 1.5rem;
+      margin-bottom: 1.5rem;
+      padding-bottom: 0.5rem;
+      border-bottom: 2px solid var(--primary);
+      display: inline-block;
+    }
+
+    .form-group {
+      margin-bottom: 1rem;
+    }
+
+    label {
+      display: block;
+      margin-bottom: 0.5rem;
+      color: var(--text-muted);
+      font-size: 0.9rem;
+    }
+
+    input, select {
+      width: 100%;
+      padding: 0.75rem;
+      border-radius: 8px;
+      border: 1px solid var(--border);
+      background: var(--bg);
+      color: var(--text);
+      font-size: 1rem;
+      transition: border-color 0.2s;
+    }
+
+    input:focus, select:focus {
+      outline: none;
+      border-color: var(--primary);
+    }
+
+    .btn {
+      padding: 0.75rem 1.5rem;
+      border-radius: 8px;
+      border: none;
+      font-size: 1rem;
+      font-weight: 600;
+      cursor: pointer;
+      transition: all 0.2s;
+    }
+
+    .btn-primary {
+      background: var(--primary);
+      color: white;
+    }
+
+    .btn-primary:hover {
+      background: var(--primary-dark);
+    }
+
+    .btn-secondary {
+      background: var(--bg-card);
+      color: var(--text);
+      border: 1px solid var(--border);
+    }
+
+    .btn-secondary:hover {
+      background: var(--bg-card-hover);
+    }
+
+    .status-badge {
+      display: inline-block;
+      padding: 0.25rem 0.75rem;
+      border-radius: 20px;
+      font-size: 0.8rem;
+      font-weight: 600;
+    }
+
+    .status-active { background: rgba(34, 197, 94, 0.2); color: var(--success); }
+    .status-pending { background: rgba(245, 158, 11, 0.2); color: var(--warning); }
+    .status-resolved { background: rgba(99, 102, 241, 0.2); color: var(--primary); }
+
+    .dispute-list {
+      background: var(--bg-card);
+      border-radius: 12px;
+      border: 1px solid var(--border);
+      overflow: hidden;
+    }
+
+    .dispute-item {
+      padding: 1rem 1.5rem;
+      border-bottom: 1px solid var(--border);
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      transition: background 0.2s;
+    }
+
+    .dispute-item:last-child {
+      border-bottom: none;
+    }
+
+    .dispute-item:hover {
+      background: var(--bg-card-hover);
+      cursor: pointer;
+    }
+
+    .dispute-info h4 {
+      font-size: 1rem;
+      margin-bottom: 0.25rem;
+    }
+
+    .dispute-info p {
+      color: var(--text-muted);
+      font-size: 0.85rem;
+    }
+
+    .lifecycle {
+      display: flex;
+      justify-content: space-between;
+      margin: 2rem 0;
+      position: relative;
+    }
+
+    .lifecycle::before {
+      content: '';
+      position: absolute;
+      top: 20px;
+      left: 10%;
+      right: 10%;
+      height: 2px;
+      background: var(--border);
+      z-index: 0;
+    }
+
+    .lifecycle-step {
+      text-align: center;
+      z-index: 1;
+      flex: 1;
+    }
+
+    .lifecycle-dot {
+      width: 40px;
+      height: 40px;
+      border-radius: 50%;
+      background: var(--bg-card);
+      border: 2px solid var(--border);
+      margin: 0 auto 0.5rem;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      font-weight: 700;
+      transition: all 0.3s;
+    }
+
+    .lifecycle-step.active .lifecycle-dot {
+      background: var(--primary);
+      border-color: var(--primary);
+    }
+
+    .lifecycle-step.completed .lifecycle-dot {
+      background: var(--success);
+      border-color: var(--success);
+    }
+
+    .lifecycle-label {
+      font-size: 0.8rem;
+      color: var(--text-muted);
+    }
+
+    .lifecycle-step.active .lifecycle-label {
+      color: var(--primary);
+      font-weight: 600;
+    }
+
+    .two-col {
+      display: grid;
+      grid-template-columns: 1fr 1fr;
+      gap: 2rem;
+    }
+
+    @media (max-width: 768px) {
+      .two-col {
+        grid-template-columns: 1fr;
+      }
+
+      h1 {
+        font-size: 1.8rem;
+      }
+
+      .lifecycle {
+        flex-direction: column;
+        gap: 1rem;
+      }
+
+      .lifecycle::before {
+        display: none;
+      }
+    }
+
+    .message {
+      padding: 1rem;
+      border-radius: 8px;
+      margin-top: 1rem;
+      display: none;
+    }
+
+    .message.success {
+      background: rgba(34, 197, 94, 0.1);
+      border: 1px solid var(--success);
+      color: var(--success);
+      display: block;
+    }
+
+    .message.error {
+      background: rgba(239, 68, 68, 0.1);
+      border: 1px solid var(--error);
+      color: var(--error);
+      display: block;
+    }
+
+    footer {
+      text-align: center;
+      padding: 2rem;
+      color: var(--text-muted);
+      border-top: 1px solid var(--border);
+      margin-top: 3rem;
+    }
+
+    footer a {
+      color: var(--primary);
+      text-decoration: none;
+    }
+
+    footer a:hover {
+      text-decoration: underline;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <header>
+      <button class="wallet-btn" id="walletBtn">Connect Wallet</button>
+      <h1>ILRM Protocol</h1>
+      <p>IP & Licensing Reconciliation Module - Non-adjudicative dispute resolution</p>
+    </header>
+
+    <div class="grid">
+      <div class="card">
+        <h3>Active Disputes</h3>
+        <div class="stat" id="activeDisputes">0</div>
+        <p>Currently in resolution process</p>
+      </div>
+      <div class="card">
+        <h3>Resolution Rate</h3>
+        <div class="stat" id="resolutionRate">--</div>
+        <p>Disputes resolved without timeout</p>
+      </div>
+      <div class="card">
+        <h3>Total Staked</h3>
+        <div class="stat" id="totalStaked">0 ETH</div>
+        <p>Value locked in active disputes</p>
+      </div>
+      <div class="card">
+        <h3>Avg. Resolution</h3>
+        <div class="stat" id="avgResolution">--</div>
+        <p>Average time to resolution</p>
+      </div>
+    </div>
+
+    <h2 class="section-title">Dispute Lifecycle</h2>
+    <div class="lifecycle">
+      <div class="lifecycle-step completed">
+        <div class="lifecycle-dot">1</div>
+        <div class="lifecycle-label">Initiated</div>
+      </div>
+      <div class="lifecycle-step completed">
+        <div class="lifecycle-dot">2</div>
+        <div class="lifecycle-label">Stakes Matched</div>
+      </div>
+      <div class="lifecycle-step active">
+        <div class="lifecycle-dot">3</div>
+        <div class="lifecycle-label">Proposal Review</div>
+      </div>
+      <div class="lifecycle-step">
+        <div class="lifecycle-dot">4</div>
+        <div class="lifecycle-label">Acceptance</div>
+      </div>
+      <div class="lifecycle-step">
+        <div class="lifecycle-dot">5</div>
+        <div class="lifecycle-label">Resolved</div>
+      </div>
+    </div>
+
+    <div class="two-col">
+      <div>
+        <h2 class="section-title">Initiate Dispute</h2>
+        <div class="card">
+          <form id="disputeForm">
+            <div class="form-group">
+              <label for="counterparty">Counterparty Address</label>
+              <input type="text" id="counterparty" placeholder="0x..." required>
+            </div>
+            <div class="form-group">
+              <label for="assetId">Asset ID</label>
+              <input type="text" id="assetId" placeholder="Enter asset identifier" required>
+            </div>
+            <div class="form-group">
+              <label for="stakeAmount">Stake Amount (ETH)</label>
+              <input type="number" id="stakeAmount" placeholder="0.1" step="0.01" min="0.01" required>
+            </div>
+            <div class="form-group">
+              <label for="disputeType">Dispute Type</label>
+              <select id="disputeType">
+                <option value="breach">Breach Dispute</option>
+                <option value="voluntary">Voluntary Request</option>
+              </select>
+            </div>
+            <button type="submit" class="btn btn-primary">Initiate Dispute</button>
+            <div id="disputeMessage" class="message"></div>
+          </form>
+        </div>
+      </div>
+
+      <div>
+        <h2 class="section-title">Lookup Dispute</h2>
+        <div class="card">
+          <form id="lookupForm">
+            <div class="form-group">
+              <label for="disputeId">Dispute ID</label>
+              <input type="text" id="disputeId" placeholder="Enter dispute ID" required>
+            </div>
+            <button type="submit" class="btn btn-secondary">View Details</button>
+            <div id="lookupMessage" class="message"></div>
+          </form>
+          <div id="disputeDetails" style="margin-top: 1rem;"></div>
+        </div>
+      </div>
+    </div>
+
+    <h2 class="section-title" style="margin-top: 3rem;">Recent Disputes</h2>
+    <div class="dispute-list" id="disputeList">
+      <div class="dispute-item" data-id="1042" data-status="active" data-asset="NFT-7821">
+        <div class="dispute-info">
+          <h4>Dispute #1042</h4>
+          <p>Asset: NFT-7821 | Parties: 0x1a2b...3c4d vs 0x5e6f...7g8h</p>
+        </div>
+        <span class="status-badge status-active">Active</span>
+      </div>
+      <div class="dispute-item" data-id="1041" data-status="pending" data-asset="LICENSE-445">
+        <div class="dispute-info">
+          <h4>Dispute #1041</h4>
+          <p>Asset: LICENSE-445 | Parties: 0x9i0j...1k2l vs 0x3m4n...5o6p</p>
+        </div>
+        <span class="status-badge status-pending">Pending Stake</span>
+      </div>
+      <div class="dispute-item" data-id="1040" data-status="resolved" data-asset="IP-REG-889">
+        <div class="dispute-info">
+          <h4>Dispute #1040</h4>
+          <p>Asset: IP-REG-889 | Parties: 0x7q8r...9s0t vs 0x1u2v...3w4x</p>
+        </div>
+        <span class="status-badge status-resolved">Resolved</span>
+      </div>
+    </div>
+
+    <footer>
+      <p>ILRM Protocol v1.1 | <a href="https://github.com/kase1111-hash/ILR-module" target="_blank" rel="noopener noreferrer">GitHub</a> | Licensed under Apache-2.0</p>
+      <p style="margin-top: 0.5rem; font-size: 0.85rem;">Non-adjudicative coordination tool - Not a court or legally binding arbitration system</p>
+    </footer>
+  </div>
+
+  <script>
+    // HTML escape function to prevent XSS
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    // Simulate Web3 connection state
+    let connected = false;
+    let walletAddress = '';
+
+    // Mock dispute data
+    const mockDisputes = {
+      '1042': { status: 'Active', asset: 'NFT-7821', stake: '0.5', timeRemaining: '4 days 12 hours', counters: 1 },
+      '1041': { status: 'Pending Stake', asset: 'LICENSE-445', stake: '0.3', timeRemaining: '2 days 8 hours', counters: 0 },
+      '1040': { status: 'Resolved', asset: 'IP-REG-889', stake: '1.0', timeRemaining: 'N/A', counters: 2 }
+    };
+
+    // Wallet connect button
+    document.getElementById('walletBtn').addEventListener('click', function() {
+      if (connected) {
+        // Disconnect
+        connected = false;
+        walletAddress = '';
+        this.textContent = 'Connect Wallet';
+        this.classList.remove('connected');
+      } else {
+        // Simulate wallet connection
+        connected = true;
+        walletAddress = '0x' + Math.random().toString(16).slice(2, 10) + '...' + Math.random().toString(16).slice(2, 6);
+        this.textContent = walletAddress;
+        this.classList.add('connected');
+      }
+    });
+
+    // Dispute form handling
+    document.getElementById('disputeForm').addEventListener('submit', function(e) {
+      e.preventDefault();
+      const msg = document.getElementById('disputeMessage');
+
+      if (!connected) {
+        msg.textContent = 'Please connect your wallet to initiate a dispute.';
+        msg.className = 'message error';
+        return;
+      }
+
+      const counterparty = document.getElementById('counterparty').value.trim();
+      const assetId = document.getElementById('assetId').value.trim();
+      const stakeAmount = document.getElementById('stakeAmount').value;
+
+      // Validate Ethereum address format
+      if (!counterparty.match(/^0x[a-fA-F0-9]{40}$/)) {
+        msg.textContent = 'Invalid counterparty address. Must be a valid Ethereum address.';
+        msg.className = 'message error';
+        return;
+      }
+
+      // Validate stake amount is a positive number
+      const stake = parseFloat(stakeAmount);
+      if (isNaN(stake) || stake < 0.01) {
+        msg.textContent = 'Invalid stake amount. Must be at least 0.01 ETH.';
+        msg.className = 'message error';
+        return;
+      }
+
+      // Sanitize assetId - only allow alphanumeric, hyphens, underscores
+      const sanitizedAssetId = assetId.replace(/[^a-zA-Z0-9\-_]/g, '');
+      if (sanitizedAssetId !== assetId || assetId.length === 0) {
+        msg.textContent = 'Invalid Asset ID. Use only letters, numbers, hyphens, and underscores.';
+        msg.className = 'message error';
+        return;
+      }
+
+      // Use textContent (safe) for success message
+      msg.textContent = `Dispute initiated! Asset: ${sanitizedAssetId}, Stake: ${stake.toFixed(2)} ETH. Transaction pending...`;
+      msg.className = 'message success';
+
+      // Clear form after success
+      setTimeout(() => {
+        this.reset();
+      }, 2000);
+    });
+
+    // Lookup form handling
+    document.getElementById('lookupForm').addEventListener('submit', function(e) {
+      e.preventDefault();
+      showDisputeDetails(document.getElementById('disputeId').value);
+    });
+
+    // Function to show dispute details
+    function showDisputeDetails(disputeId) {
+      const details = document.getElementById('disputeDetails');
+      const msg = document.getElementById('lookupMessage');
+
+      // Sanitize disputeId - only allow alphanumeric and hyphens
+      const sanitizedId = String(disputeId).replace(/[^a-zA-Z0-9\-]/g, '');
+      const dispute = mockDisputes[sanitizedId];
+
+      if (!dispute) {
+        msg.textContent = `Dispute #${sanitizedId} not found.`;
+        msg.className = 'message error';
+        details.innerHTML = '';
+        return;
+      }
+
+      msg.className = 'message'; // Hide any error
+
+      // Validate status to prevent class injection
+      const validStatuses = ['Active', 'Pending Stake', 'Resolved'];
+      const safeStatus = validStatuses.includes(dispute.status) ? dispute.status : 'Unknown';
+      const statusClass = safeStatus === 'Active' ? 'status-active' :
+                          safeStatus === 'Pending Stake' ? 'status-pending' : 'status-resolved';
+
+      // Escape all dynamic content to prevent XSS
+      details.innerHTML = `
+        <div style="padding: 1rem; background: var(--bg); border-radius: 8px; margin-top: 1rem;">
+          <p><strong>Dispute ID:</strong> #${escapeHtml(sanitizedId)}</p>
+          <p><strong>Asset:</strong> ${escapeHtml(dispute.asset)}</p>
+          <p><strong>Status:</strong> <span class="status-badge ${statusClass}">${escapeHtml(safeStatus)}</span></p>
+          <p><strong>Stake:</strong> ${escapeHtml(dispute.stake)} ETH (each party)</p>
+          <p><strong>Time Remaining:</strong> ${escapeHtml(dispute.timeRemaining)}</p>
+          <p><strong>Counters Used:</strong> ${escapeHtml(String(dispute.counters))} of 3</p>
+        </div>
+      `;
+
+      // Scroll to details
+      details.scrollIntoView({ behavior: 'smooth', block: 'nearest' });
+    }
+
+    // Dispute list item click handling
+    document.getElementById('disputeList').addEventListener('click', function(e) {
+      const item = e.target.closest('.dispute-item');
+      if (item) {
+        const disputeId = item.dataset.id;
+        document.getElementById('disputeId').value = disputeId;
+        showDisputeDetails(disputeId);
+      }
+    });
+
+    // Simulated stats (in production, fetch from blockchain)
+    setTimeout(() => {
+      document.getElementById('activeDisputes').textContent = '12';
+      document.getElementById('resolutionRate').textContent = '78%';
+      document.getElementById('totalStaked').textContent = '24.5 ETH';
+      document.getElementById('avgResolution').textContent = '3.2 days';
+    }, 500);
+  </script>
+</body>
+</html>
