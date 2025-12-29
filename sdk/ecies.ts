@@ -32,8 +32,12 @@
  * ```
  */
 
+// Current ECIES format version - increment when making breaking changes
+export const ECIES_VERSION = 1;
+
 // Types for ECIES operations
 export interface ECIESCiphertext {
+  version: number;              // Format version for backward compatibility
   ephemeralPublicKey: string;  // Hex-encoded ephemeral public key (65 bytes uncompressed)
   iv: string;                   // Hex-encoded initialization vector (12 bytes for GCM)
   ciphertext: string;          // Hex-encoded encrypted data
@@ -118,6 +122,7 @@ export class ECIES {
     );
 
     return {
+      version: ECIES_VERSION,
       ephemeralPublicKey: this.bytesToHex(ephemeralPublic),
       iv: this.bytesToHex(iv),
       ciphertext: this.bytesToHex(ciphertext),
@@ -131,11 +136,22 @@ export class ECIES {
    * @param privateKey Recipient's private key (hex, 32 bytes)
    * @param ciphertext ECIES ciphertext object
    * @returns Decrypted plaintext
+   * @throws Error if ciphertext version is unsupported
    */
   async decrypt(
     privateKey: string,
     ciphertext: ECIESCiphertext
   ): Promise<Uint8Array> {
+    // Version check for forward compatibility
+    // Accept version 0 (legacy, no version field) and version 1 (current)
+    const version = ciphertext.version ?? 0;
+    if (version > ECIES_VERSION) {
+      throw new Error(
+        `Unsupported ECIES ciphertext version ${version}. ` +
+        `This SDK supports up to version ${ECIES_VERSION}. Please upgrade.`
+      );
+    }
+
     const { secp256k1 } = await import('@noble/secp256k1');
 
     // Parse inputs
@@ -183,7 +199,8 @@ export class ECIES {
 
     // Create a "fake" ECIES ciphertext for the shared data
     const sharedCiphertext: ECIESCiphertext = {
-      ephemeralPublicKey: '0x' + '00'.repeat(65), // Placeholder
+      version: ECIES_VERSION,
+      ephemeralPublicKey: '0x' + '00'.repeat(65), // Placeholder (not used for shared data)
       iv: this.bytesToHex(iv),
       ciphertext: this.bytesToHex(ciphertext),
       authTag: this.bytesToHex(authTag),
