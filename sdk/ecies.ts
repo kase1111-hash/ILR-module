@@ -220,8 +220,13 @@ export class ECIES {
 
   // ============ Private Helper Methods ============
 
+  // Domain-specific salt for HKDF - provides defense-in-depth
+  // Using a fixed, non-zero salt is recommended over zero salt per RFC 5869
+  private static readonly HKDF_SALT = new TextEncoder().encode('natlangchain-ecies-v1-salt');
+
   /**
    * Derive a symmetric key using HKDF (HMAC-based Key Derivation Function)
+   * Uses a domain-specific salt for additional security
    */
   private async deriveKey(sharedSecret: Uint8Array, info: string): Promise<Uint8Array> {
     // Use Web Crypto API if available
@@ -238,7 +243,7 @@ export class ECIES {
         {
           name: 'HKDF',
           hash: 'SHA-256',
-          salt: new Uint8Array(32), // Zero salt
+          salt: ECIES.HKDF_SALT, // Domain-specific salt
           info: new TextEncoder().encode(info),
         },
         baseKey,
@@ -257,7 +262,7 @@ export class ECIES {
       nodeCrypto.hkdfSync(
         'sha256',
         sharedSecret.slice(1),
-        Buffer.alloc(32),
+        Buffer.from(ECIES.HKDF_SALT), // Domain-specific salt
         info,
         32
       )

@@ -353,29 +353,130 @@ export function reconstructSecret(
 }
 
 /**
+ * Encrypt viewing key using a secret (for threshold encryption)
+ * Uses AES-256-GCM for authenticated encryption
+ * @param viewingKey The viewing key to encrypt
+ * @param secret The encryption secret (32 bytes)
+ * @returns Encrypted viewing key with IV and auth tag prepended
+ */
+export async function encryptViewingKey(
+  viewingKey: Uint8Array,
+  secret: Uint8Array
+): Promise<Uint8Array> {
+  // Derive encryption key from secret using SHA-256
+  const encryptionKey = sha256(secret);
+
+  // Generate random 12-byte IV for GCM
+  const iv = new Uint8Array(12);
+  if (typeof crypto !== 'undefined' && crypto.getRandomValues) {
+    crypto.getRandomValues(iv);
+  } else {
+    const nodeCrypto = require('crypto');
+    const randomBytes = nodeCrypto.randomBytes(12);
+    iv.set(new Uint8Array(randomBytes));
+  }
+
+  // Encrypt using AES-256-GCM
+  if (typeof crypto !== 'undefined' && crypto.subtle) {
+    const cryptoKey = await crypto.subtle.importKey(
+      'raw',
+      encryptionKey,
+      'AES-GCM',
+      false,
+      ['encrypt']
+    );
+
+    const result = await crypto.subtle.encrypt(
+      { name: 'AES-GCM', iv, tagLength: 128 },
+      cryptoKey,
+      viewingKey
+    );
+
+    const resultBytes = new Uint8Array(result);
+    // Format: IV (12 bytes) || ciphertext || authTag (16 bytes)
+    const output = new Uint8Array(12 + resultBytes.length);
+    output.set(iv, 0);
+    output.set(resultBytes, 12);
+    return output;
+  }
+
+  // Node.js fallback
+  const nodeCrypto = require('crypto');
+  const cipher = nodeCrypto.createCipheriv('aes-256-gcm', encryptionKey, iv);
+  const ciphertext = Buffer.concat([cipher.update(viewingKey), cipher.final()]);
+  const authTag = cipher.getAuthTag();
+
+  // Format: IV (12 bytes) || ciphertext || authTag (16 bytes)
+  const output = new Uint8Array(12 + ciphertext.length + 16);
+  output.set(iv, 0);
+  output.set(new Uint8Array(ciphertext), 12);
+  output.set(new Uint8Array(authTag), 12 + ciphertext.length);
+  return output;
+}
+
+/**
  * Decrypt viewing key using reconstructed secret
- * @param encryptedKey Encrypted viewing key
+ * Uses AES-256-GCM for authenticated decryption
+ * @param encryptedKey Encrypted viewing key (IV || ciphertext || authTag)
  * @param shares Key shares for reconstruction
  * @param threshold Threshold value
  * @returns Decrypted viewing key
  */
-export function decryptViewingKey(
+export async function decryptViewingKey(
   encryptedKey: Uint8Array,
   shares: KeyShare[],
   threshold: number
-): Uint8Array {
+): Promise<Uint8Array> {
   // Reconstruct the decryption key
   const secret = reconstructSecret(shares, threshold);
 
-  // Use the secret as decryption key (XOR for simplicity, real impl would use AES)
-  const keyHash = sha256(secret);
-  const decrypted = new Uint8Array(encryptedKey.length);
+  // Derive encryption key from secret using SHA-256
+  const encryptionKey = sha256(secret);
 
-  for (let i = 0; i < encryptedKey.length; i++) {
-    decrypted[i] = encryptedKey[i] ^ keyHash[i % keyHash.length];
+  // Parse encrypted data: IV (12 bytes) || ciphertext || authTag (16 bytes)
+  if (encryptedKey.length < 28) {
+    throw new Error('Encrypted data too short');
   }
 
-  return decrypted;
+  const iv = encryptedKey.slice(0, 12);
+  const ciphertextWithTag = encryptedKey.slice(12);
+
+  // Decrypt using AES-256-GCM
+  if (typeof crypto !== 'undefined' && crypto.subtle) {
+    const cryptoKey = await crypto.subtle.importKey(
+      'raw',
+      encryptionKey,
+      'AES-GCM',
+      false,
+      ['decrypt']
+    );
+
+    try {
+      const result = await crypto.subtle.decrypt(
+        { name: 'AES-GCM', iv, tagLength: 128 },
+        cryptoKey,
+        ciphertextWithTag
+      );
+      return new Uint8Array(result);
+    } catch (error) {
+      throw new Error('Decryption failed: authentication tag mismatch');
+    }
+  }
+
+  // Node.js fallback
+  const nodeCrypto = require('crypto');
+  const ciphertext = ciphertextWithTag.slice(0, -16);
+  const authTag = ciphertextWithTag.slice(-16);
+
+  const decipher = nodeCrypto.createDecipheriv('aes-256-gcm', encryptionKey, iv);
+  decipher.setAuthTag(authTag);
+
+  try {
+    const plaintext = Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    return new Uint8Array(plaintext);
+  } catch (error) {
+    throw new Error('Decryption failed: authentication tag mismatch');
+  }
 }
 
 // ============ Solidity Encoding ============
