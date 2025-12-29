@@ -55,6 +55,9 @@ export class ShamirSecretSharing {
 
   constructor() {
     // Initialize GF(2^8) lookup tables
+    // IMPORTANT: Use 3 as the generator (primitive element), not 2
+    // With polynomial 0x11b, element 2 has order 51 (not 255)
+    // Element 3 has order 255 and generates the full multiplicative group
     this.logTable = new Uint8Array(256);
     this.expTable = new Uint8Array(256);
 
@@ -62,7 +65,7 @@ export class ShamirSecretSharing {
     for (let i = 0; i < 255; i++) {
       this.expTable[i] = x;
       this.logTable[x] = i;
-      x = this.gfMultiplyNoTable(x, 2);
+      x = this.gfMultiplyNoTable(x, 3);  // Use 3 as primitive element
     }
     this.expTable[255] = this.expTable[0];
   }
