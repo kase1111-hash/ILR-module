@@ -15,12 +15,25 @@
     "type": "git",
     "url": "https://github.com/kase1111-hash/ILR-module"
   },
-  "keywords": ["solidity", "ethereum", "ip", "licensing", "dispute-resolution", "natlangchain"],
+  "keywords": [
+    "solidity",
+    "ethereum",
+    "ip",
+    "licensing",
+    "dispute-resolution",
+    "natlangchain"
+  ],
   "author": "",
   "license": "Apache-2.0",
   "devDependencies": {
+    "@noble/bls12-381": "^1.4.0",
+    "@noble/hashes": "^2.0.1",
+    "@noble/secp256k1": "^3.0.0",
     "@nomicfoundation/hardhat-toolbox": "^4.0.0",
     "@openzeppelin/contracts": "^5.4.0",
-    "hardhat": "^2.22.0"
+    "@types/node": "^25.0.3",
+    "hardhat": "^2.22.0",
+    "ts-node": "^10.9.2",
+    "typescript": "^5.9.3"
   }
 }
