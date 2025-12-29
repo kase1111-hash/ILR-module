@@ -105,8 +105,17 @@ export class IdentityProofSDK {
     }
   }
 
+  // Domain separator for identity derivation - prevents cross-protocol attacks
+  private static readonly IDENTITY_DOMAIN = 'natlangchain-identity-v1';
+
+  // SNARK scalar field (BN254)
+  private static readonly SNARK_SCALAR_FIELD = BigInt(
+    '21888242871839275222246405745257275088548364400416034343698204186575808495617'
+  );
+
   /**
    * Generate an identity from a private key and salt
+   * Uses HKDF for secure key derivation with domain separation
    * @param privateKey User's private key (or derived secret)
    * @param salt Random salt for additional entropy
    * @returns Identity data including secret and hash
@@ -114,20 +123,11 @@ export class IdentityProofSDK {
   async generateIdentity(privateKey: string, salt: string): Promise<IdentityData> {
     this.ensureInitialized();
 
-    // Combine private key and salt to create the identity secret
-    // In production, use a proper KDF (Key Derivation Function)
-    const ethers = await import('ethers');
-    const combined = ethers.keccak256(
-      ethers.concat([
-        ethers.toUtf8Bytes(privateKey),
-        ethers.toUtf8Bytes(salt),
-      ])
-    );
+    // Use HKDF for proper key derivation with domain separation
+    const derivedKey = await this.deriveIdentitySecret(privateKey, salt);
 
     // Convert to field element (must be < SNARK_SCALAR_FIELD)
-    const secret = BigInt(combined) % BigInt(
-      '21888242871839275222246405745257275088548364400416034343698204186575808495617'
-    );
+    const secret = BigInt('0x' + derivedKey) % IdentityProofSDK.SNARK_SCALAR_FIELD;
 
     // Compute Poseidon hash
     const hash = this.poseidonHash([secret]);
@@ -137,6 +137,60 @@ export class IdentityProofSDK {
       hash,
       hashBytes32: '0x' + hash.toString(16).padStart(64, '0'),
     };
+  }
+
+  /**
+   * Derive identity secret using HKDF with domain separation
+   * This provides better security than simple hashing:
+   * - Domain separation prevents cross-protocol attacks
+   * - HKDF is specifically designed for key derivation
+   * - Salt provides additional entropy
+   */
+  private async deriveIdentitySecret(privateKey: string, salt: string): Promise<string> {
+    const encoder = new TextEncoder();
+    const keyMaterial = encoder.encode(privateKey);
+    const saltBytes = encoder.encode(salt);
+    const info = encoder.encode(IdentityProofSDK.IDENTITY_DOMAIN);
+
+    // Use Web Crypto API if available
+    if (typeof crypto !== 'undefined' && crypto.subtle) {
+      // Import key material for HKDF
+      const baseKey = await crypto.subtle.importKey(
+        'raw',
+        keyMaterial,
+        'HKDF',
+        false,
+        ['deriveBits']
+      );
+
+      // Derive 32 bytes using HKDF
+      const derivedBits = await crypto.subtle.deriveBits(
+        {
+          name: 'HKDF',
+          hash: 'SHA-256',
+          salt: saltBytes,
+          info: info,
+        },
+        baseKey,
+        256 // 32 bytes
+      );
+
+      return Array.from(new Uint8Array(derivedBits))
+        .map(b => b.toString(16).padStart(2, '0'))
+        .join('');
+    }
+
+    // Node.js fallback
+    const nodeCrypto = require('crypto');
+    const derived = nodeCrypto.hkdfSync(
+      'sha256',
+      keyMaterial,
+      saltBytes,
+      info,
+      32
+    );
+
+    return Buffer.from(derived).toString('hex');
   }
 
   /**
