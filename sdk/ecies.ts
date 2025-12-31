@@ -57,7 +57,7 @@ export class ECIES {
    * Generate a new secp256k1 key pair
    */
   async generateKeyPair(): Promise<ECIESKeyPair> {
-    const { secp256k1 } = await import('@noble/secp256k1');
+    const secp256k1 = await import('@noble/secp256k1');
 
     // Generate random private key
     const privateKeyBytes = this.randomBytes(32);
@@ -74,7 +74,7 @@ export class ECIES {
    * Derive public key from private key
    */
   async publicKeyFromPrivate(privateKey: string): Promise<string> {
-    const { secp256k1 } = await import('@noble/secp256k1');
+    const secp256k1 = await import('@noble/secp256k1');
     const privateKeyBytes = this.hexToBytes(privateKey);
     const publicKeyBytes = secp256k1.getPublicKey(privateKeyBytes, false);
     return this.bytesToHex(publicKeyBytes);
@@ -91,7 +91,7 @@ export class ECIES {
     recipientPublicKey: string,
     plaintext: Uint8Array | Buffer | string
   ): Promise<ECIESCiphertext> {
-    const { secp256k1 } = await import('@noble/secp256k1');
+    const secp256k1 = await import('@noble/secp256k1');
 
     // Convert plaintext to bytes
     const plaintextBytes = typeof plaintext === 'string'
@@ -152,7 +152,7 @@ export class ECIES {
       );
     }
 
-    const { secp256k1 } = await import('@noble/secp256k1');
+    const secp256k1 = await import('@noble/secp256k1');
 
     // Parse inputs
     const privateKeyBytes = this.hexToBytes(privateKey);
@@ -248,9 +248,14 @@ export class ECIES {
   private async deriveKey(sharedSecret: Uint8Array, info: string): Promise<Uint8Array> {
     // Use Web Crypto API if available
     if (typeof crypto !== 'undefined' && crypto.subtle) {
+      // Create proper ArrayBuffer copies to satisfy TypeScript's strict typing
+      const keyMaterial = sharedSecret.slice(1); // Skip the 0x04 prefix
+      const keyMaterialBuffer = new Uint8Array(keyMaterial).buffer;
+      const saltBuffer = new Uint8Array(ECIES.HKDF_SALT).buffer;
+
       const baseKey = await crypto.subtle.importKey(
         'raw',
-        sharedSecret.slice(1), // Skip the 0x04 prefix
+        keyMaterialBuffer,
         'HKDF',
         false,
         ['deriveKey']
@@ -260,7 +265,7 @@ export class ECIES {
         {
           name: 'HKDF',
           hash: 'SHA-256',
-          salt: ECIES.HKDF_SALT, // Domain-specific salt
+          salt: saltBuffer, // Domain-specific salt
           info: new TextEncoder().encode(info),
         },
         baseKey,
@@ -295,18 +300,23 @@ export class ECIES {
     plaintext: Uint8Array
   ): Promise<{ ciphertext: Uint8Array; authTag: Uint8Array }> {
     if (typeof crypto !== 'undefined' && crypto.subtle) {
+      // Create proper ArrayBuffer copies to satisfy TypeScript's strict typing
+      const keyBuffer = new Uint8Array(key).buffer;
+      const ivBuffer = new Uint8Array(iv).buffer;
+      const plaintextBuffer = new Uint8Array(plaintext).buffer;
+
       const cryptoKey = await crypto.subtle.importKey(
         'raw',
-        key,
+        keyBuffer,
         'AES-GCM',
         false,
         ['encrypt']
       );
 
       const result = await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv, tagLength: 128 },
+        { name: 'AES-GCM', iv: ivBuffer, tagLength: 128 },
         cryptoKey,
-        plaintext
+        plaintextBuffer
       );
 
       const resultBytes = new Uint8Array(result);
@@ -339,9 +349,13 @@ export class ECIES {
     authTag: Uint8Array
   ): Promise<Uint8Array> {
     if (typeof crypto !== 'undefined' && crypto.subtle) {
+      // Create proper ArrayBuffer copies to satisfy TypeScript's strict typing
+      const keyBuffer = new Uint8Array(key).buffer;
+      const ivBuffer = new Uint8Array(iv).buffer;
+
       const cryptoKey = await crypto.subtle.importKey(
         'raw',
-        key,
+        keyBuffer,
         'AES-GCM',
         false,
         ['decrypt']
@@ -351,11 +365,12 @@ export class ECIES {
       const combined = new Uint8Array(ciphertext.length + authTag.length);
       combined.set(ciphertext);
       combined.set(authTag, ciphertext.length);
+      const combinedBuffer = new Uint8Array(combined).buffer;
 
       const result = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv, tagLength: 128 },
+        { name: 'AES-GCM', iv: ivBuffer, tagLength: 128 },
         cryptoKey,
-        combined
+        combinedBuffer
       );
 
       return new Uint8Array(result);

@@ -443,18 +443,23 @@ export class ViewingKeysSDK {
     const iv = this.generateRandomBytes(12);
 
     if (typeof crypto !== 'undefined' && crypto.subtle) {
+      // Create proper ArrayBuffer copies to satisfy TypeScript's strict typing
+      const keyBuffer = new Uint8Array(key).buffer;
+      const ivBuffer = new Uint8Array(iv).buffer;
+      const dataBuffer = new Uint8Array(data).buffer;
+
       const cryptoKey = await crypto.subtle.importKey(
         'raw',
-        key,
+        keyBuffer,
         'AES-GCM',
         false,
         ['encrypt']
       );
 
       const result = await crypto.subtle.encrypt(
-        { name: 'AES-GCM', iv, tagLength: 128 },
+        { name: 'AES-GCM', iv: ivBuffer, tagLength: 128 },
         cryptoKey,
-        data
+        dataBuffer
       );
 
       const resultBytes = new Uint8Array(result);
@@ -493,9 +498,13 @@ export class ViewingKeysSDK {
     const authTag = this.hexToBytes(encrypted.authTag);
 
     if (typeof crypto !== 'undefined' && crypto.subtle) {
+      // Create proper ArrayBuffer copies to satisfy TypeScript's strict typing
+      const keyBuffer = new Uint8Array(key).buffer;
+      const ivBuffer = new Uint8Array(iv).buffer;
+
       const cryptoKey = await crypto.subtle.importKey(
         'raw',
-        key,
+        keyBuffer,
         'AES-GCM',
         false,
         ['decrypt']
@@ -504,11 +513,12 @@ export class ViewingKeysSDK {
       const combined = new Uint8Array(ciphertext.length + authTag.length);
       combined.set(ciphertext);
       combined.set(authTag, ciphertext.length);
+      const combinedBuffer = new Uint8Array(combined).buffer;
 
       const result = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv, tagLength: 128 },
+        { name: 'AES-GCM', iv: ivBuffer, tagLength: 128 },
         cryptoKey,
-        combined
+        combinedBuffer
       );
 
       return new Uint8Array(result);
