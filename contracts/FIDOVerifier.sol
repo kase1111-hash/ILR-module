@@ -107,6 +107,12 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
         // Validate point is on curve
         require(_isOnCurve(publicKeyX, publicKeyY), "Point not on P-256 curve");
 
+        // Reject point at infinity (0, 0) which would allow signature bypass
+        require(
+            !(uint256(publicKeyX) == 0 && uint256(publicKeyY) == 0),
+            "Point at infinity not allowed"
+        );
+
         bytes32 credIdHash = keccak256(credentialId);
 
         // Check if already registered
@@ -232,12 +238,16 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
 
     /**
      * @inheritdoc IFIDOVerifier
+     * @dev Increments nonce to prevent challenge reuse/front-running
      */
     function generateChallenge(
         string calldata action,
         bytes calldata data
-    ) external view override returns (bytes32 challenge, uint256 deadline) {
+    ) external override returns (bytes32 challenge, uint256 deadline) {
         uint256 nonce = _nonces[msg.sender];
+        // Increment nonce to prevent reuse of same challenge parameters
+        _nonces[msg.sender] = nonce + 1;
+
         challenge = keccak256(
             abi.encodePacked(
                 msg.sender,
@@ -249,6 +259,8 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
             )
         );
         deadline = block.timestamp + challengeDeadline;
+
+        emit ChallengeGenerated(msg.sender, challenge, deadline);
     }
 
     // ============ View Functions ============

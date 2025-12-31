@@ -335,6 +335,9 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         require(d.counterCount < MAX_COUNTERS, "Max counters reached");
 
         // Exponential fee: base * 2^count (Invariant 4: Bounded Griefing)
+        // Safe: counterCount is guaranteed < MAX_COUNTERS (3) by require above
+        // Defense in depth: ensure shift doesn't overflow (max safe is 255)
+        require(d.counterCount < 64, "Counter overflow protection");
         uint256 fee = COUNTER_FEE_BASE * (1 << d.counterCount);
         require(msg.value >= fee, "Insufficient counter fee");
 
@@ -1044,6 +1047,9 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         _usedFidoChallenges[_challenge] = true;
 
         // Exponential fee
+        // Safe: counterCount is guaranteed < MAX_COUNTERS (3) by require above
+        // Defense in depth: ensure shift doesn't overflow (max safe is 255)
+        require(d.counterCount < 64, "Counter overflow protection");
         uint256 fee = COUNTER_FEE_BASE * (1 << d.counterCount);
         require(msg.value >= fee, "Insufficient counter fee");
 

@@ -259,6 +259,9 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable2S
     ) external override onlyAuthorizedILRM nonReentrant {
         bytes32[] storage frozen = _disputeFrozenAssets[disputeId];
 
+        // Validate there are actually assets frozen for this dispute
+        require(frozen.length > 0, "No frozen assets for dispute");
+
         for (uint256 i = 0; i < frozen.length; i++) {
             bytes32 assetId = frozen[i];
             Asset storage asset = _assets[assetId];

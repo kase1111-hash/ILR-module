@@ -98,6 +98,13 @@ interface IFIDOVerifier {
         bytes32 challenge
     );
 
+    /// @notice Emitted when a challenge is generated
+    event ChallengeGenerated(
+        address indexed user,
+        bytes32 indexed challenge,
+        uint256 deadline
+    );
+
     // ============ Registration Functions ============
 
     /**
@@ -158,7 +165,8 @@ interface IFIDOVerifier {
 
     /**
      * @notice Generate a challenge for signing
-     * @dev Combines nonce, action, and timestamp for replay protection
+     * @dev Combines nonce, action, and timestamp for replay protection.
+     *      Increments user nonce to prevent challenge reuse/front-running.
      * @param action The action being authorized (e.g., "accept-proposal")
      * @param data Additional data to include in challenge (e.g., disputeId)
      * @return challenge The challenge to be signed
@@ -167,7 +175,7 @@ interface IFIDOVerifier {
     function generateChallenge(
         string calldata action,
         bytes calldata data
-    ) external view returns (bytes32 challenge, uint256 deadline);
+    ) external returns (bytes32 challenge, uint256 deadline);
 
     // ============ View Functions ============
 
