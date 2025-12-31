@@ -121,11 +121,13 @@ export class FIDO2SDK {
     // Generate a random challenge
     const challenge = this.generateChallenge();
 
-    // User ID from Ethereum address
-    const userId = this.hexToBytes(userAddress);
+    // User ID from Ethereum address - create fresh Uint8Array for proper typing
+    const userIdRaw = this.hexToBytes(userAddress);
+    const userId = new Uint8Array(userIdRaw.length);
+    userId.set(userIdRaw);
 
     const publicKeyCredentialCreationOptions: PublicKeyCredentialCreationOptions = {
-      challenge,
+      challenge: new Uint8Array(challenge),
       rp: {
         name: this.config.rpName,
         id: this.config.rpId,
@@ -190,16 +192,23 @@ export class FIDO2SDK {
     }
 
     // Generate challenge incorporating action and data
-    const challenge = await this.generateActionChallenge(action, data);
+    const challengeRaw = await this.generateActionChallenge(action, data);
+    const challenge = new Uint8Array(challengeRaw);
+
+    // Create properly typed credential ID if provided
+    let allowCredentials: PublicKeyCredentialDescriptor[] | undefined;
+    if (credentialId) {
+      const credId = new Uint8Array(credentialId.length);
+      credId.set(credentialId);
+      allowCredentials = [{ id: credId, type: 'public-key' }];
+    }
 
     const publicKeyCredentialRequestOptions: PublicKeyCredentialRequestOptions = {
       challenge,
       rpId: this.config.rpId,
       timeout: this.config.timeout,
       userVerification: this.config.userVerification,
-      allowCredentials: credentialId
-        ? [{ id: credentialId, type: 'public-key' }]
-        : undefined,
+      allowCredentials,
     };
 
     const assertion = (await navigator.credentials.get({
@@ -362,7 +371,9 @@ export class FIDO2SDK {
   private async sha256Async(data: Uint8Array): Promise<Uint8Array> {
     // Use Web Crypto API - available in all modern browsers
     if (typeof crypto !== 'undefined' && crypto.subtle) {
-      const hashBuffer = await crypto.subtle.digest('SHA-256', data);
+      // Create proper ArrayBuffer copy to satisfy TypeScript's strict typing
+      const dataBuffer = new Uint8Array(data).buffer;
+      const hashBuffer = await crypto.subtle.digest('SHA-256', dataBuffer);
       return new Uint8Array(hashBuffer);
     }
 

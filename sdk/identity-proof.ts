@@ -349,8 +349,7 @@ export async function computeIdentityHashFallback(
   return combined;
 }
 
-// Export types for TypeScript users
-export type { IdentityData, ProofData, SolidityProof, ProofForContract };
+// Types are already exported via interface declarations above
 
 /**
  * Example usage and testing

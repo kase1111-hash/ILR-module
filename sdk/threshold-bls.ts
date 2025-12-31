@@ -13,8 +13,8 @@
  * - @noble/hashes for message hashing
  */
 
-import * as bls from "@noble/bls12-381";
-import { sha256 } from "@noble/hashes/sha256";
+import { bls12_381 as bls } from "@noble/curves/bls12-381";
+import { sha256 } from "@noble/hashes/sha2";
 import { bytesToHex, hexToBytes, concatBytes } from "@noble/hashes/utils";
 
 // ============ Types ============
@@ -96,11 +96,16 @@ function generatePolynomialCoefficients(
   return coefficients;
 }
 
+// Get the scalar field order for BLS12-381
+function getScalarOrder(): bigint {
+  return bls.G1.CURVE.n;
+}
+
 /**
  * Evaluate polynomial at a point (for share generation)
  */
 function evaluatePolynomial(coefficients: bigint[], x: bigint): bigint {
-  const order = bls.CURVE.r;
+  const order = getScalarOrder();
   let result = 0n;
   let power = 1n;
 
@@ -133,7 +138,7 @@ export function generateKeyShares(
 
   // Generate Feldman VSS commitments: C_i = g^a_i
   const commitments = coefficients.map((coef) =>
-    bls.PointG1.BASE.multiply(coef).toRawBytes(true)
+    bls.G1.ProjectivePoint.BASE.multiply(coef).toRawBytes(true)
   );
 
   // Generate shares for each participant
@@ -143,7 +148,7 @@ export function generateKeyShares(
     const shareBytes = bigIntToBytes(shareValue, BLS_SCALAR_SIZE);
 
     // Public key for this share
-    const publicKey = bls.PointG1.BASE.multiply(shareValue).toRawBytes(true);
+    const publicKey = bls.G1.ProjectivePoint.BASE.multiply(shareValue).toRawBytes(true);
 
     shares.push({
       index: i,
@@ -176,17 +181,18 @@ export function verifyShare(
 ): boolean {
   try {
     // Compute expected public key: product of C_j^(i^j) for j = 0..t-1
-    let expectedPK = bls.PointG1.ZERO;
+    let expectedPK = bls.G1.ProjectivePoint.ZERO;
     const i = BigInt(share.index);
+    const order = getScalarOrder();
 
     for (let j = 0; j < commitments.length; j++) {
-      const C_j = bls.PointG1.fromHex(bytesToHex(commitments[j]));
-      const power = modPow(i, BigInt(j), bls.CURVE.r);
+      const C_j = bls.G1.ProjectivePoint.fromHex(bytesToHex(commitments[j]));
+      const power = modPow(i, BigInt(j), order);
       expectedPK = expectedPK.add(C_j.multiply(power));
     }
 
     // Compare with share's public key
-    const actualPK = bls.PointG1.fromHex(bytesToHex(share.publicKey));
+    const actualPK = bls.G1.ProjectivePoint.fromHex(bytesToHex(share.publicKey));
     return expectedPK.equals(actualPK);
   } catch {
     return false;
@@ -259,7 +265,7 @@ function computeLagrangeCoefficient(
   signerIndex: number,
   allSignerIndices: number[]
 ): bigint {
-  const order = bls.CURVE.r;
+  const order = getScalarOrder();
   const i = BigInt(signerIndex);
 
   let numerator = 1n;
@@ -293,16 +299,16 @@ export function aggregateSignatures(
   const signerIndices = partialSignatures.map((ps) => ps.signerIndex);
 
   // Compute weighted sum: sigma = sum(lambda_i * sigma_i)
-  let aggregated = bls.PointG2.ZERO;
+  let aggregated = bls.G2.ProjectivePoint.ZERO;
 
   for (const partialSig of partialSignatures) {
     const lambda = computeLagrangeCoefficient(partialSig.signerIndex, signerIndices);
-    const sigPoint = bls.PointG2.fromSignature(partialSig.signature);
+    const sigPoint = bls.Signature.fromHex(bytesToHex(partialSig.signature));
     aggregated = aggregated.add(sigPoint.multiply(lambda));
   }
 
   return {
-    aggregatedSignature: aggregated.toSignature(),
+    aggregatedSignature: aggregated.toRawBytes(),
     signerIndices,
   };
 }
@@ -338,7 +344,7 @@ export function reconstructSecret(
     throw new Error(`Need ${threshold} shares, got ${shares.length}`);
   }
 
-  const order = bls.CURVE.r;
+  const order = getScalarOrder();
   const shareIndices = shares.slice(0, threshold).map((s) => s.index);
 
   let secret = 0n;
@@ -378,18 +384,23 @@ export async function encryptViewingKey(
 
   // Encrypt using AES-256-GCM
   if (typeof crypto !== 'undefined' && crypto.subtle) {
+    // Create proper ArrayBuffer copies to satisfy TypeScript's strict typing
+    const encryptionKeyBuffer = new Uint8Array(encryptionKey).buffer;
+    const ivBuffer = new Uint8Array(iv).buffer;
+    const viewingKeyBuffer = new Uint8Array(viewingKey).buffer;
+
     const cryptoKey = await crypto.subtle.importKey(
       'raw',
-      encryptionKey,
+      encryptionKeyBuffer,
       'AES-GCM',
       false,
       ['encrypt']
     );
 
     const result = await crypto.subtle.encrypt(
-      { name: 'AES-GCM', iv, tagLength: 128 },
+      { name: 'AES-GCM', iv: ivBuffer, tagLength: 128 },
       cryptoKey,
-      viewingKey
+      viewingKeyBuffer
     );
 
     const resultBytes = new Uint8Array(result);
@@ -443,9 +454,14 @@ export async function decryptViewingKey(
 
   // Decrypt using AES-256-GCM
   if (typeof crypto !== 'undefined' && crypto.subtle) {
+    // Create proper ArrayBuffer copies to satisfy TypeScript's strict typing
+    const encryptionKeyBuffer = new Uint8Array(encryptionKey).buffer;
+    const ivBuffer = new Uint8Array(iv).buffer;
+    const ciphertextWithTagBuffer = new Uint8Array(ciphertextWithTag).buffer;
+
     const cryptoKey = await crypto.subtle.importKey(
       'raw',
-      encryptionKey,
+      encryptionKeyBuffer,
       'AES-GCM',
       false,
       ['decrypt']
@@ -453,9 +469,9 @@ export async function decryptViewingKey(
 
     try {
       const result = await crypto.subtle.decrypt(
-        { name: 'AES-GCM', iv, tagLength: 128 },
+        { name: 'AES-GCM', iv: ivBuffer, tagLength: 128 },
         cryptoKey,
-        ciphertextWithTag
+        ciphertextWithTagBuffer
       );
       return new Uint8Array(result);
     } catch (error) {
@@ -491,12 +507,12 @@ export function encodeBLSPublicKeyForSolidity(pk: Uint8Array): BLSPublicKey {
 
   // BLS12-381 G1 points are 48 bytes compressed
   // For Solidity, we need to expand to x, y coordinates (32 bytes each)
-  const point = bls.PointG1.fromHex(bytesToHex(pk));
+  const point = bls.G1.ProjectivePoint.fromHex(bytesToHex(pk));
   const affine = point.toAffine();
 
   return {
-    x: bigIntToBytes(affine.x.value, 32),
-    y: bigIntToBytes(affine.y.value, 32),
+    x: bigIntToBytes(affine.x, 32),
+    y: bigIntToBytes(affine.y, 32),
   };
 }
 
@@ -509,17 +525,18 @@ export function encodeBLSSignatureForSolidity(sig: Uint8Array): BLSSignature {
   }
 
   // G2 point (Fp2 coordinates)
-  const point = bls.PointG2.fromSignature(sig);
+  const point = bls.Signature.fromHex(bytesToHex(sig));
   const affine = point.toAffine();
 
+  // In @noble/curves, Fp2 coordinates are represented as { c0: bigint, c1: bigint }
   return {
     x: [
-      bigIntToBytes(affine.x.c0.value, 32),
-      bigIntToBytes(affine.x.c1.value, 32),
+      bigIntToBytes(affine.x.c0, 32),
+      bigIntToBytes(affine.x.c1, 32),
     ],
     y: [
-      bigIntToBytes(affine.y.c0.value, 32),
-      bigIntToBytes(affine.y.c1.value, 32),
+      bigIntToBytes(affine.y.c0, 32),
+      bigIntToBytes(affine.y.c1, 32),
     ],
   };
 }
