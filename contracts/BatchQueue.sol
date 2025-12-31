@@ -248,7 +248,7 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
             ? MAX_LOOP_ITERATIONS
             : _pendingQueue.length;
 
-        for (uint256 i = 0; i < maxIterations && collected < txCount; i++) {
+        for (uint256 i = 0; i < maxIterations && collected < txCount; ++i) {
             uint256 txId = _pendingQueue[i];
             QueuedTx storage tx_ = _transactions[txId];
 
@@ -311,7 +311,7 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
 
         batch.executed = true;
 
-        for (uint256 i = 0; i < batch.txCount; i++) {
+        for (uint256 i = 0; i < batch.txCount; ++i) {
             uint256 txId = batch.txIds[i];
             QueuedTx storage tx_ = _transactions[txId];
 
@@ -614,7 +614,7 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
      * @dev Get count of active pending transactions
      */
     function _getActivePendingCount() internal view returns (uint256 count) {
-        for (uint256 i = 0; i < _pendingQueue.length; i++) {
+        for (uint256 i = 0; i < _pendingQueue.length; ++i) {
             QueuedTx storage tx_ = _transactions[_pendingQueue[i]];
             if (tx_.status == QueueStatus.Pending) {
                 count++;
@@ -627,7 +627,7 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
      */
     function _cleanPendingQueue() internal {
         uint256 writeIndex = 0;
-        for (uint256 readIndex = 0; readIndex < _pendingQueue.length; readIndex++) {
+        for (uint256 readIndex = 0; readIndex < _pendingQueue.length; ++readIndex) {
             QueuedTx storage tx_ = _transactions[_pendingQueue[readIndex]];
             if (tx_.status == QueueStatus.Pending) {
                 if (writeIndex != readIndex) {
@@ -648,7 +648,7 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
      */
     function _shuffleArray(uint256[] memory arr, uint256 length) internal view {
         uint256 seed = _randomSeed;
-        for (uint256 i = length - 1; i > 0; i--) {
+        for (uint256 i = length - 1; i > 0; --i) {
             seed = uint256(keccak256(abi.encodePacked(seed, i)));
             uint256 j = seed % (i + 1);
             (arr[i], arr[j]) = (arr[j], arr[i]);

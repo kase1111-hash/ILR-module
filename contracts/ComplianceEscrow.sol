@@ -327,9 +327,10 @@ contract ComplianceEscrow is IComplianceEscrow, ReentrancyGuard, Pausable, Ownab
 
     /**
      * @notice Expire a pending request after voting period
+     * @dev FIX L-01: Added whenNotPaused for consistency with other state-changing functions
      * @param requestId The request to expire
      */
-    function expireRequest(uint256 requestId) external requestExists(requestId) {
+    function expireRequest(uint256 requestId) external requestExists(requestId) whenNotPaused {
         RevealRequest storage request = _revealRequests[requestId];
 
         if (request.status != RevealStatus.Pending) revert RequestNotApproved(requestId);
