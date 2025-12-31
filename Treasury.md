@@ -1,4 +1,10 @@
-NatLangChain Treasury Blueprint
+# NatLangChain Treasury Blueprint
+
+> **Status:** 🔮 PLANNED (Phase 2+)
+> **Implementation:** Not yet integrated into core contracts
+> **Purpose:** Design specification for future treasury subsidy system
+
+---
 
 Purpose:
 

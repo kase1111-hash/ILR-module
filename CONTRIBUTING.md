@@ -4,9 +4,9 @@ Thank you for your interest in contributing to NatLangChain! This document provi
 
 ## Getting Started
 
-1. **Read the documentation**: Familiarize yourself with the [Technical Specification](SPEC.md) and the [NCIP Governance Framework](docs/NCIP-000+.md).
-2. **Understand the architecture**: NatLangChain is part of a 12-repository ecosystem. See the SPEC.md for the full repository map.
-3. **Set up your environment**: Follow the [Installation Guide](INSTALLATION.md).
+1. **Read the documentation**: Familiarize yourself with the [Technical Specification](SPEC.md).
+2. **Understand the architecture**: NatLangChain is part of a broader ecosystem. See the SPEC.md for details.
+3. **Set up your environment**: Run `forge install` to install dependencies, then `forge build` to compile contracts.
 
 ## How to Contribute
 
@@ -28,23 +28,8 @@ Thank you for your interest in contributing to NatLangChain! This document provi
 ### Documentation Contributions
 
 - Improvements to existing docs are welcome
-- New documentation should align with the NCIP governance framework
-- Use clear, precise language (per NCIP-000 terminology governance)
-
-## NCIP Process
-
-For significant changes to protocol semantics or governance:
-
-1. **Read NCIP-000** (Terminology & Semantics Governance)
-2. **Check NCIP-014** (Protocol Amendments & Constitutional Change)
-3. **Draft an NCIP** following the established format
-4. **Submit for review** via Pull Request
-
-### NCIP Guidelines
-
-- NCIPs cannot redefine semantics established by lower-numbered NCIPs
-- New terms must avoid collision with existing canonical terms
-- Changes require explicit backward-compatibility analysis
+- Use clear, precise language
+- Keep documentation aligned with the [Technical Specification](SPEC.md)
 
 ## Code Standards
 
@@ -55,11 +40,18 @@ For significant changes to protocol semantics or governance:
 - Write docstrings for public functions
 - Keep functions focused and testable
 
+### Solidity
+
+- Follow Solidity best practices
+- Use OpenZeppelin contracts where applicable
+- Add NatSpec comments for public functions
+- Ensure proper access control and security patterns
+
 ### Documentation
 
 - Use Markdown format
 - Follow existing document structure
-- Reference NCIPs and SPEC.md where applicable
+- Reference SPEC.md where applicable
 - Keep language precise and unambiguous
 
 ## Pull Request Process
@@ -76,15 +68,6 @@ For significant changes to protocol semantics or governance:
 - [ ] Documentation updated
 - [ ] SPEC.md updated (if applicable)
 - [ ] No breaking changes (or clearly documented)
-- [ ] Follows NCIP governance (for semantic changes)
-
-## Governance
-
-NatLangChain uses a layered governance model:
-
-- **NCIP Framework**: Semantic and protocol governance (see docs/NCIP-000+.md)
-- **MP Suite**: Mediator Protocol specifications (MP-01 through MP-05)
-- **Technical Specification**: Implementation details (SPEC.md)
 
 ## Community
 
@@ -98,6 +81,6 @@ By contributing, you agree that your contributions will be licensed under the pr
 
 ---
 
-**Questions?** Open an issue or consult the [FAQ](FAQ.md).
+**Questions?** Open an issue on GitHub.
 
-**Last Updated:** December 23, 2025
+**Last Updated:** December 2025

@@ -1,4 +1,12 @@
-1. IP & Licensing Reconciliation Module (ILRM) – Primary Update Needed
+# FIDO2 & YubiKey Integration Design
+
+> **Status:** 🔮 PLANNED (Phase 2+)
+> **Implementation:** Not yet integrated into core contracts
+> **Purpose:** Design specification for hardware-backed authentication
+
+---
+
+## 1. IP & Licensing Reconciliation Module (ILRM) – Primary Update Needed
 This module handles disputes, stakes, proposals, and acceptances, making it the most identity-sensitive (e.g., proving you're a party without revealing full details).
 
 Why Update: Integrate FIDO2 for signing acceptances, proposals, or proofs (e.g., ZKP membership). YubiKeys can sign off-chain actions submitted on-chain, enhancing anti-harassment (prove initiator without address exposure).

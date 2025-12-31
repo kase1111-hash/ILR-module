@@ -1,4 +1,12 @@
-1. Refined Dispute Membership Circuit (Circom Implementation)
+# Zero-Knowledge Dispute Membership Circuits
+
+> **Status:** 🔮 PLANNED (Phase 2+)
+> **Implementation:** Circuit designs documented, not yet integrated into ILRM
+> **Purpose:** Privacy-preserving identity verification for dispute participation
+
+---
+
+## 1. Refined Dispute Membership Circuit (Circom Implementation)
 Your conceptual example is great for proving identity without revelation. Here's a polished, functional Circom circuit using Poseidon hashing (standard for Ethereum compatibility via snarkjs or halo2). This proves "I know a secret that hashes to the on-chain identityManager (e.g., a dispute's initiatorHash)" without leaking the secret. It prevents random inference by only exposing the proof on-chain.
 prove_identity.circom (Full Circuit File)
 circompragma circom 2.1.6;
