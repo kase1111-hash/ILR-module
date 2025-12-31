@@ -351,14 +351,15 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable2S
 
     /**
      * @notice Check if a license is valid (active and not expired)
-     * @param assetId The asset ID
-     * @param licensee The licensee address
-     * @return True if license is valid
+     * @dev Checks both the active flag and expiration timestamp
+     * @param assetId The asset ID to check the license for
+     * @param licensee The licensee address to check
+     * @return valid True if license is active and not expired, false otherwise
      */
     function isLicenseValid(
         bytes32 assetId,
         address licensee
-    ) external view returns (bool) {
+    ) external view returns (bool valid) {
         LicenseGrant storage grant = _licenses[assetId][licensee];
         return grant.active && block.timestamp < grant.expiresAt;
     }

@@ -193,6 +193,13 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
     error InvalidAddress();
     error DIDRequirementNotMet(address participant);
     error InsufficientDIDSybilScore(address participant, uint256 required, uint256 actual);
+    error DisputeAlreadyResolved(uint256 disputeId);
+    error CounterpartyAlreadyStaked(uint256 disputeId);
+    error ScoreDeltaOutOfBounds(int256 delta);
+    error LengthMismatch(uint256 participants, uint256 scores);
+    error EmptyArray();
+    error BatchTooLarge(uint256 size);
+    error ETHTransferFailed();
 
     /// @notice Emitted when DID registry is set
     event DIDRegistrySet(address indexed registry);
@@ -320,10 +327,10 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
         ) = IILRM(ilrm).disputes(disputeId);
 
         // Dispute must be active (not resolved)
-        require(!resolved, "Dispute already resolved");
+        if (resolved) revert DisputeAlreadyResolved(disputeId);
 
         // Counterparty must not have staked yet (subsidy is to HELP them stake)
-        require(counterpartyStake == 0, "Counterparty already staked");
+        if (counterpartyStake != 0) revert CounterpartyAlreadyStaked(disputeId);
 
         if (participant != counterparty) {
             revert NotCounterparty(participant, counterparty);
@@ -461,7 +468,7 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
     ) external onlyILRM {
         // FIX M-08: Prevent overflow when negating type(int256).min
         // Reasonable bound: delta should be between -100 and +100
-        require(scoreDelta >= -100 && scoreDelta <= 100, "Delta out of bounds");
+        if (scoreDelta < -100 || scoreDelta > 100) revert ScoreDeltaOutOfBounds(scoreDelta);
 
         uint256 oldScore = harassmentScore[participant];
         uint256 newScore;
@@ -489,12 +496,12 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
         address[] calldata participants,
         uint256[] calldata scores
     ) external onlyOwner {
-        require(participants.length == scores.length, "Length mismatch");
-        require(participants.length > 0, "Empty array");
-        require(participants.length <= 100, "Batch too large");
+        if (participants.length != scores.length) revert LengthMismatch(participants.length, scores.length);
+        if (participants.length == 0) revert EmptyArray();
+        if (participants.length > 100) revert BatchTooLarge(participants.length);
 
-        for (uint256 i = 0; i < participants.length; i++) {
-            require(participants[i] != address(0), "Invalid address");
+        for (uint256 i = 0; i < participants.length; ++i) {
+            if (participants[i] == address(0)) revert InvalidAddress();
             uint256 oldScore = harassmentScore[participants[i]];
             uint256 newScore = scores[i] > 100 ? 100 : scores[i];
             harassmentScore[participants[i]] = newScore;
@@ -681,7 +688,7 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
     function emergencyWithdrawETH(address to, uint256 amount) external onlyOwner nonReentrant {
         if (to == address(0)) revert InvalidAddress();
         (bool success, ) = to.call{value: amount}("");
-        require(success, "ETH transfer failed");
+        if (!success) revert ETHTransferFailed();
     }
 
     // ============ View Functions ============
@@ -956,8 +963,8 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
             ,,
         ) = IILRM(ilrm).disputes(disputeId);
 
-        require(!resolved, "Dispute already resolved");
-        require(counterpartyStake == 0, "Counterparty already staked");
+        if (resolved) revert DisputeAlreadyResolved(disputeId);
+        if (counterpartyStake != 0) revert CounterpartyAlreadyStaked(disputeId);
 
         if (participant != counterparty) {
             revert NotCounterparty(participant, counterparty);

@@ -255,7 +255,7 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
 
         // Remove from delegate list
         address[] storage delegateList = _delegateList[did];
-        for (uint256 i = 0; i < delegateList.length; i++) {
+        for (uint256 i = 0; i < delegateList.length; ++i) {
             if (delegateList[i] == delegate) {
                 delegateList[i] = delegateList[delegateList.length - 1];
                 delegateList.pop();
@@ -397,16 +397,17 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
     }
 
     /**
-     * @notice Get count of active (non-revoked, non-expired) credentials
-     * @param did The DID to check
-     * @return count Number of active credentials
+     * @notice Get count of active (non-revoked, non-expired) credentials for a DID
+     * @dev Iterates through all credentials checking revocation status and expiration
+     * @param did The DID to check credentials for
+     * @return count Number of active (valid) credentials associated with the DID
      */
     function getActiveCredentialCount(bytes32 did) external view returns (uint256 count) {
         bytes32[] storage credIds = _didCredentials[did];
-        for (uint256 i = 0; i < credIds.length; i++) {
+        for (uint256 i = 0; i < credIds.length; ++i) {
             Credential storage cred = _credentials[credIds[i]];
             if (!cred.revoked && (cred.expiresAt == 0 || block.timestamp <= cred.expiresAt)) {
-                count++;
+                ++count;
             }
         }
     }
@@ -466,7 +467,7 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
         uint256 weightedScore = 0;
         uint256 count = credIds.length > MAX_CREDENTIALS_FOR_SCORE ? MAX_CREDENTIALS_FOR_SCORE : credIds.length;
 
-        for (uint256 i = 0; i < count; i++) {
+        for (uint256 i = 0; i < count; ++i) {
             Credential storage cred = _credentials[credIds[i]];
 
             // Skip revoked or expired credentials
@@ -531,7 +532,7 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
 
         // Add to list if not already present
         bool found = false;
-        for (uint256 i = 0; i < _trustedIssuerList.length; i++) {
+        for (uint256 i = 0; i < _trustedIssuerList.length; ++i) {
             if (_trustedIssuerList[i] == issuer) {
                 found = true;
                 break;
@@ -591,7 +592,7 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
      */
     function _canIssueType(address issuer, AttestationType attestationType) internal view returns (bool) {
         TrustedIssuer storage ti = _trustedIssuers[issuer];
-        for (uint256 i = 0; i < ti.allowedTypes.length; i++) {
+        for (uint256 i = 0; i < ti.allowedTypes.length; ++i) {
             if (ti.allowedTypes[i] == attestationType) {
                 return true;
             }

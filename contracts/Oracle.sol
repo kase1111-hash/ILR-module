@@ -82,6 +82,8 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
     error ProposalAlreadyProcessed(uint256 disputeId);
     error NoRequestPending(uint256 disputeId);
     error InvalidAddress();
+    error NoProposalToReset(uint256 disputeId);
+    error NoPendingRequest(uint256 disputeId);
 
     // ============ Constructor ============
 
@@ -324,7 +326,7 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
      */
     function resetProposal(uint256 disputeId, string calldata reason) external onlyOwner {
         bytes32 oldHash = processedProposals[disputeId];
-        require(oldHash != bytes32(0), "No proposal to reset");
+        if (oldHash == bytes32(0)) revert NoProposalToReset(disputeId);
 
         // Clear the processed proposal
         processedProposals[disputeId] = bytes32(0);
@@ -344,7 +346,7 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
      * @param disputeId The dispute ID to cancel
      */
     function cancelPendingRequest(uint256 disputeId) external onlyOwner {
-        require(pendingRequests[disputeId], "No pending request");
+        if (!pendingRequests[disputeId]) revert NoPendingRequest(disputeId);
         pendingRequests[disputeId] = false;
         emit ProposalRequested(disputeId, bytes32(0), 0); // Emit with zero values to indicate cancellation
     }
