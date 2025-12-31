@@ -151,6 +151,8 @@ interface IComplianceEscrow {
     error AlreadyVoted(address voter);
     error InvalidCommitment();
     error Unauthorized();
+    error DisputeNotFound(uint256 disputeId);
+    error ILRMNotSet();
 
     // ============ Escrow Management ============
 
