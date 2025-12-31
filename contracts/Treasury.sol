@@ -490,8 +490,11 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
         uint256[] calldata scores
     ) external onlyOwner {
         require(participants.length == scores.length, "Length mismatch");
+        require(participants.length > 0, "Empty array");
+        require(participants.length <= 100, "Batch too large");
 
         for (uint256 i = 0; i < participants.length; i++) {
+            require(participants[i] != address(0), "Invalid address");
             uint256 oldScore = harassmentScore[participants[i]];
             uint256 newScore = scores[i] > 100 ? 100 : scores[i];
             harassmentScore[participants[i]] = newScore;
@@ -1003,10 +1006,15 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
 
     /**
      * @notice Internal function to calculate base subsidy amount
+     * @dev Caches storage reads for gas optimization
      */
     function _calculateBaseSubsidy(uint256 stakeNeeded, address participant) internal view returns (uint256) {
         uint256 effectiveCap = getEffectiveMaxPerParticipant();
         uint256 subsidyAmount = stakeNeeded;
+
+        // Cache storage reads for gas optimization
+        uint256 windowStart = participantWindowStart[participant];
+        uint256 usedInWindow = participantSubsidyUsed[participant];
 
         // Apply per-dispute cap
         if (subsidyAmount > maxPerDispute) {
@@ -1014,14 +1022,14 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
         }
 
         // Check participant window
-        if (block.timestamp > participantWindowStart[participant] + windowDuration) {
+        if (block.timestamp > windowStart + windowDuration) {
             // Window expired, reset
             if (subsidyAmount > effectiveCap) {
                 subsidyAmount = effectiveCap;
             }
         } else {
-            uint256 available = effectiveCap > participantSubsidyUsed[participant]
-                ? effectiveCap - participantSubsidyUsed[participant]
+            uint256 available = effectiveCap > usedInWindow
+                ? effectiveCap - usedInWindow
                 : 0;
             if (subsidyAmount > available) {
                 subsidyAmount = available;

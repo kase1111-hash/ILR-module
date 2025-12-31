@@ -76,6 +76,9 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
     /// @notice Used challenges (replay protection): challengeHash => used
     mapping(bytes32 => bool) private _usedChallenges;
 
+    /// @notice Active key count per user for O(1) hasRegisteredKey lookups
+    mapping(address => uint256) private _activeKeyCount;
+
     // ============ Constructor ============
 
     /**
@@ -129,6 +132,7 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
         });
 
         _userKeyIds[msg.sender].push(credIdHash);
+        _activeKeyCount[msg.sender]++;
 
         emit FIDOKeyRegistered(msg.sender, credIdHash, publicKeyX, publicKeyY);
     }
@@ -140,6 +144,7 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
         require(_keys[msg.sender][credentialIdHash].active, "Key not found");
 
         _keys[msg.sender][credentialIdHash].active = false;
+        _activeKeyCount[msg.sender]--;
 
         emit FIDOKeyRevoked(msg.sender, credentialIdHash);
     }
@@ -277,15 +282,10 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
 
     /**
      * @inheritdoc IFIDOVerifier
+     * @dev O(1) lookup using active key counter instead of O(n) loop
      */
     function hasRegisteredKey(address user) external view override returns (bool hasKey) {
-        bytes32[] memory keyIds = _userKeyIds[user];
-        for (uint256 i = 0; i < keyIds.length; i++) {
-            if (_keys[user][keyIds[i]].active) {
-                return true;
-            }
-        }
-        return false;
+        return _activeKeyCount[user] > 0;
     }
 
     /**

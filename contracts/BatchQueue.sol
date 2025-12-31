@@ -430,7 +430,10 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
         emit ConfigUpdated(
             newConfig.minBatchSize,
             newConfig.maxBatchSize,
-            newConfig.releaseInterval
+            newConfig.releaseInterval,
+            newConfig.maxQueueTime,
+            newConfig.allowCancellation,
+            newConfig.randomizeOrder
         );
     }
 

@@ -117,7 +117,10 @@ interface IBatchQueue {
     event ConfigUpdated(
         uint256 minBatchSize,
         uint256 maxBatchSize,
-        uint256 releaseInterval
+        uint256 releaseInterval,
+        uint256 maxQueueTime,
+        bool allowCancellation,
+        bool randomizeOrder
     );
 
     // ============ Queue Functions ============
