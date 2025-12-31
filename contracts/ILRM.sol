@@ -615,7 +615,9 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
      * @param _verifier The identity verifier contract address
      */
     function setIdentityVerifier(address _verifier) external onlyOwner {
+        address oldVerifier = address(identityVerifier);
         identityVerifier = IIdentityVerifier(_verifier);
+        emit IdentityVerifierUpdated(oldVerifier, _verifier);
     }
 
     /**

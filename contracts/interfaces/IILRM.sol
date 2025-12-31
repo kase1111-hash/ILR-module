@@ -127,6 +127,12 @@ interface IILRM {
         bytes32 indexed identityHash
     );
 
+    /// @notice Emitted when identity verifier is updated
+    event IdentityVerifierUpdated(
+        address indexed oldVerifier,
+        address indexed newVerifier
+    );
+
     // ============ Core Functions ============
 
     /**
