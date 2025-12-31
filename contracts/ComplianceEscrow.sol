@@ -5,6 +5,7 @@ import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "./interfaces/IComplianceEscrow.sol";
+import "./interfaces/IILRM.sol";
 
 /**
  * @title ComplianceEscrow
@@ -120,6 +121,11 @@ contract ComplianceEscrow is IComplianceEscrow, ReentrancyGuard, Pausable, Ownab
         if (holders.length != totalShares) revert InvalidThreshold(threshold, totalShares);
         if (holders.length != holderTypes.length) revert InvalidThreshold(threshold, totalShares);
         if (viewingKeyCommitment == bytes32(0)) revert InvalidCommitment();
+
+        // Validate dispute exists in ILRM
+        if (ilrm == address(0)) revert ILRMNotSet();
+        uint256 disputeCount = IILRM(ilrm).disputeCounter();
+        if (disputeId >= disputeCount) revert DisputeNotFound(disputeId);
 
         escrowId = _escrowCounter++;
 

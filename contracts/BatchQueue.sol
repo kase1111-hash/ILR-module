@@ -42,6 +42,9 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
     /// @notice Maximum batch size
     uint256 public constant ABSOLUTE_MAX_BATCH_SIZE = 100;
 
+    /// @notice Maximum loop iterations to prevent DOS (gas limit protection)
+    uint256 public constant MAX_LOOP_ITERATIONS = 500;
+
     // ============ State Variables ============
 
     /// @notice Target ILRM contract
@@ -240,7 +243,12 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
         uint256[] memory txIds = new uint256[](txCount);
         uint256 collected = 0;
 
-        for (uint256 i = 0; i < _pendingQueue.length && collected < txCount; i++) {
+        // Bound loop iterations to prevent DOS from large pending queue
+        uint256 maxIterations = _pendingQueue.length > MAX_LOOP_ITERATIONS
+            ? MAX_LOOP_ITERATIONS
+            : _pendingQueue.length;
+
+        for (uint256 i = 0; i < maxIterations && collected < txCount; i++) {
             uint256 txId = _pendingQueue[i];
             QueuedTx storage tx_ = _transactions[txId];
 
