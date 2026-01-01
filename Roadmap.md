@@ -1,4 +1,15 @@
-1. Smart Contract Execution in ILRM
+# NatLangChain Implementation Roadmap
+
+**Version:** 1.5
+**Last Updated:** January 2026
+**Status:** Phase 1 Complete - Core Features Implemented
+
+---
+
+## 1. Smart Contract Execution in ILRM
+
+**Status:** Implemented in `AssetRegistry.sol`
+
 This feature involves triggering actions in an external asset registry (e.g., minting NFTs for ownership, freezing/unfreezing assets during disputes, or applying fallback licenses on resolution). It's reactive: ILRM calls the registry only after mutual acceptance, timeout, or default.
 Implementation Steps
 

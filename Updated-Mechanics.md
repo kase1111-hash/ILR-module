@@ -1,8 +1,15 @@
-Detailed ILRM Mechanics
-The IP & Licensing Reconciliation Module (ILRM) is the reactive core of NatLangChain, designed to handle post-conflict scenarios in contract negotiation and digital property management. It operates as a non-adjudicative protocol, focusing on economic incentives to compress disputes rather than rendering judgments. Below is a comprehensive breakdown of its mechanics, drawing from the v1.2 spec, smart contract implementation, and anti-harassment safeguards. All mechanics prioritize symmetry, voluntary acceptance, and continuity to align with NatLangChain's philosophy.
-1. Dispute Initiation (Triggering the Module)
+# Detailed ILRM Mechanics
 
-Paths: ILRM supports two initiation modes to prevent harassment while enabling flexible entry:
+**Version:** 1.5
+**Last Updated:** January 2026
+
+The IP & Licensing Reconciliation Module (ILRM) is the reactive core of NatLangChain, designed to handle post-conflict scenarios in contract negotiation and digital property management. It operates as a non-adjudicative protocol, focusing on economic incentives to compress disputes rather than rendering judgments. Below is a comprehensive breakdown of its mechanics, drawing from the v1.5 spec, smart contract implementation, and anti-harassment safeguards. All mechanics prioritize symmetry, voluntary acceptance, and continuity to align with NatLangChain's philosophy.
+
+---
+
+## 1. Dispute Initiation (Triggering the Module)
+
+**Paths:** ILRM supports two initiation modes to prevent harassment while enabling flexible entry:
 Breach/Drift Dispute (High-Stakes, Symmetric): Triggered on alleged violations or ambiguity in existing contracts (e.g., licensing overreach). Initiator must escrow stake S upfront (e.g., 1% of contract value). This locks the process; counterparty must match within T_stake (default: 3 days) or concede to fallback outcome.
 Voluntary Request (Low-Stakes, Ignorable): For new negotiations or amendments without breach. Initiator pays a non-refundable burn fee (e.g., 0.01 ETH equivalent) — pure self-tax. Counterparty can ignore at zero cost, neutralizing spam.
 

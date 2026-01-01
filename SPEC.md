@@ -1,7 +1,7 @@
 # NatLangChain ILRM Protocol Specification
 
 **Version:** 1.5
-**Last Updated:** December 22, 2025
+**Last Updated:** January 2026
 **Status:** Testnet Ready
 
 ---
