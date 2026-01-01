@@ -1,11 +1,11 @@
 # NatLangChain Protocol Security Audit Report
 
-**Version:** 1.5
+**Software Version:** 0.1.0-alpha
 **Audit Date:** January 2026
-**Protocol Version:** 1.5 (Testnet Ready)
+**Protocol Specification:** v1.5
+**Status:** Alpha - Testnet Ready | All Findings Fixed
 **Auditor:** Claude Security Analysis
 **Scope:** All 16 core contracts (ILRM, Treasury, Oracle, AssetRegistry, and 12 additional modules)
-**Status:** All Findings Fixed
 
 ---
 

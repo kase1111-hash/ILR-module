@@ -142,7 +142,7 @@ export class ILRMError extends Error {
       source: {
         product: 'NatLangChain-ILRM',
         host: process.env.HOSTNAME || 'unknown',
-        version: '1.5',
+        version: '0.1.0-alpha',
       },
       action: this.category,
       outcome: 'failure',

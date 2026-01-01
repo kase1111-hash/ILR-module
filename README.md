@@ -1,8 +1,11 @@
 # IP & Licensing Reconciliation Module (ILRM)
 
-**Protocol Version:** 1.5
-**Status:** Testnet Ready
+**Software Version:** 0.1.0-alpha
+**Protocol Specification:** v1.5
+**Status:** Alpha - Testnet Ready
 **License:** Apache-2.0
+
+> **Alpha Release Notice:** This is a pre-release version intended for testnet deployment and security review. Do not deploy to mainnet without completing the [Production Checklist](./PRODUCTION_CHECKLIST.md).
 
 ---
 
@@ -117,8 +120,13 @@ This project includes a `LICENSE_APPENDIX.md` that clarifies intended use and bo
 
 ### Scaling
 - **L3 Bridge**: App-specific rollup with optimistic state commitments
-- **Fraud Proofs**: 7-day challenge period with challenger bonds
+- **Fraud Proofs**: 7-day challenge period with commit-reveal MEV protection
 - **Batch Settlements**: Up to 100 disputes per batch
+
+### SDK & Security
+- **Cryptographic Utilities**: ECIES encryption, Shamir secret sharing, threshold BLS
+- **Security Integration**: Boundary-SIEM event logging, boundary-daemon connection protection
+- **Error Handling**: Typed errors with severity levels, circuit breaker pattern, retry logic
 
 ---
 
@@ -294,11 +302,15 @@ Timeout (T_resolution)? -> TimeoutWithBurn (50% Burn) -> DefaultLicenseApplied -
 
 | Document | Description |
 |----------|-------------|
+| `CHANGELOG.md` | Version history and release notes |
 | `SPEC.md` | Complete protocol specification v1.5 |
+| `PRODUCTION_CHECKLIST.md` | Production readiness checklist |
 | `Protocol-Safety-Invariants.md` | Formal safety guarantees |
 | `Treasury.md` | Treasury blueprint and mechanics |
 | `Updated-Mechanics.md` | Detailed ILRM mechanics |
 | `docs/SECURITY_AUDIT_REPORT.md` | Security audit findings |
+| `docs/DEPLOYMENT_GUIDE.md` | Deployment instructions |
+| `docs/EMERGENCY_PROCEDURES.md` | Incident response runbook |
 | `docs/SIMULATION_RESULTS.md` | E2E simulation results |
 | `LICENSE_APPENDIX.md` | Usage clarifications |
 
@@ -329,7 +341,11 @@ This project is licensed under Apache-2.0. See `LICENSE` and `LICENSE_APPENDIX.m
 
 ## Links
 
+- [Changelog](./CHANGELOG.md)
 - [Protocol Specification](./SPEC.md)
+- [Production Checklist](./PRODUCTION_CHECKLIST.md)
 - [Security Audit Report](./docs/SECURITY_AUDIT_REPORT.md)
+- [Deployment Guide](./docs/DEPLOYMENT_GUIDE.md)
+- [Emergency Procedures](./docs/EMERGENCY_PROCEDURES.md)
 - [Safety Invariants](./Protocol-Safety-Invariants.md)
 - [Simulation Results](./docs/SIMULATION_RESULTS.md)
