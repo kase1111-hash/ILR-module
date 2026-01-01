@@ -171,6 +171,32 @@ interface IL3Bridge {
         BridgeStatus newStatus
     );
 
+    /// @notice Fraud proof commitment for MEV protection
+    struct FraudProofCommitment {
+        bytes32 commitHash;         // Hash of fraud proof data
+        address challenger;          // Committer address
+        uint256 bond;               // Bond amount
+        uint256 commitTime;         // Block timestamp of commit
+        bool revealed;              // Whether proof has been revealed
+    }
+
+    // ============ Events (Commit-Reveal) ============
+
+    /// @notice Emitted when fraud proof commitment is submitted
+    event FraudProofCommitted(
+        bytes32 indexed commitHash,
+        bytes32 indexed stateRoot,
+        address indexed challenger,
+        uint256 bond
+    );
+
+    /// @notice Emitted when fraud proof is revealed
+    event FraudProofRevealed(
+        bytes32 indexed commitHash,
+        bytes32 indexed claimedRoot,
+        address indexed challenger
+    );
+
     // ============ Errors ============
 
     error BridgeNotActive();
@@ -187,6 +213,12 @@ interface IL3Bridge {
     error InsufficientChallengerBond();
     error BatchSizeExceeded(uint256 size, uint256 max);
     error InvalidSequencerSignature();
+    error CommitmentNotFound();
+    error RevealTooEarly(uint256 remaining);
+    error RevealTooLate();
+    error NotCommitter(address caller, address committer);
+    error AlreadyRevealed();
+    error InvalidCommitment();
 
     // ============ Bridge Operations ============
 
@@ -252,11 +284,27 @@ interface IL3Bridge {
      */
     function isStateFinalized(bytes32 stateRoot) external view returns (bool);
 
-    // ============ Fraud Proofs ============
+    // ============ Fraud Proofs (Commit-Reveal for MEV Protection) ============
 
     /**
-     * @notice Submit fraud proof to challenge invalid state
-     * @dev Requires challenger bond; rewards if valid
+     * @notice Commit to a fraud proof (Phase 1 of commit-reveal)
+     * @dev Prevents MEV front-running by hiding proof until reveal
+     * @param commitHash Hash of (fraud proof data + salt)
+     * @param stateRoot The state root being challenged
+     */
+    function commitFraudProof(bytes32 commitHash, bytes32 stateRoot) external payable;
+
+    /**
+     * @notice Reveal a committed fraud proof (Phase 2 of commit-reveal)
+     * @dev Must be called by original committer after reveal delay
+     * @param proof The fraud proof data
+     * @param salt Random salt used in commitment
+     */
+    function revealFraudProof(FraudProof calldata proof, bytes32 salt) external;
+
+    /**
+     * @notice Submit fraud proof to challenge invalid state (DEPRECATED)
+     * @dev Use commitFraudProof + revealFraudProof instead for MEV protection
      * @param proof The fraud proof data
      */
     function submitFraudProof(FraudProof calldata proof) external payable;
@@ -347,4 +395,17 @@ interface IL3Bridge {
      * @return Total count
      */
     function getTotalSettlements() external view returns (uint256);
+
+    /**
+     * @notice Get fraud proof commitment details
+     * @param commitHash The commitment hash
+     * @return commitment The commitment data
+     */
+    function getFraudProofCommitment(bytes32 commitHash) external view returns (FraudProofCommitment memory);
+
+    /**
+     * @notice Check if commit-reveal mode is enabled
+     * @return True if enabled
+     */
+    function isCommitRevealEnabled() external view returns (bool);
 }

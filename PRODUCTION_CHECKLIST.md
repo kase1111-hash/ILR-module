@@ -18,7 +18,7 @@ This document tracks the production readiness of the NatLangChain ILRM Protocol.
 |------|--------|-------|
 | Security audit completed | ✅ Done | All 15 findings fixed (3C, 4H, 5M, 3L) |
 | Critical vulnerabilities fixed | ✅ Done | C-01, C-02, C-03 resolved |
-| High severity issues fixed | ✅ Done | H-01, H-03, H-04 fixed; H-02 (MEV) acknowledged |
+| High severity issues fixed | ✅ Done | All 4 fixed (including H-02 MEV via commit-reveal) |
 | Medium severity issues fixed | ✅ Done | All 5 fixed |
 | Low severity issues fixed | ✅ Done | All 3 fixed |
 | ReentrancyGuard on state-changing functions | ✅ Done | All contracts protected |
@@ -28,7 +28,7 @@ This document tracks the production readiness of the NatLangChain ILRM Protocol.
 | CEI pattern enforced | ✅ Done | Checks-effects-interactions |
 | Input validation | ✅ Done | Critical parameters validated |
 | Formal verification | ⬜ Recommended | Consider for critical paths |
-| MEV protection (commit-reveal) | ⬜ Recommended | For fraud proofs (H-02 mitigation) |
+| MEV protection (commit-reveal) | ✅ Done | L3Bridge.sol commit-reveal scheme |
 
 ---
 
@@ -132,7 +132,7 @@ This document tracks the production readiness of the NatLangChain ILRM Protocol.
 ### P1 - Recommended Before Mainnet
 
 7. ✅ **Gas Benchmarks** - Generated via CI workflow
-8. ⬜ **MEV Protection** - Commit-reveal for fraud proofs
+8. ✅ **MEV Protection** - Commit-reveal for fraud proofs (L3Bridge.sol)
 9. ✅ **Multi-sig Setup Guide** - docs/DEPLOYMENT_GUIDE.md
 
 ### P2 - Post-Launch

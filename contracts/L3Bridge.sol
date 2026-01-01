@@ -21,12 +21,20 @@ import "./interfaces/IILRM.sol";
  * - Batched settlements for gas efficiency
  * - Sequencer-based ordering with decentralization path
  * - FIX I-02: Two-step ownership transfer via Ownable2Step
+ * - FIX H-02: Commit-reveal scheme for MEV protection on fraud proofs
  *
  * Security Model:
  * - Challenge period allows fraud proof submission
  * - Challenger bond prevents spam
  * - State roots link to previous for chain integrity
  * - Sequencer signature verification
+ * - Commit-reveal prevents MEV front-running of fraud proofs
+ *
+ * Commit-Reveal Scheme (MEV Protection):
+ * 1. Challenger commits hash(proof + salt) with bond
+ * 2. After MIN_REVEAL_DELAY (2 min), challenger reveals proof
+ * 3. Reveal must occur within MAX_REVEAL_WINDOW (1 hour)
+ * 4. Only original committer can reveal, preventing front-running
  */
 contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     using ECDSA for bytes32;
@@ -48,6 +56,13 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
 
     /// @notice Basis points denominator
     uint256 public constant BPS_DENOMINATOR = 10000;
+
+    /// @notice Minimum reveal delay after commitment (prevents same-block front-running)
+    /// @dev FIX H-02: MEV protection via commit-reveal scheme
+    uint256 public constant MIN_REVEAL_DELAY = 2 minutes;
+
+    /// @notice Maximum reveal window after min delay (must reveal within this window)
+    uint256 public constant MAX_REVEAL_WINDOW = 1 hours;
 
     // ============ State Variables ============
 
@@ -112,6 +127,16 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
 
     /// @notice Active fraud challenges
     mapping(bytes32 => address) private _activeChallenges;
+
+    /// @notice Fraud proof commitments (commit-reveal for MEV protection)
+    /// @dev FIX H-02: Maps commit hash -> commitment details
+    mapping(bytes32 => FraudProofCommitment) private _fraudProofCommitments;
+
+    /// @notice Maps state root -> commit hash (for tracking pending reveals)
+    mapping(bytes32 => bytes32) private _stateRootCommitments;
+
+    /// @notice Whether commit-reveal mode is enabled (default: true for MEV protection)
+    bool public commitRevealEnabled = true;
 
     // ============ Constructor ============
 
@@ -359,12 +384,178 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
         return _finalizedStates[stateRoot];
     }
 
-    // ============ Fraud Proofs ============
+    // ============ Fraud Proofs (Commit-Reveal for MEV Protection) ============
 
     /**
      * @inheritdoc IL3Bridge
+     * @dev FIX H-02: Phase 1 of commit-reveal scheme for MEV protection
+     */
+    function commitFraudProof(
+        bytes32 commitHash,
+        bytes32 stateRoot
+    ) external payable override nonReentrant whenNotPaused {
+        // Verify commit-reveal mode is enabled
+        require(commitRevealEnabled, "Commit-reveal disabled");
+
+        // Verify challenger bond
+        if (msg.value < MIN_CHALLENGER_BOND) {
+            revert InsufficientChallengerBond();
+        }
+
+        // Verify state is committed but not finalized
+        if (_commitmentTimestamps[stateRoot] == 0) {
+            revert InvalidStateRoot(stateRoot);
+        }
+
+        if (_finalizedStates[stateRoot]) {
+            revert ChallengePeriodExpired();
+        }
+
+        // Check if already challenged
+        if (_activeChallenges[stateRoot] != address(0)) {
+            revert InvalidStateRoot(stateRoot);
+        }
+
+        // Verify still in challenge period (with buffer for reveal window)
+        uint256 elapsed = block.timestamp - _commitmentTimestamps[stateRoot];
+        if (elapsed >= sequencerConfig.challengePeriod - MIN_REVEAL_DELAY - MAX_REVEAL_WINDOW) {
+            revert ChallengePeriodExpired();
+        }
+
+        // Verify no existing commitment for this state root
+        if (_stateRootCommitments[stateRoot] != bytes32(0)) {
+            revert InvalidCommitment();
+        }
+
+        // Verify this commit hash is not already used
+        if (_fraudProofCommitments[commitHash].challenger != address(0)) {
+            revert InvalidCommitment();
+        }
+
+        // Store commitment
+        _fraudProofCommitments[commitHash] = FraudProofCommitment({
+            commitHash: commitHash,
+            challenger: msg.sender,
+            bond: msg.value,
+            commitTime: block.timestamp,
+            revealed: false
+        });
+
+        _stateRootCommitments[stateRoot] = commitHash;
+
+        emit FraudProofCommitted(commitHash, stateRoot, msg.sender, msg.value);
+    }
+
+    /**
+     * @inheritdoc IL3Bridge
+     * @dev FIX H-02: Phase 2 of commit-reveal scheme for MEV protection
+     */
+    function revealFraudProof(
+        FraudProof calldata proof,
+        bytes32 salt
+    ) external override nonReentrant whenNotPaused {
+        // Compute commitment hash
+        bytes32 commitHash = keccak256(abi.encodePacked(
+            proof.claimedRoot,
+            proof.correctRoot,
+            proof.disputeId,
+            proof.invalidStateData,
+            salt
+        ));
+
+        FraudProofCommitment storage commitment = _fraudProofCommitments[commitHash];
+
+        // Verify commitment exists
+        if (commitment.challenger == address(0)) {
+            revert CommitmentNotFound();
+        }
+
+        // Verify caller is the original committer
+        if (commitment.challenger != msg.sender) {
+            revert NotCommitter(msg.sender, commitment.challenger);
+        }
+
+        // Verify not already revealed
+        if (commitment.revealed) {
+            revert AlreadyRevealed();
+        }
+
+        // Verify reveal timing
+        uint256 timeSinceCommit = block.timestamp - commitment.commitTime;
+
+        // Must wait minimum delay (prevents same-block front-running)
+        if (timeSinceCommit < MIN_REVEAL_DELAY) {
+            revert RevealTooEarly(MIN_REVEAL_DELAY - timeSinceCommit);
+        }
+
+        // Must reveal within window
+        if (timeSinceCommit > MIN_REVEAL_DELAY + MAX_REVEAL_WINDOW) {
+            revert RevealTooLate();
+        }
+
+        bytes32 claimedRoot = proof.claimedRoot;
+
+        // Verify state is still challengeable
+        if (_finalizedStates[claimedRoot]) {
+            revert ChallengePeriodExpired();
+        }
+
+        if (_activeChallenges[claimedRoot] != address(0)) {
+            revert InvalidStateRoot(claimedRoot);
+        }
+
+        // Mark as revealed
+        commitment.revealed = true;
+
+        emit FraudProofRevealed(commitHash, claimedRoot, msg.sender);
+
+        // Verify Merkle proof of incorrect state
+        bool proofValid = _verifyFraudProof(proof);
+        if (!proofValid) {
+            // Invalid fraud proof - challenger loses bond (stays in contract)
+            revert InvalidFraudProof();
+        }
+
+        // Valid fraud proof!
+        // Mark state as challenged
+        _activeChallenges[claimedRoot] = msg.sender;
+
+        // Reset latestCommittedRoot if needed
+        if (latestCommittedRoot == claimedRoot) {
+            latestCommittedRoot = _stateCommitments[claimedRoot].previousRoot;
+        }
+
+        emit FraudProofSubmitted(claimedRoot, proof.disputeId, msg.sender);
+
+        // Calculate reward
+        uint256 bond = commitment.bond;
+        uint256 reward = (bond * FRAUD_REWARD_BPS) / BPS_DENOMINATOR;
+
+        // Check contract balance for reward
+        uint256 availableForReward = address(this).balance > bond ? address(this).balance - bond : 0;
+        if (availableForReward < reward) {
+            reward = availableForReward;
+        }
+
+        uint256 totalPayout = bond + reward;
+
+        // Return bond + reward
+        (bool success, ) = msg.sender.call{value: totalPayout}("");
+        require(success, "Reward transfer failed");
+
+        emit FraudProofValidated(claimedRoot, msg.sender, reward);
+    }
+
+    /**
+     * @inheritdoc IL3Bridge
+     * @dev DEPRECATED: Use commitFraudProof + revealFraudProof for MEV protection
+     *      This function remains for backwards compatibility but is vulnerable to front-running
      */
     function submitFraudProof(FraudProof calldata proof) external payable override nonReentrant whenNotPaused {
+        // If commit-reveal is enabled, require that path instead
+        if (commitRevealEnabled) {
+            revert("Use commitFraudProof + revealFraudProof for MEV protection");
+        }
         // Verify challenger bond
         if (msg.value < MIN_CHALLENGER_BOND) {
             revert InsufficientChallengerBond();
@@ -636,6 +827,29 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
         return _activeChallenges[stateRoot];
     }
 
+    /**
+     * @inheritdoc IL3Bridge
+     */
+    function getFraudProofCommitment(bytes32 commitHash) external view override returns (FraudProofCommitment memory) {
+        return _fraudProofCommitments[commitHash];
+    }
+
+    /**
+     * @inheritdoc IL3Bridge
+     */
+    function isCommitRevealEnabled() external view override returns (bool) {
+        return commitRevealEnabled;
+    }
+
+    /**
+     * @notice Get the commit hash for a state root being challenged
+     * @param stateRoot The state root to query
+     * @return The commit hash (bytes32(0) if no pending challenge)
+     */
+    function getStateRootCommitHash(bytes32 stateRoot) external view returns (bytes32) {
+        return _stateRootCommitments[stateRoot];
+    }
+
     // ============ Admin Functions ============
 
     /**
@@ -664,6 +878,16 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
         require(to != address(0), "Invalid recipient");
         (bool success, ) = to.call{value: amount}("");
         require(success, "Withdrawal failed");
+    }
+
+    /**
+     * @notice Toggle commit-reveal mode for fraud proofs
+     * @dev Only callable by owner. When enabled, submitFraudProof is disabled
+     *      and users must use commitFraudProof + revealFraudProof for MEV protection.
+     * @param enabled Whether commit-reveal mode should be enabled
+     */
+    function setCommitRevealEnabled(bool enabled) external onlyOwner {
+        commitRevealEnabled = enabled;
     }
 
     // ============ Migration Helpers (FIX I-04) ============
