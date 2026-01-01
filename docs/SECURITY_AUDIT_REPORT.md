@@ -1,8 +1,9 @@
 # Security Audit Report - NatLangChain ILRM Protocol
 
-**Version:** 1.0
-**Date:** December 2024
-**Audited Contracts:** ILRM, Treasury, DIDRegistry, L3Bridge, L3StateVerifier, L3DisputeBatcher
+**Version:** 1.5
+**Date:** January 2026
+**Protocol Version:** 1.5 (Testnet Ready)
+**Audited Contracts:** ILRM, Treasury, DIDRegistry, L3Bridge, L3StateVerifier, L3DisputeBatcher, Oracle, AssetRegistry, ComplianceCouncil, FIDOVerifier, IdentityVerifier, GovernanceTimelock, BatchQueue
 **Solidity Version:** ^0.8.20
 
 ---
