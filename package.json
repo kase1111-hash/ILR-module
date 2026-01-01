@@ -32,7 +32,9 @@
     "@nomicfoundation/hardhat-toolbox": "^4.0.0",
     "@openzeppelin/contracts": "^5.4.0",
     "@types/node": "^25.0.3",
+    "dotenv": "^16.4.0",
     "hardhat": "^2.22.0",
+    "hardhat-gas-reporter": "^2.0.0",
     "ts-node": "^10.9.2",
     "typescript": "^5.9.3"
   }

@@ -36,6 +36,13 @@ broadcast/
 
 # Gas snapshots
 .gas-snapshot
+gas-report.txt
 
 # Slither
 slither-report/
+
+# Deployment artifacts
+deployments/
+
+# Build artifacts
+sizes.txt
