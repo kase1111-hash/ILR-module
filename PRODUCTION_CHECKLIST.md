@@ -76,7 +76,7 @@ This document tracks the production readiness of the NatLangChain ILRM Protocol.
 | Slither static analysis | ✅ Done | Included in CI pipeline |
 | Test coverage reporting | ✅ Done | Codecov integration in CI |
 | Contract verification automation | ✅ Done | scripts/verify-contracts.js |
-| Dependency updates (Dependabot) | ⬜ TODO | Automated security updates |
+| Dependency updates (Dependabot) | ✅ Done | .github/dependabot.yml |
 
 ---
 
