@@ -88,7 +88,7 @@ export interface SecurityAlert {
 class CEFFormatter {
   private vendor = 'NatLangChain';
   private product = 'ILRM';
-  private version = '1.5';
+  private version = '0.1.0-alpha';
 
   format(event: SecurityEvent): string {
     const cefSeverity = this.mapSeverity(event.severity);
@@ -333,7 +333,7 @@ export class BoundarySIEM extends EventEmitter {
 
     const headers: Record<string, string> = {
       'Content-Type': isString ? 'text/plain' : 'application/json',
-      'User-Agent': 'NatLangChain-ILRM/1.5',
+      'User-Agent': 'NatLangChain-ILRM/0.1.0-alpha',
     };
 
     if (this.config.apiKey) {
@@ -373,7 +373,7 @@ export class BoundarySIEM extends EventEmitter {
   private async healthCheck(): Promise<void> {
     const url = `${this.config.endpoint}/api/v1/health`;
     const headers: Record<string, string> = {
-      'User-Agent': 'NatLangChain-ILRM/1.5',
+      'User-Agent': 'NatLangChain-ILRM/0.1.0-alpha',
     };
 
     if (this.config.apiKey) {
@@ -498,7 +498,7 @@ export class BoundarySIEM extends EventEmitter {
 
     const url = `${this.config.endpoint}/api/v1/events?${params.toString()}`;
     const headers: Record<string, string> = {
-      'User-Agent': 'NatLangChain-ILRM/1.5',
+      'User-Agent': 'NatLangChain-ILRM/0.1.0-alpha',
     };
 
     if (this.config.apiKey) {
@@ -530,7 +530,7 @@ export class BoundarySIEM extends EventEmitter {
       source: {
         product: 'NatLangChain-ILRM',
         host: process.env.HOSTNAME || 'unknown',
-        version: '1.5',
+        version: '0.1.0-alpha',
       },
       action,
       outcome: 'success',
@@ -590,7 +590,7 @@ export class BoundarySIEM extends EventEmitter {
       source: {
         product: 'NatLangChain-ILRM',
         host: process.env.HOSTNAME || 'unknown',
-        version: '1.5',
+        version: '0.1.0-alpha',
       },
       action: `security.${incidentType}`,
       outcome: 'failure',

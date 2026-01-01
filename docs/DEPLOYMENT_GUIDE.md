@@ -1,6 +1,7 @@
 # NatLangChain ILRM - Deployment Guide
 
-**Version:** 1.5
+**Software Version:** 0.1.0-alpha
+**Protocol Specification:** v1.5
 **Last Updated:** January 2026
 
 ---

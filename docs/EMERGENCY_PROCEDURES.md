@@ -1,6 +1,7 @@
 # Emergency Procedures & Incident Response
 
-**Protocol:** NatLangChain ILRM v1.5
+**Software Version:** 0.1.0-alpha
+**Protocol Specification:** v1.5
 **Last Updated:** January 2026
 **Classification:** Internal Operations
 

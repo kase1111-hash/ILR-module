@@ -1,8 +1,9 @@
 # Security Audit Report - NatLangChain ILRM Protocol
 
-**Version:** 1.5
+**Software Version:** 0.1.0-alpha
 **Date:** January 2026
-**Protocol Version:** 1.5 (Testnet Ready)
+**Protocol Specification:** v1.5
+**Status:** Alpha - Testnet Ready
 **Audited Contracts:** ILRM, Treasury, DIDRegistry, L3Bridge, L3StateVerifier, L3DisputeBatcher, Oracle, AssetRegistry, ComplianceCouncil, FIDOVerifier, IdentityVerifier, GovernanceTimelock, BatchQueue
 **Solidity Version:** ^0.8.20
 
