@@ -159,13 +159,31 @@ This document tracks the production readiness of the NatLangChain ILRM Protocol.
 
 ## Sign-off Checklist
 
-Before mainnet deployment, confirm:
+Before mainnet deployment, confirm (see [docs/SIGN_OFF_PROCEDURES.md](docs/SIGN_OFF_PROCEDURES.md) for detailed steps):
 
+### Testing
 - [ ] All P0 items completed
 - [ ] Independent security review of fixes
 - [ ] Full test suite passes (`forge test --fuzz-runs 10000`)
+  - [ ] Unit tests pass
+  - [ ] Integration tests pass
+  - [ ] Fuzz tests pass (10,000 runs)
+  - [ ] Invariant tests pass
+  - [ ] Security exploit tests pass
+
+### Documentation
 - [ ] Gas costs documented and acceptable
+  - [ ] Gas report generated
+  - [ ] Critical functions within limits
+  - [ ] USD cost estimates documented
+
+### Operations
 - [ ] Multi-sig configured and tested
+  - [ ] Gnosis Safe deployed
+  - [ ] All contracts ownership transferred
+  - [ ] Standard operation tested
+  - [ ] Emergency pause tested
+  - [ ] Threshold enforcement verified
 - [ ] Emergency procedures tested on testnet
 - [ ] Team trained on incident response
 - [ ] Legal review completed (if applicable)
