@@ -113,10 +113,10 @@ This document tracks the production readiness of the NatLangChain ILRM Protocol.
 | Item | Status | Notes |
 |------|--------|-------|
 | Event emission | ✅ Done | All state changes emit events |
-| Subgraph/indexer | ⬜ TODO | TheGraph subgraph definition |
-| Monitoring dashboard | ⬜ TODO | Grafana/Dune analytics |
-| Alert configurations | ⬜ TODO | PagerDuty/Discord webhooks |
-| On-chain metrics | ⬜ TODO | Track key protocol stats |
+| Subgraph/indexer | ✅ Done | TheGraph subgraph in subgraph/ |
+| Monitoring dashboard | ✅ Done | Dune queries in monitoring/ |
+| Alert configurations | ✅ Done | monitoring/alerts/alert-config.yaml |
+| On-chain metrics | ✅ Done | Dune SQL queries for all metrics |
 
 ---
 
@@ -139,8 +139,8 @@ This document tracks the production readiness of the NatLangChain ILRM Protocol.
 
 ### P2 - Post-Launch
 
-10. ⬜ **Subgraph Indexer** - TheGraph integration
-11. ⬜ **Monitoring Dashboard** - Analytics and metrics
+10. ✅ **Subgraph Indexer** - TheGraph integration (subgraph/)
+11. ✅ **Monitoring Dashboard** - Dune queries and alerts (monitoring/)
 12. ⬜ **Formal Verification** - Critical path verification
 
 ---

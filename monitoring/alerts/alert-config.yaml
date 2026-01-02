@@ -1,0 +1,309 @@
+# =============================================================================
+# ILRM Protocol - Alert Configuration
+# =============================================================================
+# This configuration defines alerts for protocol monitoring
+# Compatible with: OpenZeppelin Defender, Tenderly, custom monitoring
+# =============================================================================
+
+# Protocol Health Alerts
+alerts:
+  # ==========================================================================
+  # Critical Alerts (P0) - Immediate Response Required
+  # ==========================================================================
+
+  - name: contract_paused
+    severity: critical
+    description: "Protocol contract has been paused"
+    condition:
+      event: Paused
+      contracts: [ILRM, Treasury, Oracle, L3Bridge, AssetRegistry]
+    notification:
+      channels: [pagerduty, slack_critical, email_oncall]
+      message: "CRITICAL: {{contract}} contract paused by {{sender}}"
+    response:
+      runbook: docs/EMERGENCY_PROCEDURES.md#pause-response
+      escalation_time: 5m
+
+  - name: large_burn
+    severity: critical
+    description: "Unusually large token burn detected"
+    condition:
+      event: StakesBurned
+      threshold: "> 100 ETH equivalent"
+    notification:
+      channels: [pagerduty, slack_critical]
+      message: "CRITICAL: Large burn of {{amount}} detected in dispute {{disputeId}}"
+
+  - name: governance_action
+    severity: critical
+    description: "Governance timelock action executed"
+    condition:
+      event: CallExecuted
+      contracts: [GovernanceTimelock]
+    notification:
+      channels: [slack_critical, email_team]
+      message: "Governance action executed: {{target}} - {{data}}"
+
+  - name: ownership_transfer
+    severity: critical
+    description: "Contract ownership transfer initiated"
+    condition:
+      event: OwnershipTransferStarted
+      contracts: [ILRM, Treasury, Oracle]
+    notification:
+      channels: [pagerduty, slack_critical, email_team]
+      message: "Ownership transfer initiated on {{contract}} to {{newOwner}}"
+
+  # ==========================================================================
+  # High Priority Alerts (P1) - Response Within 1 Hour
+  # ==========================================================================
+
+  - name: fraud_proof_challenge
+    severity: high
+    description: "Fraud proof challenge initiated against L3 batch"
+    condition:
+      event: ChallengeInitiated
+      contracts: [L3Bridge]
+    notification:
+      channels: [slack_alerts, email_team]
+      message: "Fraud proof challenge on batch {{batchId}} by {{challenger}}"
+    response:
+      runbook: docs/EMERGENCY_PROCEDURES.md#fraud-proof-response
+
+  - name: high_harassment_score
+    severity: high
+    description: "User reached high harassment score threshold"
+    condition:
+      event: HarassmentScoreUpdated
+      threshold: "newScore >= 50"
+    notification:
+      channels: [slack_alerts]
+      message: "User {{participant}} reached harassment score {{newScore}}"
+
+  - name: oracle_proposal_delayed
+    severity: high
+    description: "Oracle proposal submission delayed beyond threshold"
+    condition:
+      event: ProposalRequested
+      no_followup_event: ProposalSubmittedToILRM
+      timeout: 6h
+    notification:
+      channels: [slack_alerts, email_team]
+      message: "Oracle proposal for dispute {{disputeId}} delayed > 6 hours"
+
+  - name: treasury_low_balance
+    severity: high
+    description: "Treasury balance below operational threshold"
+    condition:
+      type: balance_check
+      contracts: [Treasury]
+      threshold: "< 10 ETH"
+    notification:
+      channels: [slack_alerts, email_team]
+      message: "Treasury balance low: {{balance}} ETH"
+
+  # ==========================================================================
+  # Medium Priority Alerts (P2) - Response Within 24 Hours
+  # ==========================================================================
+
+  - name: dispute_timeout_approaching
+    severity: medium
+    description: "Active dispute approaching timeout"
+    condition:
+      type: time_based
+      event: DisputeInitiated
+      state: ACTIVE
+      time_remaining: "< 24 hours to timeout"
+    notification:
+      channels: [slack_monitoring]
+      message: "Dispute {{disputeId}} timeout in {{timeRemaining}}"
+
+  - name: unusual_dispute_volume
+    severity: medium
+    description: "Dispute volume significantly above average"
+    condition:
+      type: rate_anomaly
+      event: DisputeInitiated
+      threshold: "> 3x daily average"
+    notification:
+      channels: [slack_monitoring]
+      message: "Unusual dispute volume: {{count}} disputes in last hour (avg: {{average}})"
+
+  - name: batch_finalization_delayed
+    severity: medium
+    description: "L3 batch finalization delayed beyond challenge period"
+    condition:
+      event: BatchSubmitted
+      no_followup_event: BatchFinalized
+      timeout: 8d  # 7 day challenge period + 1 day buffer
+    notification:
+      channels: [slack_alerts]
+      message: "Batch {{batchId}} not finalized after challenge period"
+
+  - name: subsidy_cap_approaching
+    severity: medium
+    description: "Daily subsidy cap nearly exhausted"
+    condition:
+      type: cumulative_check
+      event: SubsidyFunded
+      period: 24h
+      threshold: "> 80% of daily cap"
+    notification:
+      channels: [slack_monitoring]
+      message: "Daily subsidy cap {{percentUsed}}% utilized"
+
+  # ==========================================================================
+  # Low Priority Alerts (P3) - Informational
+  # ==========================================================================
+
+  - name: new_dispute_initiated
+    severity: low
+    description: "New dispute initiated"
+    condition:
+      event: DisputeInitiated
+    notification:
+      channels: [slack_activity]
+      message: "New dispute #{{disputeId}}: {{initiator}} vs {{counterparty}}"
+
+  - name: dispute_resolved
+    severity: low
+    description: "Dispute resolved"
+    condition:
+      event: DisputeResolved
+    notification:
+      channels: [slack_activity]
+      message: "Dispute #{{disputeId}} resolved: {{outcome}}"
+
+  - name: counter_proposal
+    severity: low
+    description: "Counter-proposal submitted"
+    condition:
+      event: CounterProposed
+    notification:
+      channels: [slack_activity]
+      message: "Counter #{{counterNumber}} on dispute #{{disputeId}} by {{party}}"
+
+  - name: l3_batch_submitted
+    severity: low
+    description: "New L3 batch submitted"
+    condition:
+      event: BatchSubmitted
+    notification:
+      channels: [slack_activity]
+      message: "L3 batch #{{batchId}} submitted: {{disputeCount}} disputes"
+
+# ==========================================================================
+# Notification Channels
+# ==========================================================================
+
+channels:
+  pagerduty:
+    type: pagerduty
+    service_key: "${PAGERDUTY_SERVICE_KEY}"
+    severity_map:
+      critical: critical
+      high: error
+      medium: warning
+
+  slack_critical:
+    type: slack
+    webhook_url: "${SLACK_CRITICAL_WEBHOOK}"
+    channel: "#ilrm-critical"
+    mention: "@oncall"
+
+  slack_alerts:
+    type: slack
+    webhook_url: "${SLACK_ALERTS_WEBHOOK}"
+    channel: "#ilrm-alerts"
+
+  slack_monitoring:
+    type: slack
+    webhook_url: "${SLACK_MONITORING_WEBHOOK}"
+    channel: "#ilrm-monitoring"
+
+  slack_activity:
+    type: slack
+    webhook_url: "${SLACK_ACTIVITY_WEBHOOK}"
+    channel: "#ilrm-activity"
+
+  email_oncall:
+    type: email
+    recipients:
+      - oncall@example.com
+    subject_prefix: "[ILRM CRITICAL]"
+
+  email_team:
+    type: email
+    recipients:
+      - team@example.com
+    subject_prefix: "[ILRM Alert]"
+
+  discord:
+    type: discord
+    webhook_url: "${DISCORD_WEBHOOK}"
+    channel_id: "${DISCORD_CHANNEL_ID}"
+
+  telegram:
+    type: telegram
+    bot_token: "${TELEGRAM_BOT_TOKEN}"
+    chat_id: "${TELEGRAM_CHAT_ID}"
+
+# ==========================================================================
+# Escalation Policies
+# ==========================================================================
+
+escalation:
+  critical:
+    - notify: [pagerduty, slack_critical, email_oncall]
+      delay: 0
+    - notify: [pagerduty, email_team]
+      delay: 5m
+      repeat: true
+      repeat_interval: 10m
+
+  high:
+    - notify: [slack_alerts, email_team]
+      delay: 0
+    - notify: [pagerduty]
+      delay: 30m
+
+  medium:
+    - notify: [slack_monitoring]
+      delay: 0
+    - notify: [slack_alerts]
+      delay: 4h
+
+# ==========================================================================
+# Alert Suppression / Maintenance Windows
+# ==========================================================================
+
+maintenance:
+  # Suppress non-critical alerts during scheduled maintenance
+  windows:
+    - name: weekly_maintenance
+      schedule: "SUN 02:00-04:00 UTC"
+      suppress_severity: [low, medium]
+
+    - name: upgrade_window
+      # One-time maintenance window (update as needed)
+      start: "2026-01-15T00:00:00Z"
+      end: "2026-01-15T06:00:00Z"
+      suppress_severity: [low, medium, high]
+
+# ==========================================================================
+# Rate Limiting
+# ==========================================================================
+
+rate_limits:
+  # Prevent alert fatigue
+  default:
+    max_alerts_per_hour: 100
+    cooldown_period: 5m
+
+  per_alert:
+    new_dispute_initiated:
+      max_alerts_per_hour: 50
+    dispute_resolved:
+      max_alerts_per_hour: 50
+    counter_proposal:
+      max_alerts_per_hour: 20
