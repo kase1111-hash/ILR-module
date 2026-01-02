@@ -5,7 +5,7 @@ All notable changes to the NatLangChain ILRM Protocol will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [0.1.0-alpha] - 2026-01-01
+## [0.1.0-alpha] - 2026-01-02
 
 ### Added
 
@@ -75,6 +75,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Hardhat configuration with network presets
 - Governance deployment script
 
+#### Monitoring & Indexing
+- **TheGraph Subgraph** - Complete indexing infrastructure for all contracts (subgraph/)
+- **Dune Analytics Queries** - SQL queries for disputes, financial metrics, participants, L3 bridge
+- **Alert Configuration** - P0-P3 severity alerting with PagerDuty/Slack/Discord support
+- **Sign-off Procedures** - Detailed mainnet deployment checklist
+
+#### Production Readiness
+- Full test suite runner (scripts/run-full-tests.sh)
+- Gas benchmarking infrastructure (test/GasBenchmarks.t.sol)
+- Multi-sig configuration guide and test scripts
+- Dependabot for automated dependency updates
+
 ### Security Notes
 
 This is an **alpha release** intended for testnet deployment and security review only.
@@ -101,12 +113,11 @@ This release implements Protocol Specification v1.5, which defines:
 ## [Unreleased]
 
 ### Planned
-- Subgraph indexer (TheGraph integration)
-- Monitoring dashboard (Grafana/Dune analytics)
 - Formal verification for critical paths
 - Testnet deployments (Sepolia, Optimism Sepolia)
 - Production token configuration
 - Deployment address registry
+- Mainnet deployment (Optimism, Arbitrum)
 
 ---
 

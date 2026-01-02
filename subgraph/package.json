@@ -1,10 +1,10 @@
 {
   "name": "ilrm-subgraph",
-  "version": "0.1.0",
+  "version": "0.1.0-alpha",
   "description": "TheGraph subgraph for NatLangChain ILRM Protocol",
   "repository": {
     "type": "git",
-    "url": "https://github.com/your-org/ILR-module.git"
+    "url": "https://github.com/kase1111-hash/ILR-module.git"
   },
   "license": "Apache-2.0",
   "scripts": {
