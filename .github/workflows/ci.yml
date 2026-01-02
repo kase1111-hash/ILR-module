@@ -62,7 +62,7 @@ jobs:
         run: forge test --gas-report > gas-report.txt
 
       - name: Upload gas report
-        uses: actions/upload-artifact@v4
+        uses: actions/upload-artifact@v6
         with:
           name: gas-report
           path: gas-report.txt
