@@ -317,6 +317,7 @@ Timeout (T_resolution)? -> TimeoutWithBurn (50% Burn) -> DefaultLicenseApplied -
 | `docs/MULTISIG_CONFIG.md` | Multi-sig governance configuration |
 | `docs/SIMULATION_RESULTS.md` | E2E simulation results |
 | `subgraph/README.md` | TheGraph subgraph setup and queries |
+| `monitoring/README.md` | Protocol monitoring and alerting |
 | `LICENSE_APPENDIX.md` | Usage clarifications |
 
 ---
