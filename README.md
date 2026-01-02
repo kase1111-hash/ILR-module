@@ -198,7 +198,7 @@ See `docs/SECURITY_AUDIT_REPORT.md` for full details.
 
 ```bash
 # Clone repository
-git clone https://github.com/your-org/ILR-module.git
+git clone https://github.com/kase1111-hash/ILR-module.git
 cd ILR-module
 
 # Install Foundry dependencies

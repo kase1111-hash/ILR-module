@@ -13,13 +13,16 @@
 
 | Severity | Count | Status |
 |----------|-------|--------|
-| 🔴 Critical | 2 | ✅ ALL FIXED |
-| 🟠 High | 5 | ✅ ALL FIXED |
-| 🟡 Medium | 10 | ✅ ALL FIXED |
-| 🟢 Low | 14 | ✅ ALL FIXED |
-| ℹ️ Informational | 4 | ✅ ALL FIXED |
+| 🔴 Critical | 3 | ✅ ALL FIXED |
+| 🟠 High | 4 | ✅ ALL FIXED |
+| 🟡 Medium | 5 | ✅ ALL FIXED |
+| 🟢 Low | 3 | ✅ ALL FIXED |
+
+**Total Findings:** 15 | **All Fixed**
 
 **Overall Assessment:** The codebase demonstrates solid understanding of security patterns (ReentrancyGuard, SafeERC20, Pausable, access control). All critical and high severity issues have been addressed.
+
+> **Note:** This document contains detailed historical analysis. For the consolidated audit summary, see [docs/SECURITY_AUDIT_REPORT.md](./docs/SECURITY_AUDIT_REPORT.md).
 
 ### Fixed Issues (December 20, 2025)
 **Critical:**
