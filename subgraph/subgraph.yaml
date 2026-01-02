@@ -1,0 +1,168 @@
+specVersion: 0.0.5
+schema:
+  file: ./schema.graphql
+dataSources:
+  # ILRM - Core Dispute Resolution
+  - kind: ethereum/contract
+    name: ILRM
+    network: optimism
+    source:
+      address: "0x0000000000000000000000000000000000000000" # Replace with deployed address
+      abi: ILRM
+      startBlock: 0 # Replace with deployment block
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.7
+      language: wasm/assemblyscript
+      entities:
+        - Dispute
+        - Party
+        - Proposal
+        - Counter
+        - HarassmentScore
+      abis:
+        - name: ILRM
+          file: ./abis/ILRM.json
+      eventHandlers:
+        - event: DisputeInitiated(indexed uint256,indexed address,indexed address,bytes32)
+          handler: handleDisputeInitiated
+        - event: StakeDeposited(indexed uint256,indexed address,uint256)
+          handler: handleStakeDeposited
+        - event: ProposalSubmitted(indexed uint256,string)
+          handler: handleProposalSubmitted
+        - event: AcceptanceSignaled(indexed uint256,indexed address)
+          handler: handleAcceptanceSignaled
+        - event: CounterProposed(indexed uint256,indexed address,uint256)
+          handler: handleCounterProposed
+        - event: StakesBurned(indexed uint256,uint256)
+          handler: handleStakesBurned
+        - event: DefaultLicenseApplied(indexed uint256)
+          handler: handleDefaultLicenseApplied
+        - event: DisputeResolved(indexed uint256,uint8)
+          handler: handleDisputeResolved
+        - event: HarassmentScoreUpdated(indexed address,uint256,uint256)
+          handler: handleHarassmentScoreUpdated
+        - event: ZKIdentityRegistered(indexed uint256,indexed bytes32,bool)
+          handler: handleZKIdentityRegistered
+        - event: FIDOAcceptance(indexed uint256,indexed address,bytes32)
+          handler: handleFIDOAcceptance
+        - event: DIDAssociatedWithDispute(indexed uint256,indexed bytes32,bool)
+          handler: handleDIDAssociatedWithDispute
+      file: ./src/ilrm.ts
+
+  # Treasury - Fund Management
+  - kind: ethereum/contract
+    name: Treasury
+    network: optimism
+    source:
+      address: "0x0000000000000000000000000000000000000000" # Replace with deployed address
+      abi: Treasury
+      startBlock: 0 # Replace with deployment block
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.7
+      language: wasm/assemblyscript
+      entities:
+        - TreasuryMetric
+        - Subsidy
+        - Burn
+      abis:
+        - name: Treasury
+          file: ./abis/Treasury.json
+      eventHandlers:
+        - event: SubsidyFunded(indexed address,indexed address,uint256,string)
+          handler: handleSubsidyFunded
+        - event: TreasuryReceived(indexed address,uint256,string)
+          handler: handleTreasuryReceived
+        - event: HarassmentScoreUpdated(indexed address,uint256,uint256)
+          handler: handleTreasuryHarassmentUpdate
+        - event: CapsUpdated(uint256,uint256)
+          handler: handleCapsUpdated
+      file: ./src/treasury.ts
+
+  # Oracle - LLM Proposals
+  - kind: ethereum/contract
+    name: Oracle
+    network: optimism
+    source:
+      address: "0x0000000000000000000000000000000000000000" # Replace with deployed address
+      abi: Oracle
+      startBlock: 0 # Replace with deployment block
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.7
+      language: wasm/assemblyscript
+      entities:
+        - OracleProposal
+        - OracleMetric
+      abis:
+        - name: Oracle
+          file: ./abis/Oracle.json
+      eventHandlers:
+        - event: ProposalRequested(indexed uint256,indexed address,bytes32,uint256)
+          handler: handleProposalRequested
+        - event: ProposalSubmittedToILRM(indexed uint256,string,address)
+          handler: handleProposalSubmittedToILRM
+        - event: ProposalReset(indexed uint256,bytes32,string)
+          handler: handleProposalReset
+      file: ./src/oracle.ts
+
+  # L3Bridge - Layer 3 Scaling
+  - kind: ethereum/contract
+    name: L3Bridge
+    network: optimism
+    source:
+      address: "0x0000000000000000000000000000000000000000" # Replace with deployed address
+      abi: L3Bridge
+      startBlock: 0 # Replace with deployment block
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.7
+      language: wasm/assemblyscript
+      entities:
+        - L3Batch
+        - L3Metric
+        - FraudProofChallenge
+      abis:
+        - name: L3Bridge
+          file: ./abis/L3Bridge.json
+      eventHandlers:
+        - event: BatchSubmitted(indexed uint256,bytes32,uint256,address)
+          handler: handleBatchSubmitted
+        - event: BatchFinalized(indexed uint256)
+          handler: handleBatchFinalized
+        - event: ChallengeInitiated(indexed uint256,indexed address)
+          handler: handleChallengeInitiated
+        - event: ChallengeResolved(indexed uint256,bool)
+          handler: handleChallengeResolved
+      file: ./src/l3bridge.ts
+
+  # AssetRegistry - IP Management
+  - kind: ethereum/contract
+    name: AssetRegistry
+    network: optimism
+    source:
+      address: "0x0000000000000000000000000000000000000000" # Replace with deployed address
+      abi: AssetRegistry
+      startBlock: 0 # Replace with deployment block
+    mapping:
+      kind: ethereum/events
+      apiVersion: 0.0.7
+      language: wasm/assemblyscript
+      entities:
+        - Asset
+        - License
+        - AssetFreeze
+      abis:
+        - name: AssetRegistry
+          file: ./abis/AssetRegistry.json
+      eventHandlers:
+        - event: AssetRegistered(indexed uint256,indexed address,bytes32)
+          handler: handleAssetRegistered
+        - event: AssetFrozen(indexed uint256,indexed uint256)
+          handler: handleAssetFrozen
+        - event: AssetUnfrozen(indexed uint256)
+          handler: handleAssetUnfrozen
+        - event: FallbackLicenseApplied(indexed uint256,bytes32)
+          handler: handleFallbackLicenseAppliedToAsset
+      file: ./src/assetregistry.ts

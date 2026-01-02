@@ -316,6 +316,7 @@ Timeout (T_resolution)? -> TimeoutWithBurn (50% Burn) -> DefaultLicenseApplied -
 | `docs/TEST_RESULTS.md` | Test execution results template |
 | `docs/MULTISIG_CONFIG.md` | Multi-sig governance configuration |
 | `docs/SIMULATION_RESULTS.md` | E2E simulation results |
+| `subgraph/README.md` | TheGraph subgraph setup and queries |
 | `LICENSE_APPENDIX.md` | Usage clarifications |
 
 ---
