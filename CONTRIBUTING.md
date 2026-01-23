@@ -1,12 +1,19 @@
-# Contributing to NatLangChain
+# Contributing to ILRM
 
-Thank you for your interest in contributing to NatLangChain! This document provides guidelines and information for contributors.
+Thank you for your interest in contributing to the IP & Licensing Reconciliation Module (ILRM)! This document provides guidelines and information for contributors.
 
 ## Getting Started
 
-1. **Read the documentation**: Familiarize yourself with the [Technical Specification](SPEC.md) and the [NCIP Governance Framework](docs/NCIP-000+.md).
-2. **Understand the architecture**: NatLangChain is part of a 12-repository ecosystem. See the SPEC.md for the full repository map.
-3. **Set up your environment**: Follow the [Installation Guide](INSTALLATION.md).
+1. **Read the documentation**: Familiarize yourself with the [Technical Specification](SPEC.md) and the [Protocol Safety Invariants](Protocol-Safety-Invariants.md).
+2. **Understand the architecture**: Review the contract architecture in the README and understand how the 16 contracts interact.
+3. **Set up your environment**: Follow the installation steps in the [README](README.md#installation).
+
+## Prerequisites
+
+- [Foundry](https://getfoundry.sh/) for Solidity development
+- [Node.js](https://nodejs.org/) v18+ for TypeScript SDK
+- Solidity ^0.8.20
+- Git
 
 ## How to Contribute
 
@@ -14,8 +21,8 @@ Thank you for your interest in contributing to NatLangChain! This document provi
 
 - Use GitHub Issues to report bugs or suggest features
 - Search existing issues before creating a new one
-- Provide clear reproduction steps for bugs
-- Include relevant logs and environment information
+- Use the appropriate issue template (Bug Report or Feature Request)
+- For security vulnerabilities, use [private vulnerability reporting](https://github.com/kase1111-hash/ILR-module/security/advisories/new)
 
 ### Code Contributions
 
@@ -28,63 +35,139 @@ Thank you for your interest in contributing to NatLangChain! This document provi
 ### Documentation Contributions
 
 - Improvements to existing docs are welcome
-- New documentation should align with the NCIP governance framework
-- Use clear, precise language (per NCIP-000 terminology governance)
-
-## NCIP Process
-
-For significant changes to protocol semantics or governance:
-
-1. **Read NCIP-000** (Terminology & Semantics Governance)
-2. **Check NCIP-014** (Protocol Amendments & Constitutional Change)
-3. **Draft an NCIP** following the established format
-4. **Submit for review** via Pull Request
-
-### NCIP Guidelines
-
-- NCIPs cannot redefine semantics established by lower-numbered NCIPs
-- New terms must avoid collision with existing canonical terms
-- Changes require explicit backward-compatibility analysis
+- New documentation should align with the protocol specification
+- Use clear, precise language
 
 ## Code Standards
 
-### Python
+### Solidity
 
-- Follow PEP 8 style guidelines
-- Use type hints where practical
-- Write docstrings for public functions
-- Keep functions focused and testable
+- Follow the [Solidity Style Guide](https://docs.soliditylang.org/en/latest/style-guide.html)
+- Use NatSpec comments for public functions
+- Follow the CEI (Checks-Effects-Interactions) pattern
+- Use OpenZeppelin contracts where applicable
+- Add ReentrancyGuard to state-changing functions
+- Include comprehensive input validation
 
-### Documentation
+```solidity
+/// @notice Brief description
+/// @param paramName Description of parameter
+/// @return Description of return value
+function exampleFunction(uint256 paramName) external returns (bool) {
+    // Checks
+    require(paramName > 0, "Invalid parameter");
 
-- Use Markdown format
-- Follow existing document structure
-- Reference NCIPs and SPEC.md where applicable
-- Keep language precise and unambiguous
+    // Effects
+    state = newState;
+
+    // Interactions
+    externalCall();
+
+    return true;
+}
+```
+
+### TypeScript (SDK)
+
+- Use TypeScript strict mode
+- Write type definitions for all public APIs
+- Follow existing patterns in the `sdk/` directory
+- Document exported functions and types
+- Handle errors appropriately with typed errors
+
+### Testing
+
+- Write unit tests for all new functionality
+- Include edge cases and failure scenarios
+- Use descriptive test names
+- Run the full test suite before submitting
+
+```bash
+# Run all tests
+forge test
+
+# Run with verbosity
+forge test -vvv
+
+# Run specific test
+forge test --match-contract ILRM -vvv
+
+# Run with gas reporting
+forge test --gas-report
+
+# Run fuzz tests with high iterations
+forge test --fuzz-runs 10000
+```
 
 ## Pull Request Process
 
 1. **Ensure all tests pass** before submitting
 2. **Update SPEC.md** if your change affects the specification
-3. **Reference related issues** in your PR description
-4. **Request review** from maintainers
-5. **Address feedback** promptly
+3. **Update CHANGELOG.md** for notable changes
+4. **Reference related issues** in your PR description
+5. **Request review** from maintainers
+6. **Address feedback** promptly
 
 ### PR Checklist
 
 - [ ] Tests added/updated
 - [ ] Documentation updated
 - [ ] SPEC.md updated (if applicable)
+- [ ] CHANGELOG.md updated (if applicable)
 - [ ] No breaking changes (or clearly documented)
-- [ ] Follows NCIP governance (for semantic changes)
+- [ ] Gas impact documented (for contract changes)
+- [ ] Security considerations addressed
 
-## Governance
+## Development Workflow
 
-NatLangChain uses a layered governance model:
+### Branch Naming
 
-- **NCIP Framework**: Semantic and protocol governance (see docs/NCIP-000+.md)
-- **MP Suite**: Mediator Protocol specifications (MP-01 through MP-05)
-- **Technical Specification**: Implementation details (SPEC.md)
+- `feature/` - New features
+- `fix/` - Bug fixes
+- `docs/` - Documentation updates
+- `refactor/` - Code refactoring
+- `test/` - Test improvements
+
+### Commit Messages
+
+Use clear, descriptive commit messages:
+
+```
+type(scope): brief description
+
+Longer description if needed.
+
+Refs: #123
+```
+
+Types: `feat`, `fix`, `docs`, `style`, `refactor`, `test`, `chore`
+
+### Local Development
+
+```bash
+# Clone and setup
+git clone https://github.com/kase1111-hash/ILR-module.git
+cd ILR-module
+forge install
+npm install
+
+# Build
+forge build
+
+# Test
+forge test
+
+# Format
+forge fmt
+```
+
+## Security
+
+- Review the [Security Policy](SECURITY.md) before contributing
+- Never commit secrets or private keys
+- Report security issues privately
+- Consider attack vectors in your changes
+- Add appropriate access controls
 
 ## Community
 
@@ -94,10 +177,10 @@ NatLangChain uses a layered governance model:
 
 ## License
 
-By contributing, you agree that your contributions will be licensed under the project's CC BY-SA 4.0 license.
+By contributing, you agree that your contributions will be licensed under the project's [Apache-2.0 license](LICENSE).
 
 ---
 
-**Questions?** Open an issue or consult the [FAQ](FAQ.md).
+**Questions?** Open an issue or start a discussion.
 
-**Last Updated:** December 23, 2025
+**Last Updated:** January 2026
