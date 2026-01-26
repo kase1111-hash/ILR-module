@@ -334,7 +334,7 @@ export class FIDO2SDK {
 
     // SPKI format for P-256: skip header to get raw point
     // The raw point is 65 bytes: 0x04 || x (32 bytes) || y (32 bytes)
-    let rawPoint: Uint8Array;
+    let rawPoint: Uint8Array | undefined;
 
     if (keyBytes.length === 65 && keyBytes[0] === 0x04) {
       rawPoint = keyBytes;
@@ -349,9 +349,10 @@ export class FIDO2SDK {
           break;
         }
       }
-      if (!rawPoint!) {
-        throw new Error('Could not parse public key');
-      }
+    }
+
+    if (!rawPoint) {
+      throw new Error('Could not parse public key');
     }
 
     const x = rawPoint.slice(1, 33);
@@ -391,7 +392,7 @@ export class FIDO2SDK {
     const cleanHex = hex.startsWith('0x') ? hex.slice(2) : hex;
     const bytes = new Uint8Array(cleanHex.length / 2);
     for (let i = 0; i < bytes.length; i++) {
-      bytes[i] = parseInt(cleanHex.substr(i * 2, 2), 16);
+      bytes[i] = parseInt(cleanHex.substring(i * 2, i * 2 + 2), 16);
     }
     return bytes;
   }
