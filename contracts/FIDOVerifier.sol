@@ -429,8 +429,8 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
         }
         require(rLen <= 32, "R too long");
         r = bytes32(uint256(bytes32(sig[rStart:rStart + rLen])) >> (8 * (32 - rLen)));
-        offset += uint8(sig[3]) + (sig[2] == 0x00 ? 0 : 0);
-        offset = 2 + 2 + uint8(sig[3]);
+        // Calculate offset to S: skip DER header (2) + R header (2) + R length
+        offset = 4 + uint8(sig[3]);
 
         // Parse S
         require(sig[offset] == 0x02, "Invalid S marker");
