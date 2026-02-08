@@ -5,8 +5,9 @@ import "forge-std/Test.sol";
 import "../contracts/ILRM.sol";
 import "../contracts/Treasury.sol";
 import "../contracts/Oracle.sol";
-import "../contracts/scaling/L3Bridge.sol";
 import "../contracts/AssetRegistry.sol";
+import "../contracts/interfaces/IOracle.sol";
+import "../contracts/interfaces/IAssetRegistry.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 /**
@@ -26,53 +27,120 @@ contract BenchmarkToken is ERC20 {
     }
 }
 
+// Mock oracle that auto-verifies signatures
+contract MockOracleBench is IOracle {
+    address public override ilrmContract;
+
+    function setILRM(address _ilrm) external {
+        ilrmContract = _ilrm;
+    }
+
+    function requestProposal(uint256, bytes32) external override {}
+
+    function submitProposal(
+        uint256 disputeId,
+        string calldata proposal,
+        bytes calldata signature
+    ) external override {
+        IILRM(ilrmContract).submitLLMProposal(disputeId, proposal, signature);
+    }
+
+    function verifySignature(uint256, bytes32, bytes calldata) external pure override returns (bool) {
+        return true;
+    }
+
+    function isOracle(address) external pure override returns (bool) {
+        return true;
+    }
+
+    function oraclePublicKeyHash(address) external pure override returns (bytes32) {
+        return bytes32(0);
+    }
+}
+
 // Minimal mock for AssetRegistry
 contract MockAssetRegistryBench is IAssetRegistry {
+    function registerAsset(bytes32, address, bytes32) external override {}
     function freezeAssets(uint256, address) external override {}
     function unfreezeAssets(uint256, bytes calldata) external override {}
     function applyFallbackLicense(uint256, bytes32) external override {}
+    function grantLicense(bytes32, address, bytes32, uint256, uint256, bool) external override {}
+    function revokeLicense(bytes32, address) external override {}
+
+    function getAsset(bytes32) external pure override returns (Asset memory) {
+        return Asset(bytes32(0), address(0), bytes32(0), FreezeStatus.Active, 0, 0);
+    }
+
+    function getLicense(bytes32, address) external pure override returns (LicenseGrant memory) {
+        return LicenseGrant(bytes32(0), address(0), bytes32(0), 0, 0, 0, true, false);
+    }
+
+    function isFrozen(bytes32) external pure override returns (bool) {
+        return false;
+    }
+
+    function getAssetsByOwner(address) external pure override returns (bytes32[] memory) {
+        return new bytes32[](0);
+    }
+
+    function isAuthorizedILRM(address) external pure override returns (bool) {
+        return true;
+    }
 }
 
 contract GasBenchmarks is Test {
     // Contracts
     ILRM public ilrm;
-    Treasury public treasury;
-    Oracle public oracle;
+    NatLangChainTreasury public treasury;
+    MockOracleBench public oracle;
     BenchmarkToken public token;
     MockAssetRegistryBench public assetRegistry;
 
     // Test accounts
     address public initiator = address(0x1);
     address public counterparty = address(0x2);
-    address public oracleSubmitter = address(0x3);
 
     // Constants
     uint256 constant STAKE_AMOUNT = 1 ether;
     bytes32 constant EVIDENCE_HASH = keccak256("evidence");
     bytes32 constant FALLBACK_TERMS = keccak256("fallback");
 
+    IILRM.FallbackLicense fallbackLicense;
+
     function setUp() public {
         // Deploy mock token
         token = new BenchmarkToken();
 
-        // Deploy mock asset registry
+        // Deploy mock oracle and asset registry
+        oracle = new MockOracleBench();
         assetRegistry = new MockAssetRegistryBench();
 
-        // Deploy Treasury
-        treasury = new Treasury(address(token));
-
-        // Deploy ILRM
+        // Deploy ILRM with mock oracle address
         ilrm = new ILRM(
-            address(token),
-            address(treasury),
-            address(assetRegistry)
+            IERC20(address(token)),
+            address(oracle),
+            IAssetRegistry(address(assetRegistry))
         );
 
-        // Deploy Oracle
-        oracle = new Oracle(address(ilrm));
+        // Configure mock oracle
+        oracle.setILRM(address(ilrm));
 
-        // Configure ILRM
-        ilrm.setOracle(address(oracle));
+        // Deploy Treasury
+        treasury = new NatLangChainTreasury(
+            IERC20(address(token)),
+            1 ether,        // maxPerDispute
+            10 ether,       // maxPerParticipant
+            30 days         // windowDuration
+        );
+        treasury.setILRM(address(ilrm));
+
+        // Set up fallback license
+        fallbackLicense = IILRM.FallbackLicense({
+            termsHash: FALLBACK_TERMS,
+            termDuration: 365 days,
+            royaltyCapBps: 500,
+            nonExclusive: true
+        });
 
         // Fund test accounts
         token.mint(initiator, 100 ether);
@@ -97,32 +165,24 @@ contract GasBenchmarks is Test {
             counterparty,
             STAKE_AMOUNT,
             EVIDENCE_HASH,
-            ILRM.FallbackLicense({
-                termDuration: 365 days,
-                royaltyCapBps: 500,
-                termsHash: FALLBACK_TERMS
-            })
+            fallbackLicense
         );
     }
 
-    /// @notice Benchmark: Match stake (counterparty joins)
-    function testGas_ILRM_matchStake() public {
+    /// @notice Benchmark: Deposit stake (counterparty joins)
+    function testGas_ILRM_depositStake() public {
         // Setup: Create dispute
         vm.prank(initiator);
         uint256 disputeId = ilrm.initiateBreachDispute(
             counterparty,
             STAKE_AMOUNT,
             EVIDENCE_HASH,
-            ILRM.FallbackLicense({
-                termDuration: 365 days,
-                royaltyCapBps: 500,
-                termsHash: FALLBACK_TERMS
-            })
+            fallbackLicense
         );
 
-        // Benchmark: Match stake
+        // Benchmark: Deposit stake
         vm.prank(counterparty);
-        ilrm.matchStake(disputeId);
+        ilrm.depositStake(disputeId);
     }
 
     /// @notice Benchmark: Submit counter-proposal
@@ -133,22 +193,18 @@ contract GasBenchmarks is Test {
             counterparty,
             STAKE_AMOUNT,
             EVIDENCE_HASH,
-            ILRM.FallbackLicense({
-                termDuration: 365 days,
-                royaltyCapBps: 500,
-                termsHash: FALLBACK_TERMS
-            })
+            fallbackLicense
         );
 
         vm.prank(counterparty);
-        ilrm.matchStake(disputeId);
+        ilrm.depositStake(disputeId);
 
-        // Submit initial proposal
-        vm.prank(oracleSubmitter);
-        oracle.submitProposal(disputeId, "Initial proposal");
+        // Submit initial proposal via mock oracle
+        vm.prank(address(oracle));
+        ilrm.submitLLMProposal(disputeId, "Initial proposal", "");
 
         // Fund counter fee
-        token.mint(counterparty, 1 ether);
+        vm.deal(counterparty, 1 ether);
 
         // Benchmark: Counter-propose
         vm.prank(counterparty);
@@ -163,18 +219,14 @@ contract GasBenchmarks is Test {
             counterparty,
             STAKE_AMOUNT,
             EVIDENCE_HASH,
-            ILRM.FallbackLicense({
-                termDuration: 365 days,
-                royaltyCapBps: 500,
-                termsHash: FALLBACK_TERMS
-            })
+            fallbackLicense
         );
 
         vm.prank(counterparty);
-        ilrm.matchStake(disputeId);
+        ilrm.depositStake(disputeId);
 
-        vm.prank(oracleSubmitter);
-        oracle.submitProposal(disputeId, "Proposal to accept");
+        vm.prank(address(oracle));
+        ilrm.submitLLMProposal(disputeId, "Proposal to accept", "");
 
         // Initiator accepts
         vm.prank(initiator);
@@ -193,15 +245,11 @@ contract GasBenchmarks is Test {
             counterparty,
             STAKE_AMOUNT,
             EVIDENCE_HASH,
-            ILRM.FallbackLicense({
-                termDuration: 365 days,
-                royaltyCapBps: 500,
-                termsHash: FALLBACK_TERMS
-            })
+            fallbackLicense
         );
 
         vm.prank(counterparty);
-        ilrm.matchStake(disputeId);
+        ilrm.depositStake(disputeId);
 
         // Advance time past resolution timeout
         vm.warp(block.timestamp + 8 days);
@@ -214,49 +262,31 @@ contract GasBenchmarks is Test {
     // Treasury Gas Benchmarks
     // =========================================================================
 
-    /// @notice Benchmark: Distribute subsidy
-    function testGas_Treasury_distributeSubsidy() public {
+    /// @notice Benchmark: Deposit to treasury
+    function testGas_Treasury_deposit() public {
+        token.mint(address(this), 100 ether);
+        token.approve(address(treasury), type(uint256).max);
+
+        treasury.deposit(1 ether, "benchmark_deposit");
+    }
+
+    /// @notice Benchmark: Request subsidy
+    function testGas_Treasury_requestSubsidy() public {
         // Fund treasury
         token.mint(address(treasury), 100 ether);
 
-        // Setup recipient
-        address recipient = address(0x4);
-
-        // Benchmark: Distribute subsidy
-        treasury.distributeSubsidy(recipient, 1 ether, "dispute_refund");
-    }
-
-    /// @notice Benchmark: Record burn
-    function testGas_Treasury_recordBurn() public {
-        // Benchmark: Record burn
-        treasury.recordBurn(1 ether, "timeout_burn");
-    }
-
-    // =========================================================================
-    // Oracle Gas Benchmarks
-    // =========================================================================
-
-    /// @notice Benchmark: Submit LLM proposal
-    function testGas_Oracle_submitProposal() public {
-        // Setup: Create and activate dispute
+        // Create a dispute so counterparty can request subsidy
         vm.prank(initiator);
         uint256 disputeId = ilrm.initiateBreachDispute(
             counterparty,
             STAKE_AMOUNT,
             EVIDENCE_HASH,
-            ILRM.FallbackLicense({
-                termDuration: 365 days,
-                royaltyCapBps: 500,
-                termsHash: FALLBACK_TERMS
-            })
+            fallbackLicense
         );
 
+        // Benchmark: Counterparty requests subsidy
         vm.prank(counterparty);
-        ilrm.matchStake(disputeId);
-
-        // Benchmark: Submit proposal
-        vm.prank(oracleSubmitter);
-        oracle.submitProposal(disputeId, "This is a proposal for resolving the intellectual property dispute between the parties. The proposed terms include a royalty rate of 5% and a term of 2 years.");
+        treasury.requestSubsidy(disputeId, STAKE_AMOUNT, counterparty);
     }
 
     // =========================================================================
@@ -274,11 +304,7 @@ contract GasBenchmarks is Test {
                 cp,
                 STAKE_AMOUNT,
                 keccak256(abi.encode("evidence", i)),
-                ILRM.FallbackLicense({
-                    termDuration: 365 days,
-                    royaltyCapBps: 500,
-                    termsHash: FALLBACK_TERMS
-                })
+                fallbackLicense
             );
         }
     }
@@ -294,14 +320,10 @@ contract GasBenchmarks is Test {
             counterparty,
             STAKE_AMOUNT,
             EVIDENCE_HASH,
-            ILRM.FallbackLicense({
-                termDuration: 365 days,
-                royaltyCapBps: 500,
-                termsHash: FALLBACK_TERMS
-            })
+            fallbackLicense
         );
 
         // Benchmark view call
-        ilrm.getDispute(disputeId);
+        ilrm.disputes(disputeId);
     }
 }
