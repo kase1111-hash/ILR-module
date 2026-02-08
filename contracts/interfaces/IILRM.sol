@@ -114,25 +114,6 @@ interface IILRM {
         uint256 amount
     );
 
-    /// @notice Emitted when ZK identity is registered for a dispute
-    event ZKIdentityRegistered(
-        uint256 indexed disputeId,
-        bytes32 indexed identityHash,
-        bool isInitiator
-    );
-
-    /// @notice Emitted when ZK proof is used for acceptance
-    event ZKProofAcceptance(
-        uint256 indexed disputeId,
-        bytes32 indexed identityHash
-    );
-
-    /// @notice Emitted when identity verifier is updated
-    event IdentityVerifierUpdated(
-        address indexed oldVerifier,
-        address indexed newVerifier
-    );
-
     // ============ Core Functions ============
 
     /**
@@ -241,23 +222,4 @@ interface IILRM {
      */
     function getDisputeCount() external view returns (uint256);
 
-    // ============ ZK Identity Functions ============
-
-    /**
-     * @notice Get the ZK identity hash for a party in a dispute
-     * @param disputeId The dispute ID
-     * @param isInitiator True for initiator, false for counterparty
-     * @return The identity hash (0 if not registered)
-     */
-    function getZKIdentity(
-        uint256 disputeId,
-        bool isInitiator
-    ) external view returns (bytes32);
-
-    /**
-     * @notice Check if ZK identity mode is enabled for a dispute
-     * @param disputeId The dispute ID
-     * @return True if ZK mode is enabled
-     */
-    function isZKModeEnabled(uint256 disputeId) external view returns (bool);
 }
