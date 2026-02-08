@@ -3,8 +3,8 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
-import "./interfaces/IL3Bridge.sol";
-import "./interfaces/IILRM.sol";
+import "../interfaces/IL3Bridge.sol";
+import "../interfaces/IILRM.sol";
 
 /**
  * @title L3DisputeBatcher

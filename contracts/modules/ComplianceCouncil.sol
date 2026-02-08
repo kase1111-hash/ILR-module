@@ -4,8 +4,8 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
-import "./interfaces/IComplianceCouncil.sol";
-import "./interfaces/IComplianceEscrow.sol";
+import "../interfaces/IComplianceCouncil.sol";
+import "../interfaces/IComplianceEscrow.sol";
 
 /**
  * @title ComplianceCouncil

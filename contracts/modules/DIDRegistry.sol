@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
-import "./interfaces/IDIDRegistry.sol";
+import "../interfaces/IDIDRegistry.sol";
 
 /**
  * @title DIDRegistry

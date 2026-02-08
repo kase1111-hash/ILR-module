@@ -6,8 +6,8 @@ import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/cryptography/ECDSA.sol";
 import "@openzeppelin/contracts/utils/cryptography/MessageHashUtils.sol";
-import "./interfaces/IL3Bridge.sol";
-import "./interfaces/IILRM.sol";
+import "../interfaces/IL3Bridge.sol";
+import "../interfaces/IILRM.sol";
 
 /**
  * @title L3Bridge
