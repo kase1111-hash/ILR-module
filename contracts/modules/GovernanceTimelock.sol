@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/governance/TimelockController.sol";
 import "@openzeppelin/contracts/access/AccessControl.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
-import "./interfaces/IGovernanceTimelock.sol";
+import "../interfaces/IGovernanceTimelock.sol";
 
 /// @notice Simple interface for checking pausable contracts
 interface IPausable {

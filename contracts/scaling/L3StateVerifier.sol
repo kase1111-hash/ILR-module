@@ -2,7 +2,7 @@
 pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
-import "./interfaces/IL3Bridge.sol";
+import "../interfaces/IL3Bridge.sol";
 
 /**
  * @title L3StateVerifier

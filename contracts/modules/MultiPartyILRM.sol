@@ -6,9 +6,9 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
-import "./interfaces/IMultiPartyILRM.sol";
-import "./interfaces/IOracle.sol";
-import "./interfaces/IAssetRegistry.sol";
+import "../interfaces/IMultiPartyILRM.sol";
+import "../interfaces/IOracle.sol";
+import "../interfaces/IAssetRegistry.sol";
 
 /**
  * @title MultiPartyILRM - Multi-Party IP & Licensing Reconciliation Module

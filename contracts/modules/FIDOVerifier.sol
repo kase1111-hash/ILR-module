@@ -3,7 +3,7 @@ pragma solidity ^0.8.20;
 
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
-import "./interfaces/IFIDOVerifier.sol";
+import "../interfaces/IFIDOVerifier.sol";
 
 /**
  * @title FIDOVerifier

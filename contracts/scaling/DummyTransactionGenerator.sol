@@ -4,7 +4,7 @@ pragma solidity ^0.8.20;
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
-import "./interfaces/IDummyTransactionGenerator.sol";
+import "../interfaces/IDummyTransactionGenerator.sol";
 
 /**
  * @title DummyTransactionGenerator

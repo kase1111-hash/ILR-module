@@ -5,7 +5,7 @@ import "forge-std/Test.sol";
 import "../contracts/ILRM.sol";
 import "../contracts/Treasury.sol";
 import "../contracts/Oracle.sol";
-import "../contracts/L3Bridge.sol";
+import "../contracts/scaling/L3Bridge.sol";
 import "../contracts/AssetRegistry.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
