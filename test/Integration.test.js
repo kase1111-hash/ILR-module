@@ -88,8 +88,8 @@ describe("Integration Tests", function () {
       const evidenceHash = ethers.keccak256(ethers.toUtf8Bytes("evidence-bundle"));
       const fallback = {
         termsHash: ethers.keccak256(ethers.toUtf8Bytes("fallback-terms")),
-        duration: 30 * 24 * 60 * 60,
-        royaltyCap: 500,
+        termDuration: 30 * 24 * 60 * 60,
+        royaltyCapBps: 500,
         nonExclusive: true
       };
 
@@ -153,8 +153,8 @@ describe("Integration Tests", function () {
       const evidenceHash = ethers.keccak256(ethers.toUtf8Bytes("evidence"));
       const fallback = {
         termsHash: ethers.keccak256(ethers.toUtf8Bytes("default-license")),
-        duration: 30 * 24 * 60 * 60,
-        royaltyCap: 500,
+        termDuration: 30 * 24 * 60 * 60,
+        royaltyCapBps: 500,
         nonExclusive: true
       };
 
@@ -197,7 +197,7 @@ describe("Integration Tests", function () {
       await ilrm.connect(initiator).initiateBreachDispute(
         counterparty.address, STAKE,
         ethers.ZeroHash,
-        { termsHash: ethers.ZeroHash, duration: 86400, royaltyCap: 500, nonExclusive: true }
+        { termsHash: ethers.ZeroHash, termDuration: 86400, royaltyCapBps: 500, nonExclusive: true }
       );
       await ilrm.connect(counterparty).depositStake(0);
       console.log("     ✓ Both staked 10 ETH each");
@@ -245,7 +245,7 @@ describe("Integration Tests", function () {
       await ilrm.connect(initiator).initiateBreachDispute(
         counterparty.address, STAKE,
         ethers.ZeroHash,
-        { termsHash: ethers.ZeroHash, duration: 86400, royaltyCap: 500, nonExclusive: true }
+        { termsHash: ethers.ZeroHash, termDuration: 86400, royaltyCapBps: 500, nonExclusive: true }
       );
       await ilrm.connect(counterparty).depositStake(0);
       await ilrm.connect(oracleOperator).submitLLMProposal(0, '{"round":1}', "0x");
@@ -304,7 +304,7 @@ describe("Integration Tests", function () {
       await ilrm.connect(initiator).initiateBreachDispute(
         counterparty.address, STAKE,
         ethers.ZeroHash,
-        { termsHash: ethers.ZeroHash, duration: 86400, royaltyCap: 500, nonExclusive: true }
+        { termsHash: ethers.ZeroHash, termDuration: 86400, royaltyCapBps: 500, nonExclusive: true }
       );
       console.log("     ✓ Dispute initiated against low-resource party");
 

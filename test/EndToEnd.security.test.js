@@ -57,8 +57,8 @@ describe("END-TO-END SECURITY TESTS", function () {
     const EVIDENCE_HASH = ethers.keccak256(ethers.toUtf8Bytes("evidence"));
     const fallback = {
       termsHash: ethers.keccak256(ethers.toUtf8Bytes("fallback")),
-      duration: 30 * 24 * 60 * 60,
-      royaltyCap: 500,
+      termDuration: 30 * 24 * 60 * 60,
+      royaltyCapBps: 500,
       nonExclusive: true
     };
 
@@ -85,7 +85,7 @@ describe("END-TO-END SECURITY TESTS", function () {
       // Dispute is now resolved - try to claim subsidy
       await expect(
         treasury.connect(counterparty).requestSubsidy(0, STAKE, counterparty.address)
-      ).to.be.revertedWith("Dispute already resolved");
+      ).to.be.revertedWithCustomError(treasury, "DisputeAlreadyResolved");
     });
 
     /**
@@ -100,7 +100,7 @@ describe("END-TO-END SECURITY TESTS", function () {
       // Already staked - try to claim subsidy
       await expect(
         treasury.connect(counterparty).requestSubsidy(0, STAKE, counterparty.address)
-      ).to.be.revertedWith("Counterparty already staked");
+      ).to.be.revertedWithCustomError(treasury, "CounterpartyAlreadyStaked");
     });
 
     /**

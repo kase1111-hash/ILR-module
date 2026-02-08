@@ -52,8 +52,8 @@ describe("ILRM Lifecycle Tests", function () {
 
     const fallback = {
       termsHash: ethers.keccak256(ethers.toUtf8Bytes("fallback-license")),
-      duration: 30 * 24 * 60 * 60,
-      royaltyCap: 500,
+      termDuration: 30 * 24 * 60 * 60,
+      royaltyCapBps: 500,
       nonExclusive: true
     };
 
@@ -128,8 +128,8 @@ describe("ILRM Lifecycle Tests", function () {
 
       const exclusiveFallback = {
         termsHash: ethers.keccak256(ethers.toUtf8Bytes("exclusive")),
-        duration: 30 * 24 * 60 * 60,
-        royaltyCap: 500,
+        termDuration: 30 * 24 * 60 * 60,
+        royaltyCapBps: 500,
         nonExclusive: false  // INVALID
       };
 

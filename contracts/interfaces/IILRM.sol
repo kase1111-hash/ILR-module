@@ -21,10 +21,10 @@ interface IILRM {
 
     /// @notice Fallback license terms applied on timeout/default
     struct FallbackLicense {
-        bytes32 termsHash;     // IPFS hash or on-chain reference to license terms
-        uint256 duration;      // Time-limited grant in seconds
-        uint256 royaltyCap;    // Maximum royalty in basis points (e.g., 500 = 5%)
-        bool nonExclusive;     // Must be true per spec
+        bytes32 termsHash;      // IPFS hash or on-chain reference to license terms
+        uint256 termDuration;   // Time-limited grant in seconds
+        uint256 royaltyCapBps;  // Maximum royalty in basis points (e.g., 500 = 5%)
+        bool nonExclusive;      // Must be true per spec
     }
 
     /// @notice Full dispute state

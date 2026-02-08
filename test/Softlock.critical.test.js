@@ -53,8 +53,8 @@ describe("CRITICAL: Softlock Prevention Tests", function () {
 
     const fallback = {
       termsHash: ethers.keccak256(ethers.toUtf8Bytes("fallback")),
-      duration: 30 * 24 * 60 * 60,
-      royaltyCap: 500,
+      termDuration: 30 * 24 * 60 * 60,
+      royaltyCapBps: 500,
       nonExclusive: true
     };
 

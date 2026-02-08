@@ -41,8 +41,8 @@ describe("ILRM", function () {
     it("initiator must stake first", async function () {
       const fallback = {
         termsHash: ethers.keccak256(ethers.toUtf8Bytes("fallback")),
-        duration: 30 * 24 * 60 * 60,
-        royaltyCap: 500,
+        termDuration: 30 * 24 * 60 * 60,
+        royaltyCapBps: 500,
         nonExclusive: true
       };
 
@@ -64,8 +64,8 @@ describe("ILRM", function () {
     it("counterparty can ignore dispute without cost", async function () {
       const fallback = {
         termsHash: ethers.keccak256(ethers.toUtf8Bytes("fallback")),
-        duration: 30 * 24 * 60 * 60,
-        royaltyCap: 500,
+        termDuration: 30 * 24 * 60 * 60,
+        royaltyCapBps: 500,
         nonExclusive: true
       };
 
@@ -93,8 +93,8 @@ describe("ILRM", function () {
     it("max 3 counter-proposals allowed", async function () {
       const fallback = {
         termsHash: ethers.keccak256(ethers.toUtf8Bytes("fallback")),
-        duration: 30 * 24 * 60 * 60,
-        royaltyCap: 500,
+        termDuration: 30 * 24 * 60 * 60,
+        royaltyCapBps: 500,
         nonExclusive: true
       };
 
@@ -132,8 +132,8 @@ describe("ILRM", function () {
     it("counterparty stakes match initiator stakes", async function () {
       const fallback = {
         termsHash: ethers.keccak256(ethers.toUtf8Bytes("fallback")),
-        duration: 30 * 24 * 60 * 60,
-        royaltyCap: 500,
+        termDuration: 30 * 24 * 60 * 60,
+        royaltyCapBps: 500,
         nonExclusive: true
       };
 
@@ -155,8 +155,8 @@ describe("ILRM", function () {
     it("returns stakes when both parties accept", async function () {
       const fallback = {
         termsHash: ethers.keccak256(ethers.toUtf8Bytes("fallback")),
-        duration: 30 * 24 * 60 * 60,
-        royaltyCap: 500,
+        termDuration: 30 * 24 * 60 * 60,
+        royaltyCapBps: 500,
         nonExclusive: true
       };
 
