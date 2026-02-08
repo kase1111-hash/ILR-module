@@ -139,7 +139,7 @@ describe("END-TO-END SECURITY TESTS", function () {
       await ilrm.connect(initiator).initiateBreachDispute(counterparty.address, STAKE, EVIDENCE_HASH, fallback);
 
       // Set high harassment score
-      await treasury.connect(owner).batchSetHarassmentScores([counterparty.address], [60]);
+      await treasury.connect(owner).setHarassmentScore(counterparty.address, 60);
 
       await expect(
         treasury.connect(counterparty).requestSubsidy(0, STAKE, counterparty.address)
@@ -148,66 +148,9 @@ describe("END-TO-END SECURITY TESTS", function () {
   });
 
   // ============================================================
-  // TIERED SUBSIDY TESTS (6-8)
+  // TIERED SUBSIDY TESTS (6-8) -- Deferred to Phase 4-5
+  // Tiered subsidies moved to contracts/modules/ as composable extension
   // ============================================================
-  describe("TIERED SUBSIDY EDGE CASES", function () {
-    /**
-     * TEST 6: Tier thresholds must be > 0 when enabled
-     */
-    it("TEST 6: Cannot enable tiered subsidies with zero threshold", async function () {
-      const { treasury, owner } = await loadFixture(deployFullSystem);
-
-      await expect(
-        treasury.connect(owner).setTieredSubsidyConfig(
-          true,  // enabled
-          0,     // tier1Threshold - INVALID
-          10,
-          25,
-          7500,
-          5000,
-          2500
-        )
-      ).to.be.revertedWith("Tier 1 threshold must be > 0");
-    });
-
-    /**
-     * TEST 7: Tier order must be ascending
-     */
-    it("TEST 7: Tier thresholds must be ascending", async function () {
-      const { treasury, owner } = await loadFixture(deployFullSystem);
-
-      await expect(
-        treasury.connect(owner).setTieredSubsidyConfig(
-          true,
-          20,    // tier1
-          10,    // tier2 - INVALID (less than tier1)
-          30,
-          7500,
-          5000,
-          2500
-        )
-      ).to.be.revertedWith("Tier 1 must be < Tier 2");
-    });
-
-    /**
-     * TEST 8: Multipliers must be descending
-     */
-    it("TEST 8: Tier multipliers must be descending", async function () {
-      const { treasury, owner } = await loadFixture(deployFullSystem);
-
-      await expect(
-        treasury.connect(owner).setTieredSubsidyConfig(
-          true,
-          5,
-          15,
-          30,
-          5000,  // tier1
-          7500,  // tier2 - INVALID (greater than tier1)
-          2500
-        )
-      ).to.be.revertedWith("Tier 2 must be <= Tier 1");
-    });
-  });
 
   // ============================================================
   // MULTI-PARTY DISPUTE TESTS (9-13)

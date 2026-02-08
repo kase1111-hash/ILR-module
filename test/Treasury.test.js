@@ -235,13 +235,11 @@ describe("Treasury Tests", function () {
       expect(score).to.equal(100);
     });
 
-    it("should allow owner to batch set scores", async function () {
+    it("should allow owner to set harassment score", async function () {
       const { treasury, owner, counterparty, attacker } = await loadFixture(deployFixture);
 
-      await treasury.connect(owner).batchSetHarassmentScores(
-        [counterparty.address, attacker.address],
-        [10, 60]
-      );
+      await treasury.connect(owner).setHarassmentScore(counterparty.address, 10);
+      await treasury.connect(owner).setHarassmentScore(attacker.address, 60);
 
       expect(await treasury.harassmentScore(counterparty.address)).to.equal(10);
       expect(await treasury.harassmentScore(attacker.address)).to.equal(60);
