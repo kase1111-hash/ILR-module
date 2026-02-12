@@ -86,8 +86,8 @@ MULTISIG_ADDRESS=0x...
 # Check Hardhat config loads
 npx hardhat compile
 
-# Verify network connectivity
-npx hardhat run --network optimismSepolia scripts/check-network.js
+# Run tests to verify setup
+forge test
 ```
 
 ---
@@ -127,11 +127,11 @@ npx hardhat run scripts/deploy.js --network optimismSepolia
 ### Step 3: Verify Deployment
 
 ```bash
-# Run verification checks
+# Run tests against deployed contracts
 forge test --fork-url $OPTIMISM_SEPOLIA_RPC_URL
 
-# Check contract states
-npx hardhat run scripts/verify-deployment.js --network optimismSepolia
+# Verify contract source on block explorer
+node scripts/verify-contracts.js --network optimismSepolia
 ```
 
 ### Step 4: Deploy Governance
@@ -159,8 +159,8 @@ npx hardhat run scripts/deploy-governance.ts --network optimismSepolia
 
 Calculate required gas:
 ```bash
-# Estimate deployment costs
-forge script scripts/Deploy.s.sol --fork-url $OPTIMISM_RPC_URL --estimate
+# Estimate deployment costs via dry-run
+npx hardhat run scripts/deploy.js --network optimism --dry-run
 ```
 
 Transfer funds to deployer wallet (add 50% buffer for safety).
