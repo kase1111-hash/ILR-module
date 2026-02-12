@@ -83,20 +83,20 @@ function exampleFunction(uint256 paramName) external returns (bool) {
 - Run the full test suite before submitting
 
 ```bash
-# Run all tests
-forge test
+# Foundry (Solidity tests)
+forge test                              # Run all tests
+forge test -vvv                         # Run with verbosity
+forge test --match-contract ILRM -vvv   # Run specific test
+forge test --gas-report                 # Run with gas reporting
+forge test --fuzz-runs 10000            # Run fuzz tests with high iterations
 
-# Run with verbosity
-forge test -vvv
+# Hardhat (JavaScript tests)
+npm test                                # Run all Hardhat tests
+npx hardhat coverage                    # Run with coverage
+npx hardhat test test/ILRM.test.js      # Run a specific test file
 
-# Run specific test
-forge test --match-contract ILRM -vvv
-
-# Run with gas reporting
-forge test --gas-report
-
-# Run fuzz tests with high iterations
-forge test --fuzz-runs 10000
+# Full suite (both Foundry + Hardhat)
+scripts/run-full-tests.sh
 ```
 
 ## Pull Request Process
@@ -183,4 +183,4 @@ By contributing, you agree that your contributions will be licensed under the pr
 
 **Questions?** Open an issue or start a discussion.
 
-**Last Updated:** January 2026
+**Last Updated:** February 2026

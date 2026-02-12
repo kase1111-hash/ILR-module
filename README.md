@@ -90,7 +90,9 @@ Key use cases:
 
 ---
 
-## Core Contracts (16 Total)
+## Contracts (16 Total)
+
+The protocol is organized into 4 core contracts, 7 optional modules, and 5 scaling contracts:
 
 | Contract | Purpose | Key Features |
 |----------|---------|--------------|
@@ -225,6 +227,10 @@ forge install
 # Install Node dependencies
 npm install
 
+# Configure environment
+cp .env.example .env
+# Edit .env with your RPC endpoints and API keys
+
 # Compile contracts
 forge build
 
@@ -236,8 +242,10 @@ forge test
 
 ## Testing
 
+### Foundry (Solidity)
+
 ```bash
-# Run all tests
+# Run all Foundry tests
 forge test
 
 # Run with verbosity
@@ -253,7 +261,27 @@ forge test --gas-report
 forge test --fuzz-runs 10000
 ```
 
-### Test Suites
+### Hardhat (JavaScript)
+
+```bash
+# Run all Hardhat tests
+npm test
+
+# Run with coverage
+npx hardhat coverage
+
+# Run a specific test file
+npx hardhat test test/ILRM.test.js
+```
+
+### Full Suite
+
+```bash
+# Run both Foundry and Hardhat tests
+scripts/run-full-tests.sh
+```
+
+### Foundry Test Suites
 
 | Test File | Coverage |
 |-----------|----------|
@@ -264,16 +292,38 @@ forge test --fuzz-runs 10000
 | `StateMachinePermutations.t.sol` | State transition coverage |
 | `DeadEndDetection.t.sol` | Deadlock detection |
 | `NoDeadEndsVerification.t.sol` | Deadlock-free verification |
+| `GasBenchmarks.t.sol` | Gas cost analysis |
+
+### Hardhat Test Suites
+
+| Test File | Coverage |
+|-----------|----------|
+| `ILRM.test.js` | Core contract unit tests |
+| `ILRM.lifecycle.test.js` | Dispute lifecycle flows |
+| `Oracle.test.js` | Oracle contract tests |
+| `Treasury.test.js` | Treasury contract tests |
+| `AssetRegistry.test.js` | Asset registry tests |
+| `Integration.test.js` | Cross-contract integration |
+| `EndToEnd.security.test.js` | End-to-end security scenarios |
+| `Softlock.critical.test.js` | Softlock vulnerability tests |
 
 ---
 
 ## Deployment
 
 ### Supported Networks
+
+**Mainnets:**
 - Ethereum Mainnet
 - Optimism L2
 - Arbitrum L2
-- Sepolia Testnet
+
+**Testnets:**
+- Sepolia
+- Optimism Sepolia
+- Arbitrum Sepolia
+
+See `hardhat.config.js` and `foundry.toml` for network configuration details.
 
 ### Contract Addresses (Testnet)
 
