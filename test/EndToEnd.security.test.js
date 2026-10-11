@@ -13,14 +13,21 @@
 
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { time, loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
+const { time, loadFixture, setBalance } = require("@nomicfoundation/hardhat-network-helpers");
 
 describe("END-TO-END SECURITY TESTS", function () {
   const STAKE_WINDOW = 3 * 24 * 60 * 60;
   const RESOLUTION_TIMEOUT = 7 * 24 * 60 * 60;
 
   async function deployFullSystem() {
-    const [owner, oracle, initiator, counterparty, attacker, operator] = await ethers.getSigners();
+    const [owner, , initiator, counterparty, attacker, operator] = await ethers.getSigners();
+
+    // ILRM calls back verifySignature() on its oracle, so the oracle must be a contract:
+    // deploy a mock oracle and send "oracle" transactions from its address
+    const MockOracle = await ethers.getContractFactory("MockOracle");
+    const mockOracle = await MockOracle.deploy();
+    const oracle = await ethers.getImpersonatedSigner(mockOracle.target);
+    await setBalance(mockOracle.target, ethers.parseEther("10"));
 
     const MockToken = await ethers.getContractFactory("MockToken");
     const token = await MockToken.deploy();
@@ -62,7 +69,7 @@ describe("END-TO-END SECURITY TESTS", function () {
       nonExclusive: true
     };
 
-    return { ilrm, token, registry, treasury, owner, oracle, initiator, counterparty, attacker, operator, STAKE, EVIDENCE_HASH, fallback };
+    return { ilrm, mockOracle, token, registry, treasury, owner, oracle, initiator, counterparty, attacker, operator, STAKE, EVIDENCE_HASH, fallback };
   }
 
   // ============================================================

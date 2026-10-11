@@ -137,28 +137,22 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
         // Schedule batch via parent
         scheduleBatch(targets, values, datas, predecessor, salt, delay);
 
-        // Store metadata (use first target for simplicity)
-        _storeOperationMetadata(
-            id,
-            opType,
-            targets.length > 0 ? targets[0] : address(0),
-            values.length > 0 ? values[0] : 0,
-            datas.length > 0 ? datas[0] : "",
-            predecessor,
-            salt,
-            delay,
-            description
-        );
+        // Store metadata (use first call for simplicity). Built in memory to stay within stack limits.
+        GovernanceOperation memory op;
+        op.id = id;
+        op.opType = opType;
+        if (targets.length > 0) op.target = targets[0];
+        if (values.length > 0) op.value = values[0];
+        if (datas.length > 0) op.data = datas[0];
+        op.predecessor = predecessor;
+        op.salt = salt;
+        op.scheduledAt = block.timestamp;
+        op.readyAt = block.timestamp + delay;
+        op.status = OperationStatus.Pending;
+        op.description = description;
+        _storeOperation(op);
 
-        emit OperationScheduled(
-            id,
-            opType,
-            targets.length > 0 ? targets[0] : address(0),
-            values.length > 0 ? values[0] : 0,
-            datas.length > 0 ? datas[0] : "",
-            block.timestamp + delay,
-            description
-        );
+        emit OperationScheduled(id, op.opType, op.target, op.value, op.data, op.readyAt, op.description);
     }
 
     /// @inheritdoc IGovernanceTimelock
@@ -212,11 +206,11 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
         bytes[] calldata datas,
         bytes32 predecessor,
         bytes32 salt
-    ) external payable override {
+    ) public payable override(TimelockController, IGovernanceTimelock) {
         bytes32 id = hashOperationBatch(targets, values, datas, predecessor, salt);
 
-        // Execute batch via parent
-        executeBatch(targets, values, datas, predecessor, salt);
+        // Execute batch via parent (enforces EXECUTOR_ROLE and readiness)
+        super.executeBatch(targets, values, datas, predecessor, salt);
 
         // Update metadata
         _operations[id].status = OperationStatus.Executed;
@@ -384,26 +378,6 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     }
 
     /// @inheritdoc IGovernanceTimelock
-    function isOperationPending(bytes32 id) external view override returns (bool) {
-        return _operations[id].status == OperationStatus.Pending;
-    }
-
-    /// @inheritdoc IGovernanceTimelock
-    function isOperationReady(bytes32 id) public view override(TimelockController, IGovernanceTimelock) returns (bool) {
-        return TimelockController.isOperationReady(id);
-    }
-
-    /// @inheritdoc IGovernanceTimelock
-    function isOperationDone(bytes32 id) external view override returns (bool) {
-        return _operations[id].status == OperationStatus.Executed;
-    }
-
-    /// @inheritdoc IGovernanceTimelock
-    function getTimestamp(bytes32 id) external view override returns (uint256) {
-        return _operations[id].readyAt;
-    }
-
-    /// @inheritdoc IGovernanceTimelock
     function getTimelockConfig() external view override returns (TimelockConfig memory) {
         return _config;
     }
@@ -411,17 +385,6 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     /// @inheritdoc IGovernanceTimelock
     function getPendingOperationsCount() external view override returns (uint256) {
         return _pendingOperations.length;
-    }
-
-    /// @inheritdoc IGovernanceTimelock
-    function hashOperation(
-        address target,
-        uint256 value,
-        bytes calldata data,
-        bytes32 predecessor,
-        bytes32 salt
-    ) public pure override returns (bytes32) {
-        return keccak256(abi.encode(target, value, data, predecessor, salt));
     }
 
     // ============ Configuration Functions ============
@@ -441,8 +404,8 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
         _config.emergencyDelay = emergencyDelay;
         _config.longDelay = longDelay;
 
-        // Update parent's min delay
-        updateDelay(minDelay);
+        // Update parent's min delay (OZ v5 only accepts this call from the timelock itself)
+        this.updateDelay(minDelay);
 
         emit TimelockConfigUpdated(minDelay, emergencyDelay, longDelay);
     }
@@ -488,7 +451,7 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
         uint256 delay,
         string memory description
     ) internal {
-        _operations[id] = GovernanceOperation({
+        _storeOperation(GovernanceOperation({
             id: id,
             opType: opType,
             target: target,
@@ -500,10 +463,17 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
             readyAt: block.timestamp + delay,
             status: OperationStatus.Pending,
             description: description
-        });
+        }));
+    }
 
-        _pendingOperations.push(id);
-        _pendingIndex[id] = _pendingOperations.length; // 1-indexed
+    /**
+     * @notice Store operation metadata and track it as pending
+     */
+    function _storeOperation(GovernanceOperation memory op) internal {
+        _operations[op.id] = op;
+
+        _pendingOperations.push(op.id);
+        _pendingIndex[op.id] = _pendingOperations.length; // 1-indexed
     }
 
     /**

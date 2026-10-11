@@ -354,7 +354,7 @@ export async function computeIdentityHashFallback(
 /**
  * Example usage and testing
  */
-export async function exampleUsage() {
+export async function identityProofExampleUsage() {
   console.log('=== NatLangChain Identity Proof SDK Example ===\n');
 
   // Initialize SDK
@@ -400,5 +400,5 @@ export async function exampleUsage() {
 
 // Run example if executed directly
 if (require.main === module) {
-  exampleUsage();
+  identityProofExampleUsage();
 }

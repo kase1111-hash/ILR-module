@@ -507,7 +507,8 @@ contract CrossContractIntegrationTest is Test {
         compliance.vote(warrantId);
         compliance.vote(warrantId);
 
-        assertEq(uint256(compliance.warrants(warrantId).state), uint256(ComplianceSim.State.Approved));
+        (ComplianceSim.State warrantState,,,) = compliance.warrants(warrantId);
+        assertEq(uint256(warrantState), uint256(ComplianceSim.State.Approved));
 
         // Execute warrant
         compliance.startExecution(warrantId);
@@ -529,7 +530,8 @@ contract CrossContractIntegrationTest is Test {
         vm.warp(block.timestamp + 4 days);
         compliance.concludeVoting(warrantId);
 
-        assertEq(uint256(compliance.warrants(warrantId).state), uint256(ComplianceSim.State.Rejected));
+        (ComplianceSim.State warrantState,,,) = compliance.warrants(warrantId);
+        assertEq(uint256(warrantState), uint256(ComplianceSim.State.Rejected));
         assertTrue(compliance.isTerminal(warrantId), "Rejected warrant should be terminal");
         console.log("OK: Insufficient votes leads to terminal Rejected state");
     }

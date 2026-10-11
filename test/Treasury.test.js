@@ -203,9 +203,11 @@ describe("Treasury Tests", function () {
     it("should reset rolling window after expiry", async function () {
       const { treasury, token, ilrm, initiator, counterparty, EVIDENCE_HASH, fallback } = await loadFixture(deployFixture);
 
-      // Use up allowance
-      const disputeId1 = await createDispute(ilrm, initiator, counterparty, MAX_PER_PARTICIPANT, EVIDENCE_HASH, fallback);
-      await treasury.connect(counterparty).requestSubsidy(disputeId1, MAX_PER_PARTICIPANT, counterparty.address);
+      // Use up allowance (each subsidy is capped at MAX_PER_DISPUTE, so it takes several disputes)
+      for (let i = 0n; i < MAX_PER_PARTICIPANT / MAX_PER_DISPUTE; i++) {
+        const disputeId = await createDispute(ilrm, initiator, counterparty, MAX_PER_DISPUTE, EVIDENCE_HASH, fallback);
+        await treasury.connect(counterparty).requestSubsidy(disputeId, MAX_PER_DISPUTE, counterparty.address);
+      }
 
       // Should fail now
       const disputeId2 = await createDispute(ilrm, initiator, counterparty, ethers.parseEther("1"), EVIDENCE_HASH, fallback);

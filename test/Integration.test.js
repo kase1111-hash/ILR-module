@@ -15,6 +15,29 @@ describe("Integration Tests", function () {
   const STAKE_WINDOW = 3 * 24 * 60 * 60;
   const RESOLUTION_TIMEOUT = 7 * 24 * 60 * 60;
 
+  /**
+   * Sign a proposal as an oracle operator (EIP-712) and submit it through the Oracle contract,
+   * which forwards it to ILRM. ILRM only accepts proposals from the Oracle contract.
+   */
+  async function submitSignedProposal(oracle, operator, disputeId, proposal) {
+    const { chainId } = await ethers.provider.getNetwork();
+    const domain = { name: "NatLangChainOracle", version: "1", chainId, verifyingContract: oracle.target };
+    const types = {
+      Proposal: [
+        { name: "disputeId", type: "uint256" },
+        { name: "proposalHash", type: "bytes32" },
+        { name: "nonce", type: "uint256" }
+      ]
+    };
+    const value = {
+      disputeId,
+      proposalHash: ethers.keccak256(ethers.toUtf8Bytes(proposal)),
+      nonce: await oracle.getNonce(disputeId)
+    };
+    const signature = await operator.signTypedData(domain, types, value);
+    return oracle.connect(operator).submitProposal(disputeId, proposal, signature);
+  }
+
   async function deployFullSystem() {
     const [owner, oracleOperator, initiator, counterparty] = await ethers.getSigners();
 
@@ -81,7 +104,7 @@ describe("Integration Tests", function () {
 
       console.log("\n  📋 Step 1: Register IP Asset");
       const assetId = ethers.keccak256(ethers.toUtf8Bytes("my-software-v1"));
-      await registry.registerAsset(assetId, initiator.address, ethers.ZeroHash);
+      await registry.connect(initiator).registerAsset(assetId, initiator.address, ethers.ZeroHash);
       console.log("     ✓ Asset registered");
 
       console.log("\n  📋 Step 2: Initiator starts breach dispute");
@@ -111,7 +134,7 @@ describe("Integration Tests", function () {
           duration: "12 months"
         }
       });
-      await ilrm.connect(oracleOperator).submitLLMProposal(0, proposal, "0x");
+      await submitSignedProposal(oracle, oracleOperator, 0, proposal);
       console.log("     ✓ Proposal submitted");
 
       console.log("\n  📋 Step 5: Both parties accept");
@@ -189,7 +212,7 @@ describe("Integration Tests", function () {
      */
     it("should burn stakes on timeout without agreement", async function () {
       const {
-        token, ilrm,
+        token, oracle, ilrm,
         oracleOperator, initiator, counterparty, STAKE
       } = await loadFixture(deployFullSystem);
 
@@ -203,7 +226,7 @@ describe("Integration Tests", function () {
       console.log("     ✓ Both staked 10 ETH each");
 
       console.log("\n  📋 Step 2: Oracle submits proposal");
-      await ilrm.connect(oracleOperator).submitLLMProposal(0, '{"proposal":"test"}', "0x");
+      await submitSignedProposal(oracle, oracleOperator, 0, '{"proposal":"test"}');
       console.log("     ✓ Proposal submitted");
 
       console.log("\n  📋 Step 3: Neither party accepts (7 days pass)");
@@ -237,7 +260,7 @@ describe("Integration Tests", function () {
      */
     it("should handle counter-proposal negotiation flow", async function () {
       const {
-        token, ilrm,
+        token, oracle, ilrm,
         oracleOperator, initiator, counterparty, STAKE
       } = await loadFixture(deployFullSystem);
 
@@ -248,7 +271,7 @@ describe("Integration Tests", function () {
         { termsHash: ethers.ZeroHash, termDuration: 86400, royaltyCapBps: 500, nonExclusive: true }
       );
       await ilrm.connect(counterparty).depositStake(0);
-      await ilrm.connect(oracleOperator).submitLLMProposal(0, '{"round":1}', "0x");
+      await submitSignedProposal(oracle, oracleOperator, 0, '{"round":1}');
       console.log("     ✓ Initial proposal submitted");
 
       console.log("\n  📋 Step 2: Initiator counters (fee: 0.01 ETH)");
@@ -266,7 +289,9 @@ describe("Integration Tests", function () {
       console.log("     🔥 0.02 ETH counter fee burned");
 
       console.log("\n  📋 Step 4: Oracle submits new proposal");
-      await ilrm.connect(oracleOperator).submitLLMProposal(0, '{"round":2,"compromise":true}', "0x");
+      // The Oracle accepts one proposal per dispute; the owner re-opens it for the new round
+      await oracle.resetProposal(0, "counter-proposal round");
+      await submitSignedProposal(oracle, oracleOperator, 0, '{"round":2,"compromise":true}');
 
       console.log("\n  📋 Step 5: Both accept compromise");
       await ilrm.connect(initiator).acceptProposal(0);
@@ -277,8 +302,49 @@ describe("Integration Tests", function () {
       expect(dispute.counterCount).to.equal(2);
 
       console.log("     ✓ Agreement reached after 2 counter-proposals");
+
+      // Each submission consumed a nonce (round 1, reset, round 2)
+      expect(await oracle.getNonce(0)).to.equal(3);
       console.log("     💰 Total counter fees: 0.03 ETH burned");
       console.log("\n  🎉 Negotiation successful!\n");
+    });
+  });
+
+  describe("Scenario 4b: Oracle Signature Replay Protection", function () {
+    /**
+     * SCENARIO: After the owner re-opens a dispute for a new proposal round,
+     * a signature produced for the previous nonce must not be accepted.
+     */
+    it("should reject a proposal signed for a stale nonce", async function () {
+      const {
+        oracle, ilrm,
+        oracleOperator, initiator, counterparty, STAKE
+      } = await loadFixture(deployFullSystem);
+
+      await ilrm.connect(initiator).initiateBreachDispute(
+        counterparty.address, STAKE,
+        ethers.ZeroHash,
+        { termsHash: ethers.ZeroHash, termDuration: 86400, royaltyCapBps: 500, nonExclusive: true }
+      );
+      await ilrm.connect(counterparty).depositStake(0);
+
+      const proposal = '{"round":1}';
+      const { chainId } = await ethers.provider.getNetwork();
+      const signature = await oracleOperator.signTypedData(
+        { name: "NatLangChainOracle", version: "1", chainId, verifyingContract: oracle.target },
+        { Proposal: [
+          { name: "disputeId", type: "uint256" },
+          { name: "proposalHash", type: "bytes32" },
+          { name: "nonce", type: "uint256" }
+        ] },
+        { disputeId: 0, proposalHash: ethers.keccak256(ethers.toUtf8Bytes(proposal)), nonce: 0 }
+      );
+      await oracle.connect(oracleOperator).submitProposal(0, proposal, signature);
+
+      await oracle.resetProposal(0, "new round");
+
+      await expect(oracle.connect(oracleOperator).submitProposal(0, proposal, signature))
+        .to.be.revertedWithCustomError(oracle, "InvalidSignature");
     });
   });
 
@@ -309,7 +375,7 @@ describe("Integration Tests", function () {
       console.log("     ✓ Dispute initiated against low-resource party");
 
       console.log("\n  📋 Step 3: Counterparty requests subsidy");
-      await treasury.requestSubsidy(0, STAKE, counterparty.address);
+      await treasury.connect(counterparty).requestSubsidy(0, STAKE, counterparty.address);
 
       const subsidizedBalance = await token.balanceOf(counterparty.address);
       expect(subsidizedBalance).to.equal(ethers.parseEther("5")); // maxPerDispute

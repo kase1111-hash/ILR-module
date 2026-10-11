@@ -138,7 +138,11 @@ contract ILRMStateMachine {
 
     function initiatorAccept(uint256 disputeId) external returns (bool) {
         Dispute storage d = disputes[disputeId];
-        require(d.state == DisputeState.LLMProposed, "Wrong state");
+        require(
+            d.state == DisputeState.LLMProposed ||
+            d.state == DisputeState.CounterpartyAccepted,
+            "Wrong state"
+        );
         require(!d.initiatorAccepted, "Already accepted");
 
         d.initiatorAccepted = true;
@@ -390,6 +394,10 @@ contract MultiPartyStateMachine {
         return true;
     }
 
+    function getState(uint256 disputeId) external view returns (MPState) {
+        return disputes[disputeId].state;
+    }
+
     function isTerminal(MPState state) public pure returns (bool) {
         return state == MPState.QuorumAccepted ||
                state == MPState.PartialResolution ||
@@ -610,7 +618,7 @@ contract StateMachinePermutationsTest is Test {
         multiParty.partyStake(id);
         multiParty.partyStake(id);
 
-        assertEq(uint256(multiParty.disputes(id).state), uint256(MultiPartyStateMachine.MPState.AllStaked));
+        assertEq(uint256(multiParty.getState(id)), uint256(MultiPartyStateMachine.MPState.AllStaked));
 
         multiParty.submitProposal(id);
 
@@ -618,7 +626,7 @@ contract StateMachinePermutationsTest is Test {
         multiParty.partyAccept(id);
         multiParty.partyAccept(id);
 
-        assertTrue(multiParty.isTerminal(multiParty.disputes(id).state));
+        assertTrue(multiParty.isTerminal(multiParty.getState(id)));
         console.log("PASS: MultiParty quorum accept reaches terminal state");
     }
 
@@ -633,9 +641,9 @@ contract StateMachinePermutationsTest is Test {
         vm.warp(block.timestamp + 4 days);
 
         assertTrue(multiParty.enforceStakeTimeout(id));
-        assertEq(uint256(multiParty.disputes(id).state), uint256(MultiPartyStateMachine.MPState.PartialResolution));
+        assertEq(uint256(multiParty.getState(id)), uint256(MultiPartyStateMachine.MPState.PartialResolution));
 
-        assertTrue(multiParty.isTerminal(multiParty.disputes(id).state));
+        assertTrue(multiParty.isTerminal(multiParty.getState(id)));
         console.log("PASS: MultiParty partial stake timeout reaches terminal state");
     }
 
@@ -654,9 +662,9 @@ contract StateMachinePermutationsTest is Test {
         vm.warp(block.timestamp + 11 days);
 
         assertTrue(multiParty.enforceResolutionTimeout(id));
-        assertEq(uint256(multiParty.disputes(id).state), uint256(MultiPartyStateMachine.MPState.TimeoutWithBurn));
+        assertEq(uint256(multiParty.getState(id)), uint256(MultiPartyStateMachine.MPState.TimeoutWithBurn));
 
-        assertTrue(multiParty.isTerminal(multiParty.disputes(id).state));
+        assertTrue(multiParty.isTerminal(multiParty.getState(id)));
         console.log("PASS: MultiParty resolution timeout reaches terminal state");
     }
 
@@ -678,7 +686,7 @@ contract StateMachinePermutationsTest is Test {
             multiParty.partyAccept(id);
         }
 
-        assertTrue(multiParty.isTerminal(multiParty.disputes(id).state));
+        assertTrue(multiParty.isTerminal(multiParty.getState(id)));
         console.log("PASS: MultiParty large quorum reaches terminal state");
     }
 

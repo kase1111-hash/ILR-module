@@ -21,7 +21,7 @@
 
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { time, loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
+const { time, loadFixture, setBalance } = require("@nomicfoundation/hardhat-network-helpers");
 
 describe("CRITICAL: Softlock Prevention Tests", function () {
   // Time constants
@@ -29,7 +29,14 @@ describe("CRITICAL: Softlock Prevention Tests", function () {
   const RESOLUTION_TIMEOUT = 7 * 24 * 60 * 60;
 
   async function deployFullSystem() {
-    const [owner, oracle, initiator, counterparty, third] = await ethers.getSigners();
+    const [owner, , initiator, counterparty, third] = await ethers.getSigners();
+
+    // ILRM calls back verifySignature() on its oracle, so the oracle must be a contract:
+    // deploy a mock oracle and send "oracle" transactions from its address
+    const MockOracle = await ethers.getContractFactory("MockOracle");
+    const mockOracle = await MockOracle.deploy();
+    const oracle = await ethers.getImpersonatedSigner(mockOracle.target);
+    await setBalance(mockOracle.target, ethers.parseEther("10"));
 
     const MockToken = await ethers.getContractFactory("MockToken");
     const token = await MockToken.deploy();
@@ -58,7 +65,7 @@ describe("CRITICAL: Softlock Prevention Tests", function () {
       nonExclusive: true
     };
 
-    return { ilrm, token, registry, owner, oracle, initiator, counterparty, third, STAKE, EVIDENCE_HASH, fallback };
+    return { ilrm, mockOracle, token, registry, owner, oracle, initiator, counterparty, third, STAKE, EVIDENCE_HASH, fallback };
   }
 
   // ============================================================
@@ -132,9 +139,9 @@ describe("CRITICAL: Softlock Prevention Tests", function () {
       const initBalAfter = await token.balanceOf(initiator.address);
       const cpBalAfter = await token.balanceOf(counterparty.address);
 
-      // Each should get 25% back (50% burned, 50% split)
-      expect(initBalAfter).to.be.gt(initBalBefore);
-      expect(cpBalAfter).to.be.gt(cpBalBefore);
+      // Each gets half their stake back (50% of the pool burned, remainder split)
+      expect(initBalAfter).to.equal(initBalBefore - STAKE + STAKE / 2n);
+      expect(cpBalAfter).to.equal(cpBalBefore - STAKE + STAKE / 2n);
     });
 
     /**
@@ -254,9 +261,9 @@ describe("CRITICAL: Softlock Prevention Tests", function () {
       await ilrm.connect(initiator).acceptProposal(0);
       await ilrm.connect(counterparty).acceptProposal(0);
 
-      // All actions should fail
+      // All actions should fail (the counterparty necessarily staked before resolution)
       await expect(ilrm.connect(counterparty).depositStake(0))
-        .to.be.revertedWith("Dispute resolved");
+        .to.be.revertedWith("Already staked");
 
       await expect(ilrm.connect(oracle).submitLLMProposal(0, "new", "0x"))
         .to.be.revertedWith("Dispute resolved");
@@ -373,12 +380,14 @@ describe("CRITICAL: Softlock Prevention Tests", function () {
       await ilrm.connect(counterparty).depositStake(0);
       await ilrm.connect(oracle).submitLLMProposal(0, '{"proposal":"test"}', "0x");
 
+      const { startTime } = await ilrm.disputes(0);
+
       // Warp to EXACTLY the timeout (should still fail - need to be PAST)
-      await time.increase(RESOLUTION_TIMEOUT);
+      await time.setNextBlockTimestamp(startTime + BigInt(RESOLUTION_TIMEOUT));
       await expect(ilrm.enforceTimeout(0)).to.be.revertedWith("Not timed out");
 
       // One more second - should work
-      await time.increase(1);
+      await time.setNextBlockTimestamp(startTime + BigInt(RESOLUTION_TIMEOUT) + 1n);
       await ilrm.enforceTimeout(0);
     });
 

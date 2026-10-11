@@ -23,6 +23,9 @@
  *
  * Required env vars:
  *   DEPLOYMENT_FILE  -- Path to deployment JSON (from deploy.js)
+ *
+ * Optional env vars:
+ *   SIGNER_INDEX     -- Index of the configured account to sign with (default 0)
  */
 
 const { ethers } = require("hardhat");
@@ -124,8 +127,26 @@ async function submitProposal(contracts, signer) {
   const proposal = process.env.PROPOSAL || '{"proposal": "Default resolution terms"}';
   if (!disputeId) throw new Error("DISPUTE_ID env var required");
 
-  console.log(`Submitting proposal for dispute #${disputeId}...`);
-  const tx = await contracts.ilrm.connect(signer).submitLLMProposal(disputeId, proposal, "0x");
+  // ILRM only accepts proposals from the Oracle contract, which requires an EIP-712
+  // signature from a registered oracle operator (the signer here)
+  console.log(`Signing and submitting proposal for dispute #${disputeId} via Oracle...`);
+  const { chainId } = await ethers.provider.getNetwork();
+  const signature = await signer.signTypedData(
+    { name: "NatLangChainOracle", version: "1", chainId, verifyingContract: contracts.oracle.target },
+    {
+      Proposal: [
+        { name: "disputeId", type: "uint256" },
+        { name: "proposalHash", type: "bytes32" },
+        { name: "nonce", type: "uint256" }
+      ]
+    },
+    {
+      disputeId,
+      proposalHash: ethers.keccak256(ethers.toUtf8Bytes(proposal)),
+      nonce: await contracts.oracle.getNonce(disputeId)
+    }
+  );
+  const tx = await contracts.oracle.connect(signer).submitProposal(disputeId, proposal, signature);
   const receipt = await tx.wait();
   console.log(`Proposal submitted (tx: ${receipt.hash})`);
   console.log(`  Gas used: ${receipt.gasUsed.toString()}`);
@@ -231,7 +252,8 @@ async function showTreasuryStatus(contracts) {
 
 async function main() {
   const deployment = loadDeployment();
-  const [signer] = await ethers.getSigners();
+  // SIGNER_INDEX selects another configured account (e.g. the counterparty on localhost)
+  const signer = (await ethers.getSigners())[Number(process.env.SIGNER_INDEX || 0)];
   const contracts = await getContracts(deployment);
 
   const command = process.env.COMMAND || process.argv[2];

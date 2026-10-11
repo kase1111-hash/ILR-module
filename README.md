@@ -211,7 +211,7 @@ See `docs/SECURITY_AUDIT_REPORT.md` for full details.
 
 ### Prerequisites
 - [Foundry](https://getfoundry.sh/) for Solidity development
-- [Node.js](https://nodejs.org/) v18+ for TypeScript SDK
+- [Node.js](https://nodejs.org/) v20+ for Hardhat and the TypeScript SDK
 - Solidity ^0.8.20
 
 ### Setup

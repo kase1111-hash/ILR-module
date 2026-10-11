@@ -3,6 +3,7 @@ pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
 import "forge-std/console.sol";
+import "../contracts/ILRM.sol";
 
 /**
  * @title DeadEndDetection
@@ -552,8 +553,9 @@ contract DeadEndDetectionTest is Test {
         console.log("\n=== Edge Case: Counter-proposal Limits ===");
 
         // This is tested in StateMachinePermutations.t.sol
-        // Just verify the constant
-        assertEq(3, 3, "MAX_COUNTERS should be 3");
+        // Just verify the constant (constructor only needs non-zero addresses)
+        ILRM ilrm = new ILRM(IERC20(address(1)), address(1), IAssetRegistry(address(1)));
+        assertEq(ilrm.MAX_COUNTERS(), 3, "MAX_COUNTERS should be 3");
         console.log("OK: MAX_COUNTERS = 3, prevents infinite counter loops");
     }
 
@@ -562,9 +564,8 @@ contract DeadEndDetectionTest is Test {
 
         // MAX_TIME_EXTENSION = 3 days
         // After 3 counter-proposals, no more time is added
-        uint256 extensionCap = 3 days;
-
-        assertTrue(extensionCap > 0, "Time extension cap exists");
+        ILRM ilrm = new ILRM(IERC20(address(1)), address(1), IAssetRegistry(address(1)));
+        assertEq(ilrm.MAX_TIME_EXTENSION(), 3 days, "MAX_TIME_EXTENSION should be 3 days");
         console.log("OK: MAX_TIME_EXTENSION = 3 days, prevents indefinite delays");
     }
 }

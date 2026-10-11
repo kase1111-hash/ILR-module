@@ -4,9 +4,8 @@ cache/
 artifacts/
 
 # Dependencies
-lib/
+# Foundry dependencies (lib/) are git submodules, see .gitmodules
 node_modules/
-package-lock.json
 
 # Hardhat/TypeChain
 typechain-types/

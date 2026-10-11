@@ -297,33 +297,9 @@ interface IGovernanceTimelock {
      */
     function getOperation(bytes32 id) external view returns (GovernanceOperation memory operation);
 
-    /**
-     * @notice Check if operation is pending
-     * @param id Operation ID
-     * @return isPending True if pending
-     */
-    function isOperationPending(bytes32 id) external view returns (bool isPending);
-
-    /**
-     * @notice Check if operation is ready for execution
-     * @param id Operation ID
-     * @return isReady True if ready
-     */
-    function isOperationReady(bytes32 id) external view returns (bool isReady);
-
-    /**
-     * @notice Check if operation was executed
-     * @param id Operation ID
-     * @return isExecuted True if executed
-     */
-    function isOperationDone(bytes32 id) external view returns (bool isExecuted);
-
-    /**
-     * @notice Get timestamp when operation becomes ready
-     * @param id Operation ID
-     * @return timestamp Ready timestamp (0 if not scheduled)
-     */
-    function getTimestamp(bytes32 id) external view returns (uint256 timestamp);
+    // isOperationPending, isOperationReady, isOperationDone, getTimestamp and hashOperation
+    // are inherited from OpenZeppelin's TimelockController, which is the source of truth for
+    // operation state. They cannot be redeclared here because OZ v5 makes most of them non-virtual.
 
     /**
      * @notice Get timelock configuration
@@ -336,23 +312,6 @@ interface IGovernanceTimelock {
      * @return count Number of pending operations
      */
     function getPendingOperationsCount() external view returns (uint256 count);
-
-    /**
-     * @notice Compute operation ID
-     * @param target Target address
-     * @param value ETH value
-     * @param data Calldata
-     * @param predecessor Predecessor ID
-     * @param salt Salt
-     * @return id Computed operation ID
-     */
-    function hashOperation(
-        address target,
-        uint256 value,
-        bytes calldata data,
-        bytes32 predecessor,
-        bytes32 salt
-    ) external pure returns (bytes32 id);
 
     // ============ Configuration Functions ============
 

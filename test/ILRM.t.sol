@@ -4,6 +4,7 @@ pragma solidity ^0.8.20;
 
 import "forge-std/Test.sol";
 import "../contracts/ILRM.sol";
+import "../contracts/mocks/MockAssetRegistry.sol";
 import "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 
 // Mock ERC20 token
@@ -13,36 +14,20 @@ contract MockToken is ERC20 {
     }
 }
 
-// Mock Asset Registry
-contract MockAssetRegistry is IAssetRegistry {
-    mapping(uint256 => bool) public frozen;
-    mapping(uint256 => bytes32) public appliedFallback;
-    bytes public lastExecutionData;
-
-    function freezeAssets(uint256 disputeId, address) external override {
-        frozen[disputeId] = true;
-    }
-
-    function unfreezeAssets(uint256 disputeId, bytes calldata executionData) external override {
-        frozen[disputeId] = false;
-        lastExecutionData = executionData;
-    }
-
-    function applyFallbackLicense(uint256 disputeId, bytes32 termsHash) external override {
-        appliedFallback[disputeId] = termsHash;
-    }
-}
-
-// Mock Oracle (simplified)
+// Mock Oracle (simplified): accepts any signature and relays proposals to ILRM
 contract MockOracle {
     ILRM public ilrm;
 
-    constructor(ILRM _ilrm) {
+    function setILRM(ILRM _ilrm) external {
         ilrm = _ilrm;
     }
 
+    function verifySignature(uint256, bytes32, bytes calldata) external pure returns (bool) {
+        return true;
+    }
+
     function submitProposal(uint256 disputeId, string memory proposal) external {
-        ilrm.submitLLMProposal(disputeId, proposal);
+        ilrm.submitLLMProposal(disputeId, proposal, "");
     }
 }
 
@@ -52,11 +37,11 @@ contract ILRMTest is Test {
     MockAssetRegistry registry;
     MockOracle oracle;
 
-    address initiator = address(0x1);
-    address counterparty = address(0x2);
+    address initiator = makeAddr("initiator");
+    address counterparty = makeAddr("counterparty");
     uint256 constant STAKE = 10 ether;
 
-    ILRM.FallbackLicense fallback = ILRM.FallbackLicense({
+    IILRM.FallbackLicense fallbackLicense = IILRM.FallbackLicense({
         nonExclusive: true,
         termDuration: 365 days,
         royaltyCapBps: 500,
@@ -66,9 +51,9 @@ contract ILRMTest is Test {
     function setUp() public {
         token = new MockToken();
         registry = new MockAssetRegistry();
-        oracle = new MockOracle(ILRM(address(0))); // Temp
+        oracle = new MockOracle();
         ilrm = new ILRM(IERC20(token), address(oracle), registry);
-        oracle = new MockOracle(ilrm); // Fix reference
+        oracle.setILRM(ilrm);
 
         vm.startPrank(initiator);
         token.approve(address(ilrm), type(uint256).max);
@@ -80,6 +65,9 @@ contract ILRMTest is Test {
 
         token.transfer(initiator, 1000 ether);
         token.transfer(counterparty, 1000 ether);
+
+        vm.deal(initiator, 1 ether);
+        vm.deal(counterparty, 1 ether);
     }
 
     function testInitiateBreachDispute() public {
@@ -88,11 +76,11 @@ contract ILRMTest is Test {
             counterparty,
             STAKE,
             bytes32(uint256(0x123)),
-            fallback
+            fallbackLicense
         );
 
         assertEq(uint256(ilrm.disputeCounter()), 1);
-        ILRM.Dispute memory d = ilrm.disputes(disputeId);
+        IILRM.Dispute memory d = ilrm.disputes(disputeId);
         assertEq(d.initiator, initiator);
         assertEq(d.counterparty, counterparty);
         assertEq(d.initiatorStake, STAKE);
@@ -107,8 +95,7 @@ contract ILRMTest is Test {
         ilrm.depositStake(disputeId);
 
         // Oracle submits proposal
-        vm.prank(address(oracle));
-        ilrm.submitLLMProposal(disputeId, "Royalty split 50/50");
+        oracle.submitProposal(disputeId, "Royalty split 50/50");
 
         // Both accept
         vm.prank(initiator);
@@ -116,9 +103,9 @@ contract ILRMTest is Test {
         vm.prank(counterparty);
         ilrm.acceptProposal(disputeId);
 
-        ILRM.Dispute memory d = ilrm.disputes(disputeId);
+        IILRM.Dispute memory d = ilrm.disputes(disputeId);
         assertTrue(d.resolved);
-        assertEq(uint256(d.outcome), uint256(ILRM.DisputeOutcome.AcceptedProposal));
+        assertEq(uint256(d.outcome), uint256(IILRM.DisputeOutcome.AcceptedProposal));
         assertEq(token.balanceOf(initiator), 1000 ether); // Stakes returned
         assertEq(token.balanceOf(counterparty), 1000 ether);
         assertFalse(registry.frozen(disputeId));
@@ -133,25 +120,29 @@ contract ILRMTest is Test {
         vm.warp(block.timestamp + 8 days); // Past timeout
         ilrm.enforceTimeout(disputeId);
 
-        ILRM.Dispute memory d = ilrm.disputes(disputeId);
+        IILRM.Dispute memory d = ilrm.disputes(disputeId);
         assertTrue(d.resolved);
-        assertEq(uint256(d.outcome), uint256(ILRM.DisputeOutcome.TimeoutWithBurn));
+        assertEq(uint256(d.outcome), uint256(IILRM.DisputeOutcome.TimeoutWithBurn));
         assertEq(token.balanceOf(initiator), 995 ether); // 5 ether each returned (50% burned)
         assertEq(token.balanceOf(counterparty), 995 ether);
-        assertEq(registry.appliedFallback(disputeId), fallback.termsHash);
+        assertEq(registry.appliedFallbacks(disputeId), fallbackLicense.termsHash);
     }
 
     function testDefaultLicenseAppliedNoStake() public {
+        // Fund the initiator incentive pool
+        token.approve(address(ilrm), 100 ether);
+        ilrm.depositTokenReserves(100 ether);
+
         uint256 disputeId = _initiateDispute();
 
         vm.warp(block.timestamp + 4 days); // Past stake window
         ilrm.enforceTimeout(disputeId);
 
-        ILRM.Dispute memory d = ilrm.disputes(disputeId);
+        IILRM.Dispute memory d = ilrm.disputes(disputeId);
         assertTrue(d.resolved);
-        assertEq(uint256(d.outcome), uint256(ILRM.DisputeOutcome.DefaultLicenseApplied));
+        assertEq(uint256(d.outcome), uint256(IILRM.DisputeOutcome.DefaultLicenseApplied));
         assertEq(token.balanceOf(initiator), 1001 ether); // Stake + 10% incentive
-        assertEq(registry.appliedFallback(disputeId), fallback.termsHash);
+        assertEq(registry.appliedFallbacks(disputeId), fallbackLicense.termsHash);
     }
 
     function testCounterProposals() public {
@@ -172,7 +163,7 @@ contract ILRMTest is Test {
         ilrm.counterPropose{value: 0.04 ether}(disputeId, bytes32(uint256(0xabc)));
 
         // Fourth should revert
-        vm.expectRevert("Max counters");
+        vm.expectRevert("Max counters reached");
         vm.prank(counterparty);
         ilrm.counterPropose{value: 0.08 ether}(disputeId, bytes32(uint256(0xdef)));
     }
@@ -189,14 +180,21 @@ contract ILRMTest is Test {
     function testEscalationAndCooldown() public {
         _initiateDispute();
 
-        // Second dispute within cooldown
+        // Second dispute within cooldown is charged 1.5x the requested stake
+        uint256 balanceBefore = token.balanceOf(initiator);
         vm.prank(initiator);
-        vm.expectRevert(); // Stake too low (needs 1.5x)
-        ilrm.initiateBreachDispute(counterparty, STAKE, bytes32(uint256(0x222)), fallback);
+        uint256 secondId =
+            ilrm.initiateBreachDispute(counterparty, STAKE, bytes32(uint256(0x222)), fallbackLicense);
 
-        // With escalated stake
+        assertEq(ilrm.disputes(secondId).initiatorStake, STAKE * 150 / 100);
+        assertEq(token.balanceOf(initiator), balanceBefore - STAKE * 150 / 100);
+
+        // After the cooldown, stakes are no longer escalated
+        vm.warp(block.timestamp + ilrm.COOLDOWN_PERIOD() + 1);
         vm.prank(initiator);
-        ilrm.initiateBreachDispute(counterparty, STAKE * 150 / 100, bytes32(uint256(0x222)), fallback);
+        uint256 thirdId =
+            ilrm.initiateBreachDispute(counterparty, STAKE, bytes32(uint256(0x333)), fallbackLicense);
+        assertEq(ilrm.disputes(thirdId).initiatorStake, STAKE);
     }
 
     // Helper
@@ -206,7 +204,7 @@ contract ILRMTest is Test {
             counterparty,
             STAKE,
             bytes32(uint256(0x123)),
-            fallback
+            fallbackLicense
         );
     }
 }

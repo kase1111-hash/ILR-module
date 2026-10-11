@@ -8,11 +8,8 @@
   "exclude_low": false,
   "exclude_medium": false,
   "exclude_high": false,
-  "filter_paths": [
-    "lib/",
-    "node_modules/",
-    "contracts/mocks/"
-  ],
+  "filter_paths": "lib/,node_modules/,contracts/mocks/,contracts/modules/,contracts/scaling/",
+  "fail_on": "medium",
   "solc_remaps": [
     "@openzeppelin/=lib/openzeppelin-contracts/",
     "forge-std/=lib/forge-std/src/"

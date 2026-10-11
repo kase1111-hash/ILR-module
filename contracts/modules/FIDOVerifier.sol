@@ -36,7 +36,7 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
     uint256 private constant P256_N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551;
 
     /// @notice P-256 curve prime (p)
-    uint256 private constant P256_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF - 0x00000000FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
+    uint256 private constant P256_P = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF;
 
     /// @notice P-256 curve parameter a (-3)
     uint256 private constant P256_A = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFC;
@@ -327,12 +327,12 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
      * @dev Test if RIP-7212 precompile is available
      */
     function _testPrecompile() internal view returns (bool) {
-        // Known good test vector for P-256
-        bytes32 testHash = 0x4b688df40bcedbe641ddb16ff0a1842d9c67ea1c3bf63f3e0471baa664531d1a;
-        bytes32 testR = 0xf1abb023518351cd71d881567b1ea663ed3efcf6c5132b354f28d3b0b7d38367;
-        bytes32 testS = 0x019f4113742a2b14bd25926b49c649155f267e60d3814b4c0cc84250e46f0083;
-        bytes32 testX = 0x04a2c953e6a1f6d8a1d2d5eb4e0b8c4e6d9e8f7a2b4c5d6e8f9a0b1c2d3e4f5a6;
-        bytes32 testY = 0x1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c;
+        // Known good P-256 test vector (generated and verified with @noble/curves)
+        bytes32 testHash = 0x6db63153beccdf2eea6fc735bfcc6b786c70f71d4702fd9a1e1edbcd4b1bd720;
+        bytes32 testR = 0xcb625de23fe666a5a6958d57a21b2f39ede272cb99314e4cb9df19459574aa64;
+        bytes32 testS = 0x467165dead78a280aa20a20071a36a3feaf6ac1539703dc29635464033ef1ef3;
+        bytes32 testX = 0x0280bdc8e5eef0f3b10436ea18b10553c17872bf98f4f3e1ade5ee0f3c67099a;
+        bytes32 testY = 0xf63eeeed2fbae9096a680f4da72a8f1554a852477f30bc4086216c1ac965ce9a;
 
         (bool success, bytes memory result) = P256_PRECOMPILE.staticcall(
             abi.encodePacked(testHash, testR, testS, testX, testY)
@@ -340,8 +340,8 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
 
         if (!success || result.length != 32) return false;
 
-        // Just check it returns something reasonable
-        return true;
+        // RIP-7212 returns 1 for a valid signature
+        return abi.decode(result, (uint256)) == 1;
     }
 
     /**

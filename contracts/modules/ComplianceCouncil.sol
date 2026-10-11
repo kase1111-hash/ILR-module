@@ -67,8 +67,9 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
     address constant BLS_MAP_G1 = address(0x12);
     address constant BLS_MAP_G2 = address(0x13);
 
-    // BLS12-381 field modulus (for validation)
-    uint256 constant BLS_MODULUS = 0x1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab;
+    // BLS12-381 field modulus (for validation); 381 bits, so it does not fit in a uint256
+    bytes constant BLS_MODULUS =
+        hex"1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab";
 
     // ============ State Variables ============
 
@@ -900,10 +901,10 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
             signature.x[0], signature.x[1],
             signature.y[0], signature.y[1],
             // G2 generator (standard BLS12-381)
-            bytes32(0x024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb8),
-            bytes32(0x13e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e),
-            bytes32(0x0ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801),
-            bytes32(0x0606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be),
+            hex"024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb8",
+            hex"13e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e",
+            hex"0ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801",
+            hex"0606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be",
             // Second pairing: -H(m) with public key
             g2Point,
             publicKey.x, publicKey.y

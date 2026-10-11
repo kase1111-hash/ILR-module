@@ -1,6 +1,6 @@
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { time } = require("@nomicfoundation/hardhat-network-helpers");
+const { time, setBalance } = require("@nomicfoundation/hardhat-network-helpers");
 
 describe("ILRM", function () {
   let ilrm, token, registry;
@@ -14,7 +14,14 @@ describe("ILRM", function () {
   const RESOLUTION_TIMEOUT = 7 * 24 * 60 * 60; // 7 days
 
   beforeEach(async function () {
-    [owner, oracle, initiator, counterparty] = await ethers.getSigners();
+    [owner, , initiator, counterparty] = await ethers.getSigners();
+
+    // ILRM calls back verifySignature() on its oracle, so the oracle must be a contract:
+    // deploy a mock oracle and send "oracle" transactions from its address
+    const MockOracle = await ethers.getContractFactory("MockOracle");
+    const mockOracle = await MockOracle.deploy();
+    oracle = await ethers.getImpersonatedSigner(mockOracle.target);
+    await setBalance(mockOracle.target, ethers.parseEther("10"));
 
     // Deploy mock token
     const MockToken = await ethers.getContractFactory("MockToken");

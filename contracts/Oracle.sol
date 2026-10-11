@@ -180,13 +180,18 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
             revert InvalidSignature();
         }
 
-        // Mark as processed
+        // Mark as processed (also blocks re-entrant submission for this dispute)
         processedProposals[disputeId] = proposalHash;
         pendingRequests[disputeId] = false;
-        proposalNonces[disputeId]++;
 
         // Submit to ILRM
         IILRM(ilrmContract).submitLLMProposal(disputeId, proposal, signature);
+
+        // Consume the nonce only after ILRM has re-verified the signature via verifySignature(),
+        // which hashes the current nonce; bumping it earlier makes that check always fail.
+        // ILRM is trusted and re-entry for this dispute is blocked by processedProposals above.
+        // slither-disable-next-line reentrancy-no-eth
+        proposalNonces[disputeId]++;
 
         emit ProposalSubmittedToILRM(disputeId, proposalHash, msg.sender);
         emit DisputeProcessed(disputeId, bytes32(0), proposalHash);

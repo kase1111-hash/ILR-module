@@ -82,6 +82,8 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable2S
     }
 
     modifier assetNotFrozen(bytes32 assetId) {
+        // Enum comparison, not a balance check
+        // slither-disable-next-line incorrect-equality
         if (_assets[assetId].status == FreezeStatus.Frozen) revert AssetFrozen(assetId);
         _;
     }
@@ -259,9 +261,9 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable2S
     ) external override onlyAuthorizedILRM nonReentrant {
         bytes32[] storage frozen = _disputeFrozenAssets[disputeId];
 
-        // Validate there are actually assets frozen for this dispute
-        require(frozen.length > 0, "No frozen assets for dispute");
-
+        // Must not revert when nothing was frozen (initiator had no active assets, or they were
+        // already frozen by another dispute): ILRM calls this on every resolution path, so a
+        // revert here would permanently lock both parties' stakes.
         for (uint256 i = 0; i < frozen.length; i++) {
             bytes32 assetId = frozen[i];
             Asset storage asset = _assets[assetId];
@@ -323,6 +325,8 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable2S
      * @inheritdoc IAssetRegistry
      */
     function isFrozen(bytes32 assetId) external view override returns (bool) {
+        // Enum comparison, not a balance check
+        // slither-disable-next-line incorrect-equality
         return _assets[assetId].status == FreezeStatus.Frozen;
     }
 

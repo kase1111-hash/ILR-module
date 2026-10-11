@@ -438,7 +438,7 @@ export function deserializeCiphertext(json: string): ECIESCiphertext {
 export const ecies = new ECIES();
 
 // Example usage and self-test
-export async function exampleUsage() {
+export async function eciesExampleUsage() {
   console.log('=== ECIES Encryption Example ===\n');
 
   const ecies = new ECIES();
@@ -483,5 +483,5 @@ export async function exampleUsage() {
 }
 
 if (require.main === module) {
-  exampleUsage();
+  eciesExampleUsage();
 }

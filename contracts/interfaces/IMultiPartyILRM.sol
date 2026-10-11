@@ -77,7 +77,7 @@ interface IMultiPartyILRM {
         uint256 rejectionCount;
         bool resolved;
         MultiPartyOutcome outcome;
-        FallbackLicense fallback;
+        FallbackLicense fallbackLicense;
         uint256 counterCount;
         DisputeConfig config;
     }

@@ -40,7 +40,7 @@ interface IILRM {
         bool counterpartyAccepted;
         bool resolved;
         DisputeOutcome outcome;
-        FallbackLicense fallback;
+        FallbackLicense fallbackLicense;
         uint256 counterCount;
     }
 
@@ -192,23 +192,9 @@ interface IILRM {
     /**
      * @notice Get dispute details
      * @param disputeId The dispute to query
-     * @return The dispute struct
+     * @return The full dispute struct
      */
-    function disputes(uint256 disputeId) external view returns (
-        address initiator,
-        address counterparty,
-        uint256 initiatorStake,
-        uint256 counterpartyStake,
-        uint256 startTime,
-        bytes32 evidenceHash,
-        string memory llmProposal,
-        bool initiatorAccepted,
-        bool counterpartyAccepted,
-        bool resolved,
-        DisputeOutcome outcome,
-        FallbackLicense memory fallbackLicense,
-        uint256 counterCount
-    );
+    function disputes(uint256 disputeId) external view returns (Dispute memory);
 
     /**
      * @notice Get total dispute count

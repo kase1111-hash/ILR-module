@@ -149,15 +149,15 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
             counterpartyAccepted: false,
             resolved: false,
             outcome: DisputeOutcome.Pending,
-            fallback: _fallback,
+            fallbackLicense: _fallback,
             counterCount: 0
         });
 
-        // Freeze assets via registry
-        assetRegistry.freezeAssets(disputeId, msg.sender);
-
         // Update cooldown tracking
         lastDisputeTime[msg.sender][_counterparty] = block.timestamp;
+
+        // Freeze assets via registry
+        assetRegistry.freezeAssets(disputeId, msg.sender);
 
         emit DisputeInitiated(disputeId, msg.sender, _counterparty, _evidenceHash);
     }
@@ -276,10 +276,6 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         uint256 fee = COUNTER_FEE_BASE * (1 << d.counterCount);
         require(msg.value >= fee, "Insufficient counter fee");
 
-        // Burn the fee
-        (bool success, ) = BURN_ADDRESS.call{value: fee}("");
-        require(success, "Burn failed");
-
         // Excess goes to treasury for subsidies
         if (msg.value > fee) {
             treasury += msg.value - fee;
@@ -300,6 +296,10 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
             d.startTime += 1 days;
         }
         // If we've hit max extension, no further time added
+
+        // Burn the fee (after state updates: checks-effects-interactions)
+        (bool success, ) = BURN_ADDRESS.call{value: fee}("");
+        require(success, "Burn failed");
 
         emit CounterProposed(_disputeId, msg.sender, d.counterCount);
     }
@@ -326,37 +326,8 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
     // ============ View Functions ============
 
     /// @inheritdoc IILRM
-    function disputes(uint256 _disputeId) external view override returns (
-        address initiator,
-        address counterparty,
-        uint256 initiatorStake,
-        uint256 counterpartyStake,
-        uint256 startTime,
-        bytes32 evidenceHash,
-        string memory llmProposal,
-        bool initiatorAccepted,
-        bool counterpartyAccepted,
-        bool resolved,
-        DisputeOutcome outcome,
-        FallbackLicense memory fallbackLicense,
-        uint256 counterCount
-    ) {
-        Dispute storage d = _disputes[_disputeId];
-        return (
-            d.initiator,
-            d.counterparty,
-            d.initiatorStake,
-            d.counterpartyStake,
-            d.startTime,
-            d.evidenceHash,
-            d.llmProposal,
-            d.initiatorAccepted,
-            d.counterpartyAccepted,
-            d.resolved,
-            d.outcome,
-            d.fallback,
-            d.counterCount
-        );
+    function disputes(uint256 _disputeId) external view override returns (Dispute memory) {
+        return _disputes[_disputeId];
     }
 
     /// @inheritdoc IILRM
@@ -432,7 +403,7 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         }
 
         // Apply fallback license
-        assetRegistry.applyFallbackLicense(_disputeId, d.fallback.termsHash);
+        assetRegistry.applyFallbackLicense(_disputeId, d.fallbackLicense.termsHash);
         assetRegistry.unfreezeAssets(_disputeId, abi.encode(d.outcome));
 
         emit DefaultLicenseApplied(_disputeId);
@@ -461,13 +432,13 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         token.safeTransfer(d.counterparty, returnPerParty);
 
         // Handle dust (any odd wei from division) - burn any remainder
-        uint256 dust = remainder - (returnPerParty * 2);
+        uint256 dust = remainder % 2;
         if (dust > 0) {
             token.safeTransfer(BURN_ADDRESS, dust);
         }
 
         // Apply fallback license
-        assetRegistry.applyFallbackLicense(_disputeId, d.fallback.termsHash);
+        assetRegistry.applyFallbackLicense(_disputeId, d.fallbackLicense.termsHash);
         assetRegistry.unfreezeAssets(_disputeId, abi.encode(d.outcome));
 
         emit StakesBurned(_disputeId, burnAmount);

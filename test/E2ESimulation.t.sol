@@ -43,6 +43,8 @@ contract SimulationAssetRegistry is IAssetRegistry {
     uint256 public freezeCount;
     uint256 public unfreezeCount;
 
+    function registerAsset(bytes32, address, bytes32) external pure override {}
+
     function freezeAssets(uint256 disputeId, address) external override {
         frozen[disputeId] = true;
         freezeCount++;
@@ -56,17 +58,61 @@ contract SimulationAssetRegistry is IAssetRegistry {
     function applyFallbackLicense(uint256 disputeId, bytes32 termsHash) external override {
         appliedFallback[disputeId] = termsHash;
     }
+
+    function grantLicense(bytes32, address, bytes32, uint256, uint256, bool) external pure override {}
+    function revokeLicense(bytes32, address) external pure override {}
+
+    function getAsset(bytes32) external pure override returns (Asset memory) {
+        return Asset(bytes32(0), address(0), bytes32(0), FreezeStatus.Active, 0, 0);
+    }
+
+    function getLicense(bytes32, address) external pure override returns (LicenseGrant memory) {
+        return LicenseGrant(bytes32(0), address(0), bytes32(0), 0, 0, 0, true, false);
+    }
+
+    function isFrozen(bytes32) external pure override returns (bool) {
+        return false;
+    }
+
+    function getAssetsByOwner(address) external pure override returns (bytes32[] memory) {
+        return new bytes32[](0);
+    }
+
+    function isAuthorizedILRM(address) external pure override returns (bool) {
+        return true;
+    }
 }
 
 contract SimulationOracle is IOracle {
     bool public shouldVerify = true;
+    address public ilrmAddress;
 
     function setVerify(bool _verify) external {
         shouldVerify = _verify;
     }
 
+    function setILRM(address _ilrm) external {
+        ilrmAddress = _ilrm;
+    }
+
+    function requestProposal(uint256, bytes32) external pure override {}
+
+    function submitProposal(uint256, string calldata, bytes calldata) external pure override {}
+
     function verifySignature(uint256, bytes32, bytes calldata) external view override returns (bool) {
         return shouldVerify;
+    }
+
+    function ilrmContract() external view override returns (address) {
+        return ilrmAddress;
+    }
+
+    function isOracle(address account) external view override returns (bool) {
+        return account == address(this);
+    }
+
+    function oraclePublicKeyHash(address) external pure override returns (bytes32) {
+        return bytes32(0);
     }
 }
 
@@ -101,6 +147,7 @@ contract E2ESimulationTest is Test {
     address[] public users;
     address public owner;
     address public sequencer;
+    uint256 internal sequencerKey;
 
     // Simulation tracking
     SimulationResult[] public results;
@@ -117,7 +164,8 @@ contract E2ESimulationTest is Test {
 
     function setUp() public {
         owner = address(this);
-        sequencer = address(0x7777);
+        // Sequencer needs a known private key so it can sign state commitments
+        (sequencer, sequencerKey) = makeAddrAndKey("sequencer");
 
         // Deploy mocks
         token = new SimulationToken();
@@ -126,6 +174,7 @@ contract E2ESimulationTest is Test {
 
         // Deploy core contracts
         ilrm = new ILRM(IERC20(token), address(oracle), IAssetRegistry(assetRegistry));
+        oracle.setILRM(address(ilrm));
         treasury = new NatLangChainTreasury(IERC20(token), 100 ether, 1000 ether, 30 days);
         didRegistry = new DIDRegistry();
         l3Bridge = new L3Bridge(address(ilrm));
@@ -147,7 +196,7 @@ contract E2ESimulationTest is Test {
 
         // Create test users (20 users for variety)
         for (uint256 i = 1; i <= 20; i++) {
-            address user = address(uint160(0x1000 + i));
+            address user = makeAddr(string.concat("user", vm.toString(i)));
             users.push(user);
             token.mint(user, 100000 ether);
             vm.deal(user, 1000 ether);
@@ -168,14 +217,14 @@ contract E2ESimulationTest is Test {
             termsHash: keccak256("default_terms")
         });
 
-        // Add trusted DID issuer
+        // Add trusted DID issuer (allowed to issue every attestation type)
         IDIDRegistry.AttestationType[] memory types = new IDIDRegistry.AttestationType[](6);
-        types[0] = IDIDRegistry.AttestationType.GovernmentID;
-        types[1] = IDIDRegistry.AttestationType.Biometric;
-        types[2] = IDIDRegistry.AttestationType.SocialMedia;
-        types[3] = IDIDRegistry.AttestationType.FinancialInstitution;
-        types[4] = IDIDRegistry.AttestationType.ReputationBased;
-        types[5] = IDIDRegistry.AttestationType.CrossChain;
+        types[0] = IDIDRegistry.AttestationType.Identity;
+        types[1] = IDIDRegistry.AttestationType.KYC;
+        types[2] = IDIDRegistry.AttestationType.Reputation;
+        types[3] = IDIDRegistry.AttestationType.Governance;
+        types[4] = IDIDRegistry.AttestationType.Professional;
+        types[5] = IDIDRegistry.AttestationType.Custom;
         didRegistry.addTrustedIssuer(owner, "TestIssuer", types, 100);
     }
 
@@ -223,6 +272,13 @@ contract E2ESimulationTest is Test {
 
         // Print summary
         _printSummary();
+
+        // Every scenario must be accounted for. Scenarios 1-90 must complete outright;
+        // scenarios 91-100 (human errors) must all be rejected by the contracts.
+        assertEq(results.length, 100, "Not all scenarios ran");
+        assertEq(failureCount, 0, "Some scenarios failed");
+        assertEq(successCount, 90, "Non-error scenarios did not all succeed");
+        assertEq(gracefulErrorCount, 10, "Human-error scenarios were not all rejected");
     }
 
     // ============ Scenario Categories ============
@@ -276,10 +332,11 @@ contract E2ESimulationTest is Test {
         vm.prank(counterparty);
         ilrm.acceptProposal(disputeId);
 
-        (,,,,,,,,,bool resolved, IILRM.DisputeOutcome outcome,) = ilrm.disputes(disputeId);
-        require(resolved, "Dispute not resolved");
+        IILRM.Dispute memory d = ilrm.disputes(disputeId);
+        require(d.resolved, "Dispute not resolved");
+        require(d.outcome == IILRM.DisputeOutcome.AcceptedProposal, "Unexpected outcome");
 
-        return outcome == IILRM.DisputeOutcome.AcceptedProposal ? "MutualAcceptance" : "Unexpected";
+        return "MutualAcceptance";
     }
 
     /**
@@ -339,6 +396,11 @@ contract E2ESimulationTest is Test {
         vm.prank(counterparty);
         ilrm.acceptProposal(disputeId);
 
+        IILRM.Dispute memory d = ilrm.disputes(disputeId);
+        require(d.resolved, "Dispute not resolved");
+        require(d.outcome == IILRM.DisputeOutcome.AcceptedProposal, "Unexpected outcome");
+        require(d.counterCount == counterCount, "Counter count mismatch");
+
         return string(abi.encodePacked("Resolved after ", _uint2str(counterCount), " counters"));
     }
 
@@ -386,12 +448,15 @@ contract E2ESimulationTest is Test {
             vm.warp(block.timestamp + 8 days);
             ilrm.enforceTimeout(disputeId);
 
+            require(ilrm.disputes(disputeId).outcome == IILRM.DisputeOutcome.TimeoutWithBurn, "Unexpected outcome");
             return "TimeoutWithBurn";
         } else {
             // Warp past stake window
             vm.warp(block.timestamp + 4 days);
             ilrm.enforceTimeout(disputeId);
 
+            require(ilrm.disputes(disputeId).outcome == IILRM.DisputeOutcome.DefaultLicenseApplied, "Unexpected outcome");
+            require(assetRegistry.appliedFallback(disputeId) == defaultFallback.termsHash, "Fallback not applied");
             return "DefaultLicenseApplied";
         }
     }
@@ -425,13 +490,13 @@ contract E2ESimulationTest is Test {
             // Check if already registered
             if (!didRegistry.hasDID(user)) {
                 vm.prank(user);
-                bytes32 did = didRegistry.registerDID(keccak256(abi.encodePacked("did_doc", user)));
+                bytes32 newDid = didRegistry.registerDID(keccak256(abi.encodePacked("did_doc", user)));
 
                 // Issue credentials based on scenario variation
                 uint256 credCount = (scenarioId % 5) + 1;
                 for (uint256 i = 0; i < credCount; i++) {
                     didRegistry.issueCredential(
-                        did,
+                        newDid,
                         IDIDRegistry.AttestationType(i % 6),
                         keccak256(abi.encodePacked("claim", i)),
                         0, // No expiry
@@ -447,7 +512,8 @@ contract E2ESimulationTest is Test {
         } else {
             // Try to use functions requiring DID without one
             bool hasDID = didRegistry.hasDID(user);
-            return hasDID ? "UnexpectedDID" : "NoDID_AsExpected";
+            require(!hasDID, "UnexpectedDID");
+            return "NoDID_AsExpected";
         }
     }
 
@@ -472,7 +538,11 @@ contract E2ESimulationTest is Test {
         if (scenarioId % 3 == 0) {
             // Test state commitment
             bytes32 stateRoot = keccak256(abi.encodePacked("state", scenarioId));
-            bytes32 previousRoot = l3Bridge.latestFinalizedRoot();
+            // Commitments must chain from the latest committed root (or finalized root if none pending)
+            bytes32 previousRoot = l3Bridge.latestCommittedRoot();
+            if (previousRoot == bytes32(0)) {
+                previousRoot = l3Bridge.latestFinalizedRoot();
+            }
 
             bytes32 messageHash = keccak256(abi.encodePacked(
                 stateRoot,
@@ -481,8 +551,9 @@ contract E2ESimulationTest is Test {
                 previousRoot
             ));
 
-            // Sign with sequencer (simplified for test)
-            (uint8 v, bytes32 r, bytes32 s) = vm.sign(0x7777, messageHash);
+            // Sign with sequencer key (EIP-191 personal_sign, as verified by L3Bridge)
+            bytes32 ethSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash));
+            (uint8 v, bytes32 r, bytes32 s) = vm.sign(sequencerKey, ethSignedHash);
             bytes memory sig = abi.encodePacked(r, s, v);
 
             IL3Bridge.StateCommitment memory commitment = IL3Bridge.StateCommitment({
@@ -495,10 +566,13 @@ contract E2ESimulationTest is Test {
             });
 
             vm.prank(sequencer);
-            // This may fail due to signature verification
-            // l3Bridge.submitStateCommitment(commitment);
+            l3Bridge.submitStateCommitment(commitment);
 
-            return "StateCommitmentTest";
+            require(l3Bridge.getStateCommitment(stateRoot).stateRoot == stateRoot, "Commitment not stored");
+            require(l3Bridge.latestCommittedRoot() == stateRoot, "Latest committed root not updated");
+            require(!l3Bridge.isStateFinalized(stateRoot), "Finalized before challenge period");
+
+            return "StateCommitmentSubmitted";
         } else if (scenarioId % 3 == 1) {
             // Test bridge status
             IL3Bridge.BridgeStatus status = l3Bridge.getBridgeStatus();
@@ -519,11 +593,12 @@ contract E2ESimulationTest is Test {
         uint256 startGas = gasleft();
 
         try this.executeHumanErrorScenario(scenarioId) returns (string memory outcome) {
-            _recordSuccess(scenarioId, scenarioType, outcome, startGas - gasleft());
+            // Reaching here means the contracts accepted invalid input ("ShouldHaveFailed_*")
+            _recordFailure(scenarioId, scenarioType, outcome, startGas - gasleft());
         } catch Error(string memory reason) {
             // This is expected for error scenarios!
             _recordGracefulError(scenarioId, scenarioType, reason, startGas - gasleft());
-        } catch (bytes memory lowLevelData) {
+        } catch (bytes memory) {
             // Custom errors
             _recordGracefulError(scenarioId, scenarioType, "CustomError:GracefullyHandled", startGas - gasleft());
         }
@@ -599,7 +674,7 @@ contract E2ESimulationTest is Test {
             vm.prank(users[5]); // Not a trusted issuer
             didRegistry.issueCredential(
                 bytes32(uint256(0x123)),
-                IDIDRegistry.AttestationType.GovernmentID,
+                IDIDRegistry.AttestationType.Identity,
                 bytes32(0),
                 0,
                 50
@@ -672,9 +747,9 @@ contract E2ESimulationTest is Test {
         address initiator = users[2];
         address counterparty = users[3];
 
-        uint256 snapshot = vm.snapshot();
+        uint256 snapshot = vm.snapshotState();
 
-        try this.testTimingScenario(initiator, counterparty, waitTime) returns (string memory result) {
+        try this.executeTimingScenario(initiator, counterparty, waitTime) returns (string memory result) {
             console.log("  Wait %s hours: %s", waitTime / 1 hours, result);
         } catch Error(string memory reason) {
             console.log("  Wait %s hours: ERROR - %s", waitTime / 1 hours, reason);
@@ -682,19 +757,18 @@ contract E2ESimulationTest is Test {
             console.log("  Wait %s hours: FAILED", waitTime / 1 hours);
         }
 
-        vm.revertTo(snapshot);
+        vm.revertToState(snapshot);
     }
 
-    function testTimingScenario(address initiator, address counterparty, uint256 waitTime) external returns (string memory) {
+    // Named execute* (not test*) so forge does not pick it up as a standalone fuzz test
+    function executeTimingScenario(address initiator, address counterparty, uint256 waitTime) external returns (string memory) {
         vm.prank(initiator);
         uint256 disputeId = ilrm.initiateBreachDispute(counterparty, 1 ether, bytes32(0), defaultFallback);
 
         vm.warp(block.timestamp + waitTime);
 
-        // Try to stake after waiting
-        bool canStake = block.timestamp <= ilrm.STAKE_WINDOW();
-
-        if (waitTime <= 3 days) {
+        // Try to stake after waiting (stake window is inclusive of its end)
+        if (waitTime <= ilrm.STAKE_WINDOW()) {
             vm.prank(counterparty);
             ilrm.depositStake(disputeId);
             return "Staked";

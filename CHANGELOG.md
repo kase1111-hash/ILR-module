@@ -5,6 +5,26 @@ All notable changes to the NatLangChain ILRM Protocol will be documented in this
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed
+
+#### Contracts
+- **Oracle**: proposals submitted through the Oracle always reverted in ILRM with "Invalid signature", because the nonce was incremented before ILRM re-verified the signature. The nonce is now consumed after the ILRM call.
+- **AssetRegistry**: `unfreezeAssets` reverted when a dispute froze no assets (the initiator had none, or they were already frozen by another dispute). ILRM calls it on every resolution path, so such disputes could never resolve and both stakes were locked. It is now a no-op in that case.
+- **L3Bridge**: an unrevealed fraud-proof commitment blocked all further challenges for its state root forever, letting a fraudulent root finalize. Expired, unrevealed commitments can now be replaced.
+- **GovernanceTimelock**: made compatible with OpenZeppelin v5 `TimelockController` without overriding its operation-state views (overriding `getTimestamp` would have made executed operations executable again).
+- **FIDOVerifier**: corrected the P-256 field prime and the RIP-7212 precompile self-test vector.
+- Compile errors across the codebase (`fallback` is a reserved word, stack-too-deep in `IILRM.disputes`, 381-bit BLS constants, OZ v5 API changes). `IILRM.disputes(id)` now returns the `Dispute` struct, and its `fallback` field is renamed `fallbackLicense`.
+- `ILRM.counterPropose` and `initiateBreachDispute` follow checks-effects-interactions.
+
+#### Tooling & CI
+- Foundry dependencies are git submodules (OpenZeppelin v5.4.0, forge-std v1.11.0); `package-lock.json` is committed and `@openzeppelin/contracts` is pinned to 5.4.0 to match.
+- `@nomicfoundation/hardhat-toolbox` upgraded to v6 to resolve the npm peer-dependency conflict; Node.js 20+ is required.
+- Formatter settings moved to the `[fmt]` section of `foundry.toml`; the codebase is formatted with `forge fmt`.
+- Slither config fixed (`filter_paths` must be a string); CI fails on medium/high findings in the audit-scope contracts.
+- All Foundry and Hardhat test suites updated to the current contract APIs; SDK type errors fixed.
+
 ## [0.1.0-alpha] - 2026-01-02
 
 ### Added

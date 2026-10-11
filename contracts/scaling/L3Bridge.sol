@@ -422,9 +422,15 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
             revert ChallengePeriodExpired();
         }
 
-        // Verify no existing commitment for this state root
-        if (_stateRootCommitments[stateRoot] != bytes32(0)) {
-            revert InvalidCommitment();
+        // Verify no live commitment for this state root. A commitment that was not revealed within
+        // its reveal window has expired (its bond is forfeited) and must not block other challengers,
+        // otherwise a never-revealed commitment would let a fraudulent root finalize unchallenged.
+        bytes32 existingCommit = _stateRootCommitments[stateRoot];
+        if (existingCommit != bytes32(0)) {
+            FraudProofCommitment storage existing = _fraudProofCommitments[existingCommit];
+            if (existing.revealed || block.timestamp - existing.commitTime <= MIN_REVEAL_DELAY + MAX_REVEAL_WINDOW) {
+                revert InvalidCommitment();
+            }
         }
 
         // Verify this commit hash is not already used

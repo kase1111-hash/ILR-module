@@ -21,7 +21,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          version: stable
 
       - name: Install dependencies
         run: forge install
@@ -50,7 +50,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          version: stable
 
       - name: Install dependencies
         run: forge install
@@ -79,7 +79,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          version: stable
 
       - name: Install dependencies
         run: forge install
@@ -105,7 +105,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          version: stable
 
       - name: Install dependencies
         run: forge install
@@ -137,6 +137,9 @@ jobs:
       - name: Run Hardhat tests
         run: npm test
 
+      - name: Typecheck SDK
+        run: npx tsc --noEmit -p .
+
   lint:
     name: Lint & Format
     runs-on: ubuntu-latest
@@ -148,7 +151,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          version: stable
 
       - name: Check formatting
         run: forge fmt --check
@@ -165,7 +168,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          version: stable
 
       - name: Install dependencies
         run: forge install

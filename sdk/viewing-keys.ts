@@ -580,7 +580,7 @@ export { ECIES, ECIESCiphertext, ECIESKeyPair } from './ecies';
 export { ShamirSecretSharing, Share, EncodedShare } from './shamir';
 
 // Example usage
-export async function exampleUsage() {
+export async function viewingKeysExampleUsage() {
   console.log('=== Viewing Keys SDK Example ===\n');
 
   // Note: This example shows the flow without actual blockchain connection
@@ -649,5 +649,5 @@ export async function exampleUsage() {
 }
 
 if (require.main === module) {
-  exampleUsage();
+  viewingKeysExampleUsage();
 }

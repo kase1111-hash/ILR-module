@@ -610,7 +610,7 @@ function modInverse(a: bigint, m: bigint): bigint {
 
 // ============ Example Usage ============
 
-export async function exampleUsage(): Promise<void> {
+export async function thresholdBlsExampleUsage(): Promise<void> {
   console.log("=== Threshold BLS Example ===\n");
 
   // 1. Generate key shares (3-of-5 threshold)
@@ -693,5 +693,5 @@ export async function exampleUsage(): Promise<void> {
 
 // Run if executed directly
 if (typeof require !== "undefined" && require.main === module) {
-  exampleUsage().catch(console.error);
+  thresholdBlsExampleUsage().catch(console.error);
 }

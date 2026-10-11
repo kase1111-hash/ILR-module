@@ -34,7 +34,7 @@ describe("AssetRegistry Tests", function () {
     it("should register new asset", async function () {
       const { registry, assetOwner, ASSET_ID, TERMS_HASH } = await loadFixture(deployFixture);
 
-      await expect(registry.registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH))
+      await expect(registry.connect(assetOwner).registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH))
         .to.emit(registry, "AssetRegistered")
         .withArgs(ASSET_ID, assetOwner.address, TERMS_HASH);
 
@@ -45,10 +45,18 @@ describe("AssetRegistry Tests", function () {
     it("should reject duplicate asset registration", async function () {
       const { registry, assetOwner, ASSET_ID, TERMS_HASH } = await loadFixture(deployFixture);
 
-      await registry.registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
+      await registry.connect(assetOwner).registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
 
-      await expect(registry.registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH))
+      await expect(registry.connect(assetOwner).registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH))
         .to.be.revertedWithCustomError(registry, "AssetAlreadyExists");
+    });
+
+    it("should reject registering an asset under someone else's address (H-05)", async function () {
+      const { registry, assetOwner, attacker, ASSET_ID, TERMS_HASH } = await loadFixture(deployFixture);
+
+      await expect(registry.connect(attacker).registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH))
+        .to.be.revertedWithCustomError(registry, "NotAssetOwner")
+        .withArgs(attacker.address, assetOwner.address);
     });
 
     it("should reject zero address owner", async function () {
@@ -63,7 +71,7 @@ describe("AssetRegistry Tests", function () {
     it("should allow owner to transfer", async function () {
       const { registry, assetOwner, licensee, ASSET_ID, TERMS_HASH } = await loadFixture(deployFixture);
 
-      await registry.registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
+      await registry.connect(assetOwner).registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
 
       await registry.connect(assetOwner).transferAsset(ASSET_ID, licensee.address);
 
@@ -74,7 +82,7 @@ describe("AssetRegistry Tests", function () {
     it("should reject transfer from non-owner", async function () {
       const { registry, assetOwner, attacker, ASSET_ID, TERMS_HASH } = await loadFixture(deployFixture);
 
-      await registry.registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
+      await registry.connect(assetOwner).registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
 
       await expect(registry.connect(attacker).transferAsset(ASSET_ID, attacker.address))
         .to.be.revertedWithCustomError(registry, "NotAssetOwner");
@@ -87,7 +95,7 @@ describe("AssetRegistry Tests", function () {
     it("should reject transfer of frozen asset", async function () {
       const { registry, ilrm, assetOwner, licensee, ASSET_ID, TERMS_HASH } = await loadFixture(deployFixture);
 
-      await registry.registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
+      await registry.connect(assetOwner).registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
       await registry.connect(ilrm).freezeAssets(1, assetOwner.address);
 
       await expect(registry.connect(assetOwner).transferAsset(ASSET_ID, licensee.address))
@@ -99,7 +107,7 @@ describe("AssetRegistry Tests", function () {
     it("should grant license", async function () {
       const { registry, assetOwner, licensee, ASSET_ID, TERMS_HASH } = await loadFixture(deployFixture);
 
-      await registry.registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
+      await registry.connect(assetOwner).registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
 
       const duration = 365 * 24 * 60 * 60; // 1 year
       await registry.connect(assetOwner).grantLicense(
@@ -119,7 +127,7 @@ describe("AssetRegistry Tests", function () {
     it("should revoke license", async function () {
       const { registry, assetOwner, licensee, ASSET_ID, TERMS_HASH } = await loadFixture(deployFixture);
 
-      await registry.registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
+      await registry.connect(assetOwner).registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
       await registry.connect(assetOwner).grantLicense(
         ASSET_ID, licensee.address, TERMS_HASH, 86400, 500, true
       );
@@ -133,7 +141,7 @@ describe("AssetRegistry Tests", function () {
     it("should check license validity with expiry", async function () {
       const { registry, assetOwner, licensee, ASSET_ID, TERMS_HASH } = await loadFixture(deployFixture);
 
-      await registry.registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
+      await registry.connect(assetOwner).registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
       await registry.connect(assetOwner).grantLicense(
         ASSET_ID, licensee.address, TERMS_HASH, 86400, 500, true
       );
@@ -154,7 +162,7 @@ describe("AssetRegistry Tests", function () {
     it("should only allow ILRM to freeze", async function () {
       const { registry, ilrm, assetOwner, attacker, ASSET_ID, TERMS_HASH } = await loadFixture(deployFixture);
 
-      await registry.registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
+      await registry.connect(assetOwner).registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
 
       await expect(registry.connect(attacker).freezeAssets(1, assetOwner.address))
         .to.be.revertedWithCustomError(registry, "NotAuthorizedILRM");
@@ -170,7 +178,7 @@ describe("AssetRegistry Tests", function () {
     it("should unfreeze assets after resolution", async function () {
       const { registry, ilrm, assetOwner, ASSET_ID, TERMS_HASH } = await loadFixture(deployFixture);
 
-      await registry.registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
+      await registry.connect(assetOwner).registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
       await registry.connect(ilrm).freezeAssets(1, assetOwner.address);
 
       expect(await registry.isFrozen(ASSET_ID)).to.be.true;
@@ -180,10 +188,30 @@ describe("AssetRegistry Tests", function () {
       expect(await registry.isFrozen(ASSET_ID)).to.be.false;
     });
 
+    /**
+     * ILRM unfreezes on every resolution path; reverting here would lock dispute stakes forever
+     */
+    it("should not revert when a dispute froze no assets", async function () {
+      const { registry, ilrm, assetOwner, ASSET_ID, TERMS_HASH } = await loadFixture(deployFixture);
+
+      // Initiator with no registered assets
+      await registry.connect(ilrm).freezeAssets(1, assetOwner.address);
+      await expect(registry.connect(ilrm).unfreezeAssets(1, ethers.toUtf8Bytes("resolved")))
+        .to.emit(registry, "AssetsUnfrozen");
+
+      // Second dispute by the same owner while their only asset is frozen by the first
+      await registry.connect(assetOwner).registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
+      await registry.connect(ilrm).freezeAssets(2, assetOwner.address);
+      await registry.connect(ilrm).freezeAssets(3, assetOwner.address);
+      await expect(registry.connect(ilrm).unfreezeAssets(3, ethers.toUtf8Bytes("resolved")))
+        .to.emit(registry, "AssetsUnfrozen");
+      expect(await registry.isFrozen(ASSET_ID)).to.be.true; // still held by dispute 2
+    });
+
     it("should apply fallback license on timeout", async function () {
       const { registry, ilrm, assetOwner, ASSET_ID, TERMS_HASH } = await loadFixture(deployFixture);
 
-      await registry.registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
+      await registry.connect(assetOwner).registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
       await registry.connect(ilrm).freezeAssets(1, assetOwner.address);
 
       const fallbackTerms = ethers.keccak256(ethers.toUtf8Bytes("fallback"));
@@ -201,8 +229,8 @@ describe("AssetRegistry Tests", function () {
       const asset1 = ethers.keccak256(ethers.toUtf8Bytes("asset1"));
       const asset2 = ethers.keccak256(ethers.toUtf8Bytes("asset2"));
 
-      await registry.registerAsset(asset1, assetOwner.address, TERMS_HASH);
-      await registry.registerAsset(asset2, assetOwner.address, TERMS_HASH);
+      await registry.connect(assetOwner).registerAsset(asset1, assetOwner.address, TERMS_HASH);
+      await registry.connect(assetOwner).registerAsset(asset2, assetOwner.address, TERMS_HASH);
 
       const assets = await registry.getAssetsByOwner(assetOwner.address);
       expect(assets.length).to.equal(2);
@@ -211,7 +239,7 @@ describe("AssetRegistry Tests", function () {
     it("should return frozen assets for dispute", async function () {
       const { registry, ilrm, assetOwner, ASSET_ID, TERMS_HASH } = await loadFixture(deployFixture);
 
-      await registry.registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
+      await registry.connect(assetOwner).registerAsset(ASSET_ID, assetOwner.address, TERMS_HASH);
       await registry.connect(ilrm).freezeAssets(1, assetOwner.address);
 
       const frozen = await registry.getFrozenAssets(1);

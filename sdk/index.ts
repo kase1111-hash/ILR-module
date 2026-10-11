@@ -50,4 +50,5 @@ export {
 // Type Definitions
 // ============================================================================
 
-export * from './types';
+// sdk/types.d.ts holds ambient declarations for optional ZK packages
+// (circomlibjs, snarkjs); it is picked up via tsconfig and has nothing to re-export.

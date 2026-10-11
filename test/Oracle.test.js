@@ -29,10 +29,10 @@ describe("Oracle Tests", function () {
   }
 
   describe("Oracle Registration", function () {
-    it("should register deployer as initial oracle", async function () {
+    it("should not auto-register deployer as oracle (M-07)", async function () {
       const { oracle, owner } = await loadFixture(deployFixture);
 
-      expect(await oracle.isOracle(owner.address)).to.be.true;
+      expect(await oracle.isOracle(owner.address)).to.be.false;
     });
 
     it("should allow owner to register new oracles", async function () {

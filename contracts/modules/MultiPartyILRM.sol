@@ -170,7 +170,7 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
             rejectionCount: 0,
             resolved: false,
             outcome: MultiPartyOutcome.Pending,
-            fallback: fallbackTerms,
+            fallbackLicense: fallbackTerms,
             counterCount: 0,
             config: DisputeConfig({
                 quorumType: config.quorumType,
@@ -612,7 +612,7 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
         assetRegistry.unfreezeAssets(disputeId, abi.encode(d.outcome));
 
         // Apply fallback license
-        assetRegistry.applyFallbackLicense(disputeId, d.fallback.termsHash);
+        assetRegistry.applyFallbackLicense(disputeId, d.fallbackLicense.termsHash);
 
         emit MultiPartyResolved(disputeId, MultiPartyOutcome.PartialResolution, 0);
     }
@@ -653,7 +653,7 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
         }
 
         // Apply fallback license to all
-        assetRegistry.applyFallbackLicense(disputeId, d.fallback.termsHash);
+        assetRegistry.applyFallbackLicense(disputeId, d.fallbackLicense.termsHash);
 
         emit MultiPartyResolved(disputeId, MultiPartyOutcome.TimeoutWithBurn, totalBurn);
     }

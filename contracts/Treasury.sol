@@ -216,28 +216,20 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
         }
 
         // Verify participant is the counterparty (defender, not initiator)
-        (
-            address initiator,
-            address counterparty,
-            ,
-            uint256 counterpartyStake,
-            ,,,,,
-            bool resolved,
-            ,,
-        ) = IILRM(ilrm).disputes(disputeId);
+        IILRM.Dispute memory d = IILRM(ilrm).disputes(disputeId);
 
         // Dispute must be active (not resolved)
-        if (resolved) revert DisputeAlreadyResolved(disputeId);
+        if (d.resolved) revert DisputeAlreadyResolved(disputeId);
 
         // Counterparty must not have staked yet (subsidy is to HELP them stake)
-        if (counterpartyStake != 0) revert CounterpartyAlreadyStaked(disputeId);
+        if (d.counterpartyStake != 0) revert CounterpartyAlreadyStaked(disputeId);
 
-        if (participant != counterparty) {
-            revert NotCounterparty(participant, counterparty);
+        if (participant != d.counterparty) {
+            revert NotCounterparty(participant, d.counterparty);
         }
         // Initiators cannot receive subsidies (they're the attackers)
-        if (participant == initiator) {
-            revert NotCounterparty(participant, counterparty);
+        if (participant == d.initiator) {
+            revert NotCounterparty(participant, d.counterparty);
         }
 
         // Check harassment score (threshold-based, no tiers)
@@ -276,6 +268,8 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
             subsidyAmount = availableBalance;
         }
 
+        // Computed amount after caps, not a balance check
+        // slither-disable-next-line incorrect-equality
         if (subsidyAmount == 0) revert NoSubsidyAvailable();
 
         // Update state
