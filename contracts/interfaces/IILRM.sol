@@ -57,6 +57,12 @@ interface IILRM {
     /// @notice Emitted when oracle submits LLM proposal
     event ProposalSubmitted(uint256 indexed disputeId, string proposal);
 
+    /// @notice Emitted when a live proposal is replaced in the same round (Oracle owner recovery);
+    ///         all acceptances of the previous proposal are void
+    event ProposalSuperseded(
+        uint256 indexed disputeId, uint256 indexed round, bytes32 previousProposalHash, bytes32 newProposalHash
+    );
+
     /// @notice Emitted when a party accepts the proposal
     event AcceptanceSignaled(uint256 indexed disputeId, address indexed party);
 

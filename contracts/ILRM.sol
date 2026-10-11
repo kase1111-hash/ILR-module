@@ -202,6 +202,9 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
      * @inheritdoc IILRM
      * @dev Only trusted oracle can submit proposals
      * @dev FIX H-01: Signature verification is now enforced via Oracle contract
+     * @dev The Oracle admits one proposal per round (counterCount); a live proposal is replaced only via the
+     *      Oracle owner's recovery path. Storing any proposal voids both acceptances, so an acceptance always
+     *      refers to the live proposal.
      */
     function submitLLMProposal(uint256 _disputeId, string calldata _proposal, bytes calldata _signature)
         external
@@ -213,6 +216,7 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         Dispute storage d = _disputes[_disputeId];
         require(d.counterpartyStake > 0, "Not fully staked");
         require(!d.resolved, "Dispute resolved");
+        require(block.timestamp <= d.startTime + RESOLUTION_TIMEOUT, "Timeout passed");
         require(bytes(_proposal).length > 0, "Empty proposal");
 
         // FIX H-01: Verify EIP-712 signature via Oracle contract
@@ -220,6 +224,14 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         bytes32 proposalHash = keccak256(bytes(_proposal));
         require(IOracle(oracle).verifySignature(_disputeId, proposalHash, _signature), "Invalid signature");
 
+        // Replacing a live proposal in the same round (Oracle owner recovery)
+        if (bytes(d.llmProposal).length != 0) {
+            emit ProposalSuperseded(_disputeId, d.counterCount, keccak256(bytes(d.llmProposal)), proposalHash);
+        }
+
+        // An acceptance always refers to the live proposal: storing any proposal voids both acceptances
+        d.initiatorAccepted = false;
+        d.counterpartyAccepted = false;
         d.llmProposal = _proposal;
 
         emit ProposalSubmitted(_disputeId, _proposal);

@@ -34,12 +34,15 @@ interface IOracle {
      * @dev Oracle signs the proposal and submits to ILRM
      * @param disputeId The dispute receiving the proposal
      * @param proposal JSON-encoded reconciliation proposal
-     * @param signature EIP-712 signature over (disputeId, proposalHash)
+     * @param signature EIP-712 signature over (disputeId, round, evidenceHash, proposalHash, nonce), where
+     *        round/evidenceHash are the dispute's current ILRM counterCount/evidenceHash. At most one proposal
+     *        per round; reverts while the current round already holds one unless the owner reset it.
      */
     function submitProposal(uint256 disputeId, string calldata proposal, bytes calldata signature) external;
 
     /**
      * @notice Verify oracle signature on a proposal
+     * @dev Verifies against the current round, evidence and nonce.
      * @param disputeId The dispute ID
      * @param proposalHash Hash of the proposal content
      * @param signature Signature to verify

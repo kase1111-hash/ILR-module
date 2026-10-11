@@ -235,21 +235,34 @@ Treasury.setMinStake(newHigherAmount)
 
 **Steps:**
 
-1. **Disable Oracle**
+1. **Revoke the compromised operator** (always before resetting, so it cannot fill the re-opened slot)
    ```solidity
-   Oracle.deauthorize(compromisedOracleAddress)
+   Oracle.revokeOracle(compromisedOperator)
    ```
 
-2. **Block Proposals**
+2. **Void its live proposals**
    ```solidity
-   // Reject any pending proposals from bad oracle
-   ILRM.rejectProposal(disputeId)
+   // For each unresolved dispute whose CURRENT-round proposal came from the compromised operator
+   Oracle.resetProposal(disputeId, "compromised operator")
    ```
+   This re-opens the current round's proposal slot for exactly one replacement and bumps the
+   dispute's nonce, so every signature made before the reset is dead. It reverts with
+   `NoProposalToReset` if the current round has no proposal (earlier rounds were already cleared
+   by `counterPropose`) and with `DisputeAlreadyResolved` for resolved disputes.
 
-3. **Add New Oracle**
+3. **Warn the parties**
+
+   The voided text stays in ILRM, and stays acceptable, until the replacement lands. Tell both
+   parties not to accept it. The new operator should pre-sign the replacement at the bumped
+   nonce (`Oracle.proposalContext` / `Oracle.proposalDigest`) and submit it immediately.
+
+4. **Register the new operator and submit the corrected proposal**
    ```solidity
-   Oracle.authorize(newTrustedOracleAddress)
+   Oracle.registerOracle(newOperator, keyHash)
+   Oracle.submitProposal(disputeId, correctedProposal, signature) // from newOperator
    ```
+   ILRM emits `ProposalSuperseded` and clears both acceptance flags, so any acceptance of the
+   voided proposal no longer counts.
 
 ### Action 4: Governance Attack Response
 
