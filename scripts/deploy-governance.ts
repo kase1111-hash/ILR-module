@@ -4,7 +4,9 @@
  * Deploys and configures the NatLangChain governance infrastructure:
  * 1. GovernanceTimelock with multi-sig as proposer
  * 2. Register all protocol contracts
- * 3. Transfer ownership from deployer to timelock
+ * 3. Configure the call policy (LongDelay / Emergency call classes)
+ * 4. Grant EMERGENCY_ROLE and CANCELLER_ROLE to the multi-sig
+ * 5. Print the manual ownership-transfer and admin-renounce steps
  *
  * Prerequisites:
  * - Multi-sig wallet deployed (Gnosis Safe recommended)
@@ -37,6 +39,84 @@ interface DeploymentConfig {
 
   // Whether anyone can execute after delay
   openExecutor: boolean;
+}
+
+/** Delay class values, mirroring IGovernanceTimelock.CallClass */
+const CallClass = {
+  Standard: 0,
+  LongDelay: 1,
+  Emergency: 2,
+} as const;
+
+interface CallPolicyEntry {
+  // Hardhat artifact name of the protocol contract
+  contractName: string;
+  // Deployed address (entries with a zero/undefined address are skipped)
+  address?: string;
+  // Full function signature, e.g. "setILRM(address)"
+  signature: string;
+  callClass: number;
+  // Missing LongDelay functions abort the deployment; missing Emergency or optional functions only warn
+  required: boolean;
+}
+
+interface AppliedCallPolicy {
+  contract: string;
+  target: string;
+  signature: string;
+  selector: string;
+  callClass: "LongDelay" | "Emergency";
+}
+
+const ZERO_ADDRESS = "0x0000000000000000000000000000000000000000";
+
+/**
+ * Call policy applied while the deployer still holds DEFAULT_ADMIN_ROLE.
+ *
+ * Ownership/role/upgrade/multicall selectors and every call to the timelock itself are hard-locked to
+ * LongDelay by the contract. This list adds protocol-specific privileged setters (LongDelay) and the
+ * defensive calls the EMERGENCY_ROLE may queue through executeEmergency (Emergency, default-deny).
+ */
+function buildCallPolicy(config: DeploymentConfig): CallPolicyEntry[] {
+  const longDelay = (
+    contractName: string,
+    address: string | undefined,
+    signature: string,
+    required = true
+  ): CallPolicyEntry => ({ contractName, address, signature, callClass: CallClass.LongDelay, required });
+  const emergency = (contractName: string, address: string | undefined, signature: string): CallPolicyEntry => ({
+    contractName,
+    address,
+    signature,
+    callClass: CallClass.Emergency,
+    required: false,
+  });
+
+  return [
+    // LongDelay: wiring and fund movements
+    longDelay("NatLangChainOracle", config.oracleAddress, "setILRM(address)"),
+    longDelay("NatLangChainTreasury", config.treasuryAddress, "setILRM(address)"),
+    longDelay("NatLangChainTreasury", config.treasuryAddress, "emergencyWithdraw(address,uint256)"),
+    longDelay("NatLangChainTreasury", config.treasuryAddress, "emergencyWithdrawETH(address,uint256)"),
+    longDelay("ILRM", config.ilrmAddress, "withdrawTreasury(address,uint256)"),
+    longDelay("NatLangChainAssetRegistry", config.assetRegistryAddress, "authorizeILRM(address)"),
+    // Optional module, not hard-locked by the timelock: classify it when deployed (warn if missing)
+    longDelay("ComplianceCouncil", config.complianceCouncilAddress, "setGovernanceTimelock(address)", false),
+
+    // Emergency: defensive calls EMERGENCY_ROLE may queue at the emergency delay
+    emergency("NatLangChainOracle", config.oracleAddress, "revokeOracle(address)"),
+    emergency("NatLangChainOracle", config.oracleAddress, "cancelPendingRequest(uint256)"),
+    emergency("NatLangChainAssetRegistry", config.assetRegistryAddress, "revokeILRM(address)"),
+  ];
+}
+
+/**
+ * Resolve a function selector from the compiled artifact, or null when the function does not exist
+ */
+async function resolveSelector(contractName: string, signature: string): Promise<string | null> {
+  const factory = await ethers.getContractFactory(contractName);
+  const fragment = factory.interface.getFunction(signature);
+  return fragment ? fragment.selector : null;
 }
 
 async function main() {
@@ -144,7 +224,38 @@ async function main() {
     }
   }
 
-  // Grant EMERGENCY_ROLE to multi-sig
+  // Configure call policy (must happen while the deployer still holds DEFAULT_ADMIN_ROLE; afterwards
+  // every setCallClass change is a timelock self-call that needs the long delay)
+  console.log("\n=== Configuring Call Policy ===");
+  const callPolicy: AppliedCallPolicy[] = [];
+  for (const entry of buildCallPolicy(config)) {
+    if (!entry.address || entry.address === ZERO_ADDRESS) {
+      continue;
+    }
+    const className = entry.callClass === CallClass.LongDelay ? "LongDelay" : "Emergency";
+    const selector = await resolveSelector(entry.contractName, entry.signature);
+    if (!selector) {
+      const message = `${entry.contractName}.${entry.signature} not found in the compiled artifact`;
+      if (entry.required) {
+        throw new Error(`${message}; cannot classify it ${className}`);
+      }
+      console.warn(`WARNING: ${message}; skipping ${className} classification`);
+      continue;
+    }
+    const tx = await timelock.setCallClass(entry.address, selector, entry.callClass);
+    await tx.wait();
+    callPolicy.push({
+      contract: entry.contractName,
+      target: entry.address,
+      signature: entry.signature,
+      selector,
+      callClass: className,
+    });
+    console.log(`${className}: ${entry.contractName}.${entry.signature} (${selector}) @ ${entry.address}`);
+  }
+
+  // Grant EMERGENCY_ROLE to multi-sig. The deployer (bootstrap admin) is no longer granted
+  // EMERGENCY_ROLE by the constructor, so this explicit grant is the only emergency holder.
   console.log("\n=== Granting Emergency Role ===");
   const EMERGENCY_ROLE = await timelock.EMERGENCY_ROLE();
   const grantEmergencyTx = await timelock.grantRole(EMERGENCY_ROLE, config.multiSigAddress);
@@ -161,19 +272,26 @@ async function main() {
   console.log("\n=== Transferring Ownership ===");
   console.log("IMPORTANT: After this step, execute ownership transfers via multi-sig");
 
-  // For each Ownable contract, we need to:
+  // For each Ownable2Step contract, we need to:
   // 1. Call transferOwnership(timelockAddress) from deployer
-  // 2. Then call acceptOwnership() from timelock (via multi-sig proposal)
+  // 2. Accept ownership on behalf of the timelock (see manual step 2)
 
   // Print instructions for ownership transfer
   console.log("\n=== Manual Steps Required ===");
-  console.log("1. For each protocol contract, call transferOwnership(timelockAddress)");
-  console.log("2. Create multi-sig proposal to call acceptOwnership() on timelock");
-  console.log("3. After all ownership transfers, renounce DEFAULT_ADMIN_ROLE on timelock\n");
+  console.log("1. For each protocol contract, call transferOwnership(timelockAddress) from the deployer");
+  console.log("2. Accept ownership for the timelock, either:");
+  console.log("   a. bootstrap admin (deployer) calls timelock.acceptContractOwnership(contractAddress)");
+  console.log("      BEFORE renouncing DEFAULT_ADMIN_ROLE, or");
+  console.log("   b. multi-sig proposal: target = the protocol contract, data = acceptOwnership(),");
+  console.log("      scheduled at minDelay and executed after the delay.");
+  console.log("   Note: any proposal whose target is the timelock itself needs the long delay.");
+  console.log("3. After all ownership transfers, the deployer itself sends");
+  console.log("   timelock.renounceRole(DEFAULT_ADMIN_ROLE, deployerAddress)");
+  console.log("   (renounceRole only accepts the caller's own address)\n");
 
-  // Renounce deployer's admin role (optional, do this after ownership transfers are complete)
+  // Renounce deployer's admin role (do this after ownership transfers are complete; must be sent by the deployer)
   // const DEFAULT_ADMIN_ROLE = await timelock.DEFAULT_ADMIN_ROLE();
-  // await timelock.renounceRole(DEFAULT_ADMIN_ROLE, deployer.address);
+  // await timelock.connect(deployer).renounceRole(DEFAULT_ADMIN_ROLE, deployer.address);
 
   console.log("\n=== Deployment Summary ===");
   console.log("GovernanceTimelock:", timelockAddress);
@@ -201,6 +319,7 @@ async function main() {
     registeredContracts: contractsToRegister.filter(
       (c) => c.address !== "0x0000000000000000000000000000000000000000"
     ),
+    callPolicy,
   };
 
   console.log("\n=== Deployment Info ===");

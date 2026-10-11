@@ -9,14 +9,27 @@ pragma solidity ^0.8.20;
  * Architecture:
  * - Multi-sig (Gnosis Safe) as proposer
  * - Timelock enforces delay before execution
- * - Emergency bypass for critical security issues
+ * - Short, cancellable emergency path for pre-approved defensive calls
  * - Transparent on-chain governance
  *
  * Roles:
  * - PROPOSER_ROLE: Can schedule operations (multi-sig)
- * - EXECUTOR_ROLE: Can execute after delay (open or restricted)
- * - CANCELLER_ROLE: Can cancel pending operations
- * - EMERGENCY_ROLE: Can bypass timelock for security emergencies
+ * - EXECUTOR_ROLE: Can execute after delay (open when granted to address(0))
+ * - CANCELLER_ROLE: Can cancel pending operations, including emergency ones
+ * - EMERGENCY_ROLE: Not a proposer. May call emergencyPauseAll/emergencyUnpauseAll, and may queue
+ *   Emergency-classified calls through executeEmergency at emergencyDelay
+ *
+ * Delay policy (the required delay comes from what a call does, not from its label):
+ * - LongDelay: any call whose target is the timelock itself, any call whose selector is one of the
+ *   locked ownership/role/upgrade/multicall selectors, and any (target, selector) pair governance
+ *   classified LongDelay via setCallClass.
+ * - Standard: everything else needs minDelay.
+ * - Emergency: (target, selector) pairs governance classified Emergency (default-deny). Only
+ *   EMERGENCY_ROLE may use emergencyDelay, and only through executeEmergency. On proposer paths an
+ *   Emergency-classified call is treated as Standard.
+ * - The OperationType label can only lengthen the delay (ContractUpgrade and OwnershipTransfer
+ *   floor at longDelay); EmergencyAction is reserved for executeEmergency.
+ * - The inherited OZ schedule/scheduleBatch enforce the same content-derived floor.
  */
 interface IGovernanceTimelock {
     // ============ Enums ============
@@ -39,6 +52,13 @@ interface IGovernanceTimelock {
         Ready, // Delay passed, ready to execute
         Executed, // Successfully executed
         Cancelled // Cancelled before execution
+    }
+
+    /// @notice Delay class of a (target, selector) pair
+    enum CallClass {
+        Standard, // Needs minDelay (default for unregistered pairs)
+        LongDelay, // Needs longDelay on every scheduling path
+        Emergency // May be queued by EMERGENCY_ROLE via executeEmergency at emergencyDelay
     }
 
     // ============ Structs ============
@@ -73,9 +93,9 @@ interface IGovernanceTimelock {
     /// @notice Timelock configuration
     struct TimelockConfig {
         uint256 minDelay; // Minimum delay for standard operations
-        uint256 emergencyDelay; // Shorter delay for emergencies
+        uint256 emergencyDelay; // Shorter delay, Emergency-classified calls only
         uint256 longDelay; // Longer delay for critical changes
-        bool openExecutor; // Whether anyone can execute after delay
+        bool openExecutor; // Whether anyone can execute after delay (derived from EXECUTOR_ROLE of address(0))
     }
 
     // ============ Events ============
@@ -109,10 +129,36 @@ interface IGovernanceTimelock {
     /// @notice Emitted when ownership is accepted
     event OwnershipAccepted(address indexed contractAddress, string contractName);
 
+    /// @notice Emitted when governance changes the delay class of a (target, selector) pair
+    event CallClassUpdated(address indexed target, bytes4 indexed selector, CallClass callClass);
+
+    // ============ Errors ============
+
+    /// @notice The EmergencyAction label is reserved for executeEmergency
+    error EmergencyActionLabelReserved();
+
+    /// @notice The salt lies in the namespace reserved for executeEmergency
+    error ReservedEmergencySalt(bytes32 salt);
+
+    /// @notice The call is not an Emergency-classified call
+    error NotEmergencyCall(address target, bytes4 selector);
+
+    /// @notice Call classes cannot be set for the zero address or the timelock itself
+    error InvalidCallClassTarget(address target);
+
+    /// @notice Locked selectors always require longDelay and cannot be reclassified
+    error CallClassLocked(bytes4 selector);
+
+    /// @notice The delay configuration violates the delay bounds
+    error InvalidDelayConfig(uint256 minDelay, uint256 emergencyDelay, uint256 longDelay);
+
     // ============ Scheduling Functions ============
 
     /**
      * @notice Schedule a standard governance operation
+     * @dev The delay is the max of the content requirement (getRequiredDelay) and the label floor
+     *      (longDelay for ContractUpgrade/OwnershipTransfer, minDelay otherwise). The EmergencyAction
+     *      label is rejected, as are salts in the reserved emergency namespace.
      * @param target Target contract address
      * @param value ETH value to send
      * @param data Calldata for the operation
@@ -134,6 +180,8 @@ interface IGovernanceTimelock {
 
     /**
      * @notice Schedule a batch of operations
+     * @dev The delay is the max of the strictest call's content requirement and the label floor.
+     *      The EmergencyAction label is rejected, as are salts in the reserved emergency namespace.
      * @param targets Target contract addresses
      * @param values ETH values to send
      * @param datas Calldatas for operations
@@ -155,6 +203,8 @@ interface IGovernanceTimelock {
 
     /**
      * @notice Schedule operation with extended delay (critical changes)
+     * @dev Always uses longDelay, which satisfies every content requirement. The EmergencyAction
+     *      label is rejected, as are salts in the reserved emergency namespace.
      * @param target Target contract address
      * @param value ETH value to send
      * @param data Calldata for the operation
@@ -213,10 +263,14 @@ interface IGovernanceTimelock {
     // ============ Emergency Functions ============
 
     /**
-     * @notice Execute emergency action with reduced delay
-     * @dev Requires EMERGENCY_ROLE
+     * @notice Queue an emergency action with the reduced emergency delay
+     * @dev SCHEDULES (does not execute) a single call at emergencyDelay. Requires EMERGENCY_ROLE only
+     *      (PROPOSER_ROLE is not needed). The call must target a (target, selector) pair governance
+     *      classified Emergency; value and predecessor are always 0. The salt is taken from a reserved
+     *      namespace plus emergencyNonce; read it back via getOperation(id).salt or OZ's CallSalt
+     *      event to execute. The operation can be cancelled by CANCELLER_ROLE like any other.
      * @param target Target contract address
-     * @param data Calldata for the operation
+     * @param data Calldata for the operation (at least a 4-byte selector)
      * @param reason Reason for emergency action
      * @return id The emergency operation ID
      */
@@ -284,7 +338,9 @@ interface IGovernanceTimelock {
 
     /**
      * @notice Update timelock delays
-     * @dev Requires going through timelock itself
+     * @dev Requires DEFAULT_ADMIN_ROLE (bootstrap admin until renounced; afterwards only the timelock
+     *      itself via a long-delay self-operation). Bounds: 1h <= min <= 30d, 15m <= emergency <= min,
+     *      min <= long <= 60d. Does not affect already-scheduled operations.
      * @param minDelay New minimum delay
      * @param emergencyDelay New emergency delay
      * @param longDelay New long delay
@@ -296,4 +352,33 @@ interface IGovernanceTimelock {
      * @param open True to allow anyone to execute
      */
     function setOpenExecutor(bool open) external;
+
+    // ============ Call Classification ============
+
+    /**
+     * @notice Set the delay class of a (target, selector) pair
+     * @dev Requires DEFAULT_ADMIN_ROLE. Rejects the zero address, the timelock itself and locked
+     *      selectors. After the bootstrap admin renounces, only a (long-delay) self-operation can call it.
+     * @param target Target contract address
+     * @param selector Function selector
+     * @param callClass New delay class
+     */
+    function setCallClass(address target, bytes4 selector, CallClass callClass) external;
+
+    /**
+     * @notice Get the effective delay class of a (target, selector) pair
+     * @dev Calls to the timelock itself and locked selectors always report LongDelay
+     * @param target Target contract address
+     * @param selector Function selector
+     * @return callClass Effective delay class
+     */
+    function getCallClass(address target, bytes4 selector) external view returns (CallClass callClass);
+
+    /**
+     * @notice Get the minimum delay a proposer must use to schedule one call
+     * @param target Target contract address
+     * @param data Calldata of the call
+     * @return delay longDelay for LongDelay calls, minDelay otherwise
+     */
+    function getRequiredDelay(address target, bytes calldata data) external view returns (uint256 delay);
 }

@@ -181,7 +181,12 @@
 
 **When to Use:** Active exploitation, critical vulnerability
 
-**Who Can Execute:** Multi-sig with EMERGENCY_ROLE
+**Who Can Execute:** Multi-sig with EMERGENCY_ROLE on the GovernanceTimelock
+
+Once the timelock owns the protocol contracts, the multi-sig can no longer call `pause()` on them
+directly (they are `onlyOwner`). Pausing goes through the timelock, which pauses every registered
+pausable contract (ILRM, Treasury, MultiPartyILRM, ComplianceCouncil, BatchQueue,
+DummyTransactionGenerator) in one instant call. AssetRegistry has no pause function.
 
 **Steps:**
 
@@ -192,21 +197,18 @@
 
 2. **Prepare Transaction**
    ```solidity
-   // Target: ILRM contract
-   function pause() external onlyOwner
-
-   // Also pause related contracts
-   Treasury.pause()
-   AssetRegistry.pause()
+   // Target: GovernanceTimelock
+   timelock.emergencyPauseAll("short, non-sensitive reason");
    ```
 
 3. **Execute via Multi-sig**
    - Go to Gnosis Safe
    - Create new transaction
-   - Target: ILRM address
-   - Data: `0x8456cb59` (pause() selector)
+   - Target: GovernanceTimelock address
+   - Data: `emergencyPauseAll(string)` with the reason
    - Collect required signatures
    - Execute
+   - Check the `ContractPauseResult` events (one per registered contract, with `success`)
 
 4. **Confirm Pause**
    ```bash
@@ -222,12 +224,45 @@
 
 **When to Use:** Mitigate attack without full pause
 
-**Example: Increase stake requirements**
+Parameter changes are ordinary timelock proposals (standard delay, or the long delay for
+LongDelay-classified calls). Only calls that governance pre-classified as `Emergency` can use the
+short emergency delay, through `executeEmergency` (see "Emergency Defensive Calls" below).
+
+**Example: Raise the Treasury minimum reserve**
 
 ```solidity
-// If griefing attack via low stakes
-Treasury.setMinStake(newHigherAmount)
+// A standard proposal by the multi-sig (PROPOSER_ROLE)
+bytes memory data = abi.encodeWithSignature("setMinReserve(uint256)", newHigherAmount);
+timelock.schedule(treasury, 0, data, bytes32(0), salt, timelock.getRequiredDelay(treasury, data));
 ```
+
+### Emergency Defensive Calls (executeEmergency)
+
+**When to Use:** A defensive call that cannot wait for the standard delay and that governance
+registered as `Emergency` (default deployment: `Oracle.revokeOracle`, `Oracle.cancelPendingRequest`,
+`AssetRegistry.revokeILRM`). Check with `timelock.getCallClass(target, selector)` (2 = Emergency).
+
+**Who Can Execute:** EMERGENCY_ROLE (PROPOSER_ROLE is not needed)
+
+**Steps:**
+
+1. **Queue the call**
+   ```solidity
+   bytes32 id = timelock.executeEmergency(target, data, "reason");
+   ```
+   This only **schedules** the call (value 0, predecessor 0) at the emergency delay (12 hours by
+   default). Anything not classified Emergency reverts with `NotEmergencyCall`.
+
+2. **Veto window** - during the emergency delay any `CANCELLER_ROLE` holder can stop it:
+   ```solidity
+   timelock.cancel(id);            // or timelock.cancelOperation(id)
+   ```
+
+3. **Execute after the delay**
+   ```solidity
+   bytes32 salt = timelock.getOperation(id).salt;   // also emitted as OZ CallSalt(id, salt)
+   timelock.execute(target, 0, data, bytes32(0), salt);
+   ```
 
 ### Action 3: Oracle Emergency
 
@@ -235,12 +270,22 @@ Treasury.setMinStake(newHigherAmount)
 
 **Steps:**
 
+When the Oracle is owned by the GovernanceTimelock (the production setup), its owner-only calls
+go through the timelock: `revokeOracle` and `cancelPendingRequest` are Emergency-classified (emergency
+path), while `resetProposal` and `registerOracle` are standard proposals by the multi-sig. If the
+oracle must be stopped immediately, pause the protocol first (Action 1).
+
 1. **Revoke the compromised operator** (always before resetting, so it cannot fill the re-opened slot)
    ```solidity
-   Oracle.revokeOracle(compromisedOperator)
+   timelock.executeEmergency(oracle, abi.encodeWithSignature("revokeOracle(address)", compromisedOperator), "reason");
    ```
 
-2. **Void its live proposals**
+2. **Block pending requests** (optional, Emergency-classified)
+   ```solidity
+   timelock.executeEmergency(oracle, abi.encodeWithSignature("cancelPendingRequest(uint256)", disputeId), "reason");
+   ```
+
+3. **Void its live proposals**
    ```solidity
    // For each unresolved dispute whose CURRENT-round proposal came from the compromised operator
    Oracle.resetProposal(disputeId, "compromised operator")
@@ -250,15 +295,16 @@ Treasury.setMinStake(newHigherAmount)
    `NoProposalToReset` if the current round has no proposal (earlier rounds were already cleared
    by `counterPropose`) and with `DisputeAlreadyResolved` for resolved disputes.
 
-3. **Warn the parties**
+4. **Warn the parties**
 
    The voided text stays in ILRM, and stays acceptable, until the replacement lands. Tell both
    parties not to accept it. The new operator should pre-sign the replacement at the bumped
    nonce (`Oracle.proposalContext` / `Oracle.proposalDigest`) and submit it immediately.
 
-4. **Register the new operator and submit the corrected proposal**
+5. **Register the new operator and submit the corrected proposal**
    ```solidity
-   Oracle.registerOracle(newOperator, keyHash)
+   bytes memory data = abi.encodeWithSignature("registerOracle(address,bytes32)", newOperator, keyHash);
+   timelock.schedule(oracle, 0, data, bytes32(0), salt, timelock.getRequiredDelay(oracle, data));
    Oracle.submitProposal(disputeId, correctedProposal, signature) // from newOperator
    ```
    ILRM emits `ProposalSuperseded` and clears both acceptance flags, so any acceptance of the
@@ -270,10 +316,11 @@ Treasury.setMinStake(newHigherAmount)
 
 **Steps:**
 
-1. **Cancel Proposal** (within timelock delay)
+1. **Cancel Proposal** (within timelock delay, CANCELLER_ROLE)
    ```solidity
-   GovernanceTimelock.cancel(proposalId)
+   GovernanceTimelock.cancel(proposalId)            // or cancelOperation(proposalId)
    ```
+   This also applies to operations queued through `executeEmergency`.
 
 2. **If Past Cancellation Window:**
    - Emergency pause all contracts
@@ -302,9 +349,8 @@ Treasury.setMinStake(newHigherAmount)
 
 2. **Unpause Contracts**
    ```solidity
-   ILRM.unpause()
-   Treasury.unpause()
-   AssetRegistry.unpause()
+   // EMERGENCY_ROLE, via the timelock that owns the contracts
+   timelock.emergencyUnpauseAll()
    ```
 
 3. **Monitor Intensively**
