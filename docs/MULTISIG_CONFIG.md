@@ -88,11 +88,37 @@ The NatLangChain ILRM Protocol uses a multi-signature wallet (Gnosis Safe) combi
 
 ### Delay Settings
 
-| Delay Type | Duration | Use Case |
-|------------|----------|----------|
-| Standard (minDelay) | 2 days | Parameter changes, upgrades |
-| Emergency | 12 hours | Security fixes, pause/unpause |
-| Long | 4 days | Major governance changes |
+| Delay Type | Duration | Applies To |
+|------------|----------|------------|
+| Standard (minDelay) | 2 days | Default for every call not listed below |
+| Long (longDelay) | 4 days | Ownership/role/upgrade/multicall selectors (`transferOwnership`, `renounceOwnership`, `grantRole`, `revokeRole`, `renounceRole`, `beginDefaultAdminTransfer`, `upgradeTo`, `upgradeToAndCall`, `upgradeAndCall`, `upgrade`, `changeAdmin`, `changeProxyAdmin`, `multicall`), **any call whose target is the timelock itself**, and every (target, selector) pair registered as `LongDelay` |
+| Emergency (emergencyDelay) | 12 hours | Only `EMERGENCY_ROLE` via `executeEmergency`, and only for single, zero-value calls whose (target, selector) governance registered as `Emergency` (default-deny) |
+
+The required delay is derived from what the call does, on every scheduling path (including the
+inherited OpenZeppelin `schedule`/`scheduleBatch`, which revert with `TimelockInsufficientDelay`
+below the requirement). The `OperationType` label of `scheduleOperation`/`scheduleBatch` can only
+lengthen the delay (`ContractUpgrade` and `OwnershipTransfer` floor at the long delay);
+`EmergencyAction` is reserved for `executeEmergency`. Use `getRequiredDelay(target, data)` to read
+the floor for a call and `getCallClass(target, selector)` to read its effective class.
+
+Delay bounds: `1h <= minDelay <= 30d`, `15m <= emergencyDelay <= minDelay`,
+`minDelay <= longDelay <= 60d`. Changing delays never alters operations that are already scheduled.
+
+#### Call Policy
+
+`scripts/deploy-governance.ts` registers the protocol call policy while the deployer still holds
+`DEFAULT_ADMIN_ROLE` (`setCallClass`). After the admin role is renounced, every `setCallClass`
+change is a timelock self-call and therefore needs the long delay.
+
+| Class | Contract | Function |
+|-------|----------|----------|
+| LongDelay | Oracle | `setILRM(address)` |
+| LongDelay | Treasury | `setILRM(address)`, `emergencyWithdraw(address,uint256)`, `emergencyWithdrawETH(address,uint256)` |
+| LongDelay | ILRM | `withdrawTreasury(address,uint256)` |
+| LongDelay | AssetRegistry | `authorizeILRM(address)` |
+| LongDelay | ComplianceCouncil (if deployed) | `setGovernanceTimelock(address)` |
+| Emergency | Oracle | `revokeOracle(address)`, `cancelPendingRequest(uint256)` |
+| Emergency | AssetRegistry | `revokeILRM(address)` |
 
 ### Roles Granted
 
@@ -101,8 +127,8 @@ The NatLangChain ILRM Protocol uses a multi-signature wallet (Gnosis Safe) combi
 | PROPOSER_ROLE | Multi-sig | Can schedule operations |
 | EXECUTOR_ROLE | Open (anyone) | Can execute after delay |
 | CANCELLER_ROLE | Multi-sig | Can cancel pending ops |
-| EMERGENCY_ROLE | Multi-sig | Can use emergency delay |
-| DEFAULT_ADMIN_ROLE | Renounced | No admin after setup |
+| EMERGENCY_ROLE | Multi-sig (explicit grant; the deployer does not receive it) | `emergencyPauseAll`/`emergencyUnpauseAll`; queue Emergency-classified calls via `executeEmergency` (not a proposer) |
+| DEFAULT_ADMIN_ROLE | Renounced | No admin after setup (afterwards only long-delay timelock self-operations) |
 
 ---
 
@@ -163,6 +189,7 @@ This will:
 - Deploy GovernanceTimelock
 - Configure delays (2-day standard, 12-hour emergency, 4-day long)
 - Register protocol contracts
+- Configure the call policy (LongDelay / Emergency classes, see above)
 - Grant roles to multi-sig
 
 ### Step 4: Transfer Ownership
@@ -174,10 +201,13 @@ For each protocol contract:
 npx hardhat run scripts/transfer-ownership.ts --network optimism
 ```
 
-Then via multi-sig proposal:
-1. Create proposal to call `acceptOwnership()` on timelock
-2. Wait for timelock delay
-3. Execute proposal
+Then accept ownership for the timelock, either:
+- **Bootstrap admin (before renouncing):** the deployer calls
+  `timelock.acceptContractOwnership(contractAddress)`, or
+- **Multi-sig proposal:** schedule a call with target = the protocol contract and
+  data = `acceptOwnership()` at the standard delay, wait, then execute it.
+
+Any proposal whose target is the timelock itself needs the long delay.
 
 ### Step 5: Verify Configuration
 
@@ -187,10 +217,11 @@ npx hardhat run scripts/verify-governance.ts --network optimism
 
 ### Step 6: Renounce Admin Role
 
-After all ownership transfers are complete:
+After all ownership transfers are complete, the deployer itself sends (OpenZeppelin's
+`renounceRole` only accepts the caller's own address, so this cannot be done by proposal):
 
 ```solidity
-// Via multi-sig proposal
+// Sent by the deployer (bootstrap admin)
 timelock.renounceRole(DEFAULT_ADMIN_ROLE, deployerAddress);
 ```
 
@@ -209,14 +240,14 @@ timelock.renounceRole(DEFAULT_ADMIN_ROLE, deployerAddress);
    ```
 
 2. **Schedule via multi-sig**
-   - Create Safe transaction calling `timelock.schedule(...)`
+   - Create Safe transaction calling `timelock.schedule(...)` with
+     `delay >= timelock.getRequiredDelay(target, data)`
    - Collect required signatures
    - Execute Safe transaction
 
 3. **Wait for delay**
    - Standard: 2 days
-   - Emergency: 12 hours
-   - Long: 4 days
+   - Long: 4 days (ownership/role/upgrade/multicall calls, timelock self-calls, LongDelay pairs)
 
 4. **Execute operation**
    - Anyone can call `timelock.execute(...)` after delay
@@ -224,17 +255,30 @@ timelock.renounceRole(DEFAULT_ADMIN_ROLE, deployerAddress);
 
 ### Emergency Pause
 
-1. **Create pause calldata**
-   ```solidity
-   bytes memory data = abi.encodeWithSignature("pause()");
-   ```
+For contracts registered with the timelock, `EMERGENCY_ROLE` pauses instantly:
 
-2. **Schedule with emergency delay**
-   - Use `scheduleEmergency(...)` function
-   - 12-hour delay applies
+```solidity
+timelock.emergencyPauseAll("reason");
+```
+
+### Emergency Defensive Call
+
+For calls governance registered as `Emergency` (for example `AssetRegistry.revokeILRM`):
+
+1. **Queue with the emergency delay** (`EMERGENCY_ROLE`, no `PROPOSER_ROLE` needed)
+   ```solidity
+   bytes memory data = abi.encodeWithSignature("revokeILRM(address)", compromisedIlrm);
+   bytes32 id = timelock.executeEmergency(assetRegistry, data, "reason");
+   ```
+   `executeEmergency` only **schedules** the call (value 0, predecessor 0) at the 12-hour emergency
+   delay; it reverts with `NotEmergencyCall` for anything not classified Emergency.
+
+2. **Veto window**
+   - `CANCELLER_ROLE` can cancel it with `timelock.cancel(id)` / `cancelOperation(id)` during the delay
 
 3. **Execute after delay**
-   - Call `execute(...)` to pause contract
+   - Read the salt via `timelock.getOperation(id).salt` (or the `CallSalt` event)
+   - Call `timelock.execute(assetRegistry, 0, data, bytes32(0), salt)`
 
 ### Cancel Pending Operation
 
@@ -268,10 +312,11 @@ timelock.cancel(operationId);
 | Schedule standard operation | ⬜ | | |
 | Wait 2-day delay | ⬜ | | |
 | Execute standard operation | ⬜ | | |
-| Schedule emergency operation | ⬜ | | |
+| Queue emergency call (`executeEmergency`) | ⬜ | | |
 | Wait 12-hour delay | ⬜ | | |
-| Execute emergency pause | ⬜ | | |
-| Execute emergency unpause | ⬜ | | |
+| Execute emergency call | ⬜ | | |
+| Execute emergency pause (`emergencyPauseAll`) | ⬜ | | |
+| Execute emergency unpause (`emergencyUnpauseAll`) | ⬜ | | |
 | Cancel pending operation | ⬜ | | |
 | Attempt with insufficient signatures | ⬜ | | |
 | Attempt early execution (should fail) | ⬜ | | |
@@ -290,10 +335,13 @@ timelock.cancel(operationId);
 
 ### If Multi-Sig Key Compromised
 
-1. **Immediately** schedule ownership transfer to backup multi-sig
-2. Use emergency delay (12 hours)
-3. Remove compromised signer from new Safe
-4. Complete ownership transfer
+There is no emergency ownership transfer: ownership and role changes always need the long delay.
+
+1. **Immediately** call `timelock.emergencyPauseAll(reason)` (EMERGENCY_ROLE)
+2. Cancel any hostile pending operations with `CANCELLER_ROLE` (`timelock.cancel(id)`)
+3. Rotate the compromised signer out of the Safe (Safe owner management)
+4. If a migration to a new Safe or timelock is needed, schedule the role/ownership changes at the
+   long delay (4 days) and keep watching for hostile operations to cancel
 5. Post-incident review
 
 ### If Timelock Has Bug
