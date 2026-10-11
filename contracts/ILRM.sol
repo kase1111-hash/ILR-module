@@ -98,11 +98,7 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
      * @param _oracle Trusted oracle address for LLM proposals
      * @param _assetRegistry Asset registry contract
      */
-    constructor(
-        IERC20 _token,
-        address _oracle,
-        IAssetRegistry _assetRegistry
-    ) Ownable(msg.sender) {
+    constructor(IERC20 _token, address _oracle, IAssetRegistry _assetRegistry) Ownable(msg.sender) {
         require(address(_token) != address(0), "Invalid token");
         require(_oracle != address(0), "Invalid oracle");
         require(address(_assetRegistry) != address(0), "Invalid registry");
@@ -166,15 +162,17 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
      * @inheritdoc IILRM
      * @dev Implements Invariant 2 (Silence Is Always Free) - counterparty can ignore
      */
-    function initiateVoluntaryRequest(
-        address _counterparty,
-        bytes32 _evidenceHash
-    ) external payable override nonReentrant {
+    function initiateVoluntaryRequest(address _counterparty, bytes32 _evidenceHash)
+        external
+        payable
+        override
+        nonReentrant
+    {
         require(_counterparty != address(0), "Invalid counterparty");
         require(msg.value >= COUNTER_FEE_BASE, "Insufficient burn fee");
 
         // Burn fee immediately (harassment self-tax)
-        (bool success, ) = BURN_ADDRESS.call{value: msg.value}("");
+        (bool success,) = BURN_ADDRESS.call{value: msg.value}("");
         require(success, "Burn failed");
 
         // Log as request (special ID indicates voluntary request, not full dispute)
@@ -205,11 +203,11 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
      * @dev Only trusted oracle can submit proposals
      * @dev FIX H-01: Signature verification is now enforced via Oracle contract
      */
-    function submitLLMProposal(
-        uint256 _disputeId,
-        string calldata _proposal,
-        bytes calldata _signature
-    ) external override nonReentrant {
+    function submitLLMProposal(uint256 _disputeId, string calldata _proposal, bytes calldata _signature)
+        external
+        override
+        nonReentrant
+    {
         require(msg.sender == oracle, "Only oracle");
 
         Dispute storage d = _disputes[_disputeId];
@@ -220,10 +218,7 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         // FIX H-01: Verify EIP-712 signature via Oracle contract
         // Defense in depth - Oracle already verifies, but we double-check
         bytes32 proposalHash = keccak256(bytes(_proposal));
-        require(
-            IOracle(oracle).verifySignature(_disputeId, proposalHash, _signature),
-            "Invalid signature"
-        );
+        require(IOracle(oracle).verifySignature(_disputeId, proposalHash, _signature), "Invalid signature");
 
         d.llmProposal = _proposal;
 
@@ -259,10 +254,13 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
      * @inheritdoc IILRM
      * @dev Implements Invariant 4 (Bounded Griefing) - capped counters, exponential fees
      */
-    function counterPropose(
-        uint256 _disputeId,
-        bytes32 _newEvidenceHash
-    ) external payable override nonReentrant whenNotPaused {
+    function counterPropose(uint256 _disputeId, bytes32 _newEvidenceHash)
+        external
+        payable
+        override
+        nonReentrant
+        whenNotPaused
+    {
         Dispute storage d = _disputes[_disputeId];
         require(msg.sender == d.initiator || msg.sender == d.counterparty, "Not a party");
         require(!d.resolved, "Dispute resolved");
@@ -298,7 +296,7 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         // If we've hit max extension, no further time added
 
         // Burn the fee (after state updates: checks-effects-interactions)
-        (bool success, ) = BURN_ADDRESS.call{value: fee}("");
+        (bool success,) = BURN_ADDRESS.call{value: fee}("");
         require(success, "Burn failed");
 
         emit CounterProposed(_disputeId, msg.sender, d.counterCount);
@@ -349,11 +347,11 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
      * @param _baseStake Base stake amount
      * @return Escalated stake (1.5x if within cooldown period)
      */
-    function _getEscalatedStake(
-        address _initiator,
-        address _counterparty,
-        uint256 _baseStake
-    ) internal view returns (uint256) {
+    function _getEscalatedStake(address _initiator, address _counterparty, uint256 _baseStake)
+        internal
+        view
+        returns (uint256)
+    {
         uint256 lastDispute = lastDisputeTime[_initiator][_counterparty];
         if (lastDispute > 0 && block.timestamp < lastDispute + COOLDOWN_PERIOD) {
             // Escalate stake by 50% for repeat disputes within cooldown
@@ -391,7 +389,7 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         d.outcome = DisputeOutcome.DefaultLicenseApplied;
 
         // Calculate initiator incentive (10% of expected counterparty stake)
-        uint256 incentive = (d.initiatorStake * INITIATOR_INCENTIVE_BPS) / 10000;
+        uint256 incentive = (d.initiatorStake * INITIATOR_INCENTIVE_BPS) / 10_000;
 
         // Return initiator stake + incentive (from token reserves)
         if (tokenReserves >= incentive) {
@@ -481,7 +479,7 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         require(_amount <= treasury, "Insufficient treasury");
         require(_to != address(0), "Invalid recipient");
         treasury -= _amount;
-        (bool success, ) = _to.call{value: _amount}("");
+        (bool success,) = _to.call{value: _amount}("");
         require(success, "Transfer failed");
         emit TreasuryWithdrawn(_to, _amount);
     }

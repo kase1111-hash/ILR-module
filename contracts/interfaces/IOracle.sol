@@ -14,17 +14,10 @@ interface IOracle {
     // ============ Events ============
 
     /// @notice Emitted when oracle processes a dispute
-    event DisputeProcessed(
-        uint256 indexed disputeId,
-        bytes32 evidenceHash,
-        bytes32 proposalHash
-    );
+    event DisputeProcessed(uint256 indexed disputeId, bytes32 evidenceHash, bytes32 proposalHash);
 
     /// @notice Emitted when oracle is registered/updated
-    event OracleRegistered(
-        address indexed oracle,
-        bytes32 publicKeyHash
-    );
+    event OracleRegistered(address indexed oracle, bytes32 publicKeyHash);
 
     // ============ Core Functions ============
 
@@ -34,10 +27,7 @@ interface IOracle {
      * @param disputeId The dispute requiring a proposal
      * @param evidenceHash Hash of canonicalized evidence bundle
      */
-    function requestProposal(
-        uint256 disputeId,
-        bytes32 evidenceHash
-    ) external;
+    function requestProposal(uint256 disputeId, bytes32 evidenceHash) external;
 
     /**
      * @notice Callback from LLM processing (off-chain initiated)
@@ -46,11 +36,7 @@ interface IOracle {
      * @param proposal JSON-encoded reconciliation proposal
      * @param signature EIP-712 signature over (disputeId, proposalHash)
      */
-    function submitProposal(
-        uint256 disputeId,
-        string calldata proposal,
-        bytes calldata signature
-    ) external;
+    function submitProposal(uint256 disputeId, string calldata proposal, bytes calldata signature) external;
 
     /**
      * @notice Verify oracle signature on a proposal
@@ -59,11 +45,10 @@ interface IOracle {
      * @param signature Signature to verify
      * @return valid True if signature is valid from registered oracle
      */
-    function verifySignature(
-        uint256 disputeId,
-        bytes32 proposalHash,
-        bytes calldata signature
-    ) external view returns (bool valid);
+    function verifySignature(uint256 disputeId, bytes32 proposalHash, bytes calldata signature)
+        external
+        view
+        returns (bool valid);
 
     // ============ View Functions ============
 

@@ -33,24 +33,24 @@ interface IBatchQueue {
 
     /// @notice Status of a queued transaction
     enum QueueStatus {
-        Pending,      // Waiting in queue
-        Released,     // Released in a batch
-        Executed,     // Successfully executed on target
-        Failed,       // Execution failed
-        Expired,      // Expired before release
-        Cancelled     // Cancelled by submitter
+        Pending, // Waiting in queue
+        Released, // Released in a batch
+        Executed, // Successfully executed on target
+        Failed, // Execution failed
+        Expired, // Expired before release
+        Cancelled // Cancelled by submitter
     }
 
     // ============ Structs ============
 
     /// @notice Configuration for batch release
     struct BatchConfig {
-        uint256 minBatchSize;      // Minimum transactions before release
-        uint256 maxBatchSize;      // Maximum transactions per batch
-        uint256 releaseInterval;   // Minimum time between releases (seconds)
-        uint256 maxQueueTime;      // Maximum time a tx can stay queued
-        bool randomizeOrder;       // Shuffle transactions within batch
-        bool allowCancellation;    // Allow users to cancel queued txs
+        uint256 minBatchSize; // Minimum transactions before release
+        uint256 maxBatchSize; // Maximum transactions per batch
+        uint256 releaseInterval; // Minimum time between releases (seconds)
+        uint256 maxQueueTime; // Maximum time a tx can stay queued
+        bool randomizeOrder; // Shuffle transactions within batch
+        bool allowCancellation; // Allow users to cancel queued txs
     }
 
     /// @notice A queued transaction
@@ -58,13 +58,13 @@ interface IBatchQueue {
         uint256 id;
         address submitter;
         TxType txType;
-        bytes data;              // Encoded transaction data
-        uint256 value;           // ETH value (for payable calls)
+        bytes data; // Encoded transaction data
+        uint256 value; // ETH value (for payable calls)
         uint256 submittedAt;
         uint256 releasedAt;
         uint256 batchId;
         QueueStatus status;
-        bytes32 commitmentHash;  // Hash for verification
+        bytes32 commitmentHash; // Hash for verification
     }
 
     /// @notice A batch of transactions
@@ -80,38 +80,19 @@ interface IBatchQueue {
     // ============ Events ============
 
     /// @notice Emitted when a transaction is queued
-    event TransactionQueued(
-        uint256 indexed txId,
-        address indexed submitter,
-        TxType txType,
-        bytes32 commitmentHash
-    );
+    event TransactionQueued(uint256 indexed txId, address indexed submitter, TxType txType, bytes32 commitmentHash);
 
     /// @notice Emitted when a transaction is cancelled
-    event TransactionCancelled(
-        uint256 indexed txId,
-        address indexed submitter
-    );
+    event TransactionCancelled(uint256 indexed txId, address indexed submitter);
 
     /// @notice Emitted when a batch is created
-    event BatchCreated(
-        uint256 indexed batchId,
-        uint256 txCount
-    );
+    event BatchCreated(uint256 indexed batchId, uint256 txCount);
 
     /// @notice Emitted when a batch is released
-    event BatchReleased(
-        uint256 indexed batchId,
-        uint256 txCount,
-        uint256 timestamp
-    );
+    event BatchReleased(uint256 indexed batchId, uint256 txCount, uint256 timestamp);
 
     /// @notice Emitted when a transaction is executed
-    event TransactionExecuted(
-        uint256 indexed txId,
-        uint256 indexed batchId,
-        bool success
-    );
+    event TransactionExecuted(uint256 indexed txId, uint256 indexed batchId, bool success);
 
     /// @notice Emitted when configuration is updated
     event ConfigUpdated(
@@ -160,10 +141,7 @@ interface IBatchQueue {
      * @param proofData Encoded proof data
      * @return txId The queued transaction ID
      */
-    function queueZKProof(
-        uint256 disputeId,
-        bytes calldata proofData
-    ) external returns (uint256 txId);
+    function queueZKProof(uint256 disputeId, bytes calldata proofData) external returns (uint256 txId);
 
     /**
      * @notice Queue a generic transaction
@@ -171,10 +149,7 @@ interface IBatchQueue {
      * @param data Encoded transaction data
      * @return txId The queued transaction ID
      */
-    function queueTransaction(
-        TxType txType,
-        bytes calldata data
-    ) external payable returns (uint256 txId);
+    function queueTransaction(TxType txType, bytes calldata data) external payable returns (uint256 txId);
 
     /**
      * @notice Cancel a queued transaction (if allowed)
@@ -205,20 +180,14 @@ interface IBatchQueue {
      * @return successCount Number of successful executions
      * @return failCount Number of failed executions
      */
-    function executeBatch(uint256 batchId) external returns (
-        uint256 successCount,
-        uint256 failCount
-    );
+    function executeBatch(uint256 batchId) external returns (uint256 successCount, uint256 failCount);
 
     /**
      * @notice Chainlink Automation compatible check
      * @return upkeepNeeded True if batch should be released
      * @return performData Encoded batch data
      */
-    function checkUpkeep(bytes calldata) external view returns (
-        bool upkeepNeeded,
-        bytes memory performData
-    );
+    function checkUpkeep(bytes calldata) external view returns (bool upkeepNeeded, bytes memory performData);
 
     /**
      * @notice Chainlink Automation compatible perform

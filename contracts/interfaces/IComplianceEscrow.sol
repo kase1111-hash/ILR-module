@@ -24,54 +24,54 @@ interface IComplianceEscrow {
 
     /// @notice Status of a reveal request
     enum RevealStatus {
-        Pending,      // Request submitted, awaiting votes
-        Approved,     // Threshold reached, key reconstructable
-        Rejected,     // Majority rejected
-        Executed,     // Key reconstructed and revealed
-        Expired       // Request timed out
+        Pending, // Request submitted, awaiting votes
+        Approved, // Threshold reached, key reconstructable
+        Rejected, // Majority rejected
+        Executed, // Key reconstructed and revealed
+        Expired // Request timed out
     }
 
     /// @notice Type of escrow holder
     enum HolderType {
-        User,         // The dispute party themselves
-        DAO,          // Protocol governance
-        Auditor,      // Independent auditor
+        User, // The dispute party themselves
+        DAO, // Protocol governance
+        Auditor, // Independent auditor
         LegalCounsel, // Legal representative
-        Regulator     // Regulatory body (opt-in)
+        Regulator // Regulatory body (opt-in)
     }
 
     // ============ Structs ============
 
     /// @notice Configuration for a viewing key escrow
     struct EscrowConfig {
-        uint256 disputeId;           // Associated dispute
+        uint256 disputeId; // Associated dispute
         bytes32 viewingKeyCommitment; // Pedersen commitment to viewing key
-        bytes32 encryptedDataHash;   // IPFS/Arweave hash of encrypted data
-        uint8 threshold;             // Required shares for reconstruction (m)
-        uint8 totalShares;           // Total shares distributed (n)
-        uint256 createdAt;           // Timestamp of creation
-        bool revealed;               // Whether key has been reconstructed
+        bytes32 encryptedDataHash; // IPFS/Arweave hash of encrypted data
+        uint8 threshold; // Required shares for reconstruction (m)
+        uint8 totalShares; // Total shares distributed (n)
+        uint256 createdAt; // Timestamp of creation
+        bool revealed; // Whether key has been reconstructed
     }
 
     /// @notice A share holder's information
     struct ShareHolder {
-        address holder;              // Address of share holder
-        HolderType holderType;       // Type of holder
-        bytes32 shareCommitment;     // Commitment to the share (for verification)
-        bool hasSubmitted;           // Whether share has been submitted for reveal
+        address holder; // Address of share holder
+        HolderType holderType; // Type of holder
+        bytes32 shareCommitment; // Commitment to the share (for verification)
+        bool hasSubmitted; // Whether share has been submitted for reveal
     }
 
     /// @notice A request to reveal viewing key
     struct RevealRequest {
-        uint256 escrowId;            // The escrow being requested
-        address requester;           // Who requested the reveal
-        string reason;               // Legal/compliance reason
-        bytes32 legalDocHash;        // Hash of supporting legal documents
-        uint256 requestedAt;         // When request was made
-        uint256 expiresAt;           // Deadline for votes
-        RevealStatus status;         // Current status
-        uint256 approvalsReceived;   // Number of approvals
-        uint256 rejectionsReceived;  // Number of rejections
+        uint256 escrowId; // The escrow being requested
+        address requester; // Who requested the reveal
+        string reason; // Legal/compliance reason
+        bytes32 legalDocHash; // Hash of supporting legal documents
+        uint256 requestedAt; // When request was made
+        uint256 expiresAt; // Deadline for votes
+        RevealStatus status; // Current status
+        uint256 approvalsReceived; // Number of approvals
+        uint256 rejectionsReceived; // Number of rejections
     }
 
     // ============ Events ============
@@ -87,54 +87,28 @@ interface IComplianceEscrow {
 
     /// @notice Emitted when a share holder is registered
     event ShareHolderRegistered(
-        uint256 indexed escrowId,
-        address indexed holder,
-        HolderType holderType,
-        uint256 shareIndex
+        uint256 indexed escrowId, address indexed holder, HolderType holderType, uint256 shareIndex
     );
 
     /// @notice Emitted when a share commitment is submitted
-    event ShareCommitmentSubmitted(
-        uint256 indexed escrowId,
-        address indexed holder,
-        bytes32 shareCommitment
-    );
+    event ShareCommitmentSubmitted(uint256 indexed escrowId, address indexed holder, bytes32 shareCommitment);
 
     /// @notice Emitted when a reveal request is created
     event RevealRequested(
-        uint256 indexed requestId,
-        uint256 indexed escrowId,
-        address indexed requester,
-        string reason
+        uint256 indexed requestId, uint256 indexed escrowId, address indexed requester, string reason
     );
 
     /// @notice Emitted when a holder votes on a reveal request
-    event RevealVoteCast(
-        uint256 indexed requestId,
-        address indexed voter,
-        bool approved
-    );
+    event RevealVoteCast(uint256 indexed requestId, address indexed voter, bool approved);
 
     /// @notice Emitted when a reveal request status changes
-    event RevealStatusChanged(
-        uint256 indexed requestId,
-        RevealStatus oldStatus,
-        RevealStatus newStatus
-    );
+    event RevealStatusChanged(uint256 indexed requestId, RevealStatus oldStatus, RevealStatus newStatus);
 
     /// @notice Emitted when a share is submitted for reconstruction
-    event ShareSubmittedForReveal(
-        uint256 indexed requestId,
-        address indexed holder,
-        uint256 shareIndex
-    );
+    event ShareSubmittedForReveal(uint256 indexed requestId, address indexed holder, uint256 shareIndex);
 
     /// @notice Emitted when key is successfully reconstructed
-    event KeyReconstructed(
-        uint256 indexed requestId,
-        uint256 indexed escrowId,
-        bytes32 reconstructedKeyHash
-    );
+    event KeyReconstructed(uint256 indexed requestId, uint256 indexed escrowId, bytes32 reconstructedKeyHash);
 
     // ============ Errors ============
 
@@ -182,10 +156,7 @@ interface IComplianceEscrow {
      * @param escrowId The escrow ID
      * @param shareCommitment Hash commitment to the share value
      */
-    function submitShareCommitment(
-        uint256 escrowId,
-        bytes32 shareCommitment
-    ) external;
+    function submitShareCommitment(uint256 escrowId, bytes32 shareCommitment) external;
 
     // ============ Reveal Request Management ============
 
@@ -197,22 +168,16 @@ interface IComplianceEscrow {
      * @param votingPeriod Duration for voting in seconds
      * @return requestId The created request ID
      */
-    function requestReveal(
-        uint256 escrowId,
-        string calldata reason,
-        bytes32 legalDocHash,
-        uint256 votingPeriod
-    ) external returns (uint256 requestId);
+    function requestReveal(uint256 escrowId, string calldata reason, bytes32 legalDocHash, uint256 votingPeriod)
+        external
+        returns (uint256 requestId);
 
     /**
      * @notice Vote on a reveal request
      * @param requestId The request to vote on
      * @param approve True to approve, false to reject
      */
-    function voteOnReveal(
-        uint256 requestId,
-        bool approve
-    ) external;
+    function voteOnReveal(uint256 requestId, bool approve) external;
 
     /**
      * @notice Submit share for reconstruction after approval
@@ -220,11 +185,7 @@ interface IComplianceEscrow {
      * @param shareIndex Index of the share (0 to n-1)
      * @param encryptedShare The share, encrypted to the reconstruction coordinator
      */
-    function submitShareForReveal(
-        uint256 requestId,
-        uint256 shareIndex,
-        bytes calldata encryptedShare
-    ) external;
+    function submitShareForReveal(uint256 requestId, uint256 shareIndex, bytes calldata encryptedShare) external;
 
     /**
      * @notice Finalize reveal after threshold shares submitted
@@ -232,10 +193,7 @@ interface IComplianceEscrow {
      * @param requestId The request being finalized
      * @param reconstructedKeyHash Hash of reconstructed key (for verification)
      */
-    function finalizeReveal(
-        uint256 requestId,
-        bytes32 reconstructedKeyHash
-    ) external;
+    function finalizeReveal(uint256 requestId, bytes32 reconstructedKeyHash) external;
 
     // ============ View Functions ============
 

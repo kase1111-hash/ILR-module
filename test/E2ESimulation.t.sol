@@ -198,7 +198,7 @@ contract E2ESimulationTest is Test {
         for (uint256 i = 1; i <= 20; i++) {
             address user = makeAddr(string.concat("user", vm.toString(i)));
             users.push(user);
-            token.mint(user, 100000 ether);
+            token.mint(user, 100_000 ether);
             vm.deal(user, 1000 ether);
 
             vm.prank(user);
@@ -206,15 +206,12 @@ contract E2ESimulationTest is Test {
         }
 
         // Fund treasury
-        token.mint(address(treasury), 100000 ether);
+        token.mint(address(treasury), 100_000 ether);
         vm.deal(address(l3Bridge), 100 ether);
 
         // Default fallback license
         defaultFallback = IILRM.FallbackLicense({
-            nonExclusive: true,
-            termDuration: 365 days,
-            royaltyCapBps: 500,
-            termsHash: keccak256("default_terms")
+            nonExclusive: true, termDuration: 365 days, royaltyCapBps: 500, termsHash: keccak256("default_terms")
         });
 
         // Add trusted DID issuer (allowed to issue every attestation type)
@@ -304,18 +301,14 @@ contract E2ESimulationTest is Test {
         }
     }
 
-    function executeHappyPath(
-        address initiator,
-        address counterparty,
-        uint256 stakeAmount
-    ) external returns (string memory) {
+    function executeHappyPath(address initiator, address counterparty, uint256 stakeAmount)
+        external
+        returns (string memory)
+    {
         // Initiate dispute
         vm.prank(initiator);
         uint256 disputeId = ilrm.initiateBreachDispute(
-            counterparty,
-            stakeAmount,
-            keccak256(abi.encodePacked("evidence", block.timestamp)),
-            defaultFallback
+            counterparty, stakeAmount, keccak256(abi.encodePacked("evidence", block.timestamp)), defaultFallback
         );
 
         // Counterparty stakes
@@ -351,8 +344,9 @@ contract E2ESimulationTest is Test {
         address initiator = users[scenarioId % users.length];
         address counterparty = users[(scenarioId + 3) % users.length];
 
-        try this.executeCounterProposalScenario(initiator, counterparty, stakeAmount, counterCount)
-            returns (string memory outcome) {
+        try this.executeCounterProposalScenario(initiator, counterparty, stakeAmount, counterCount) returns (
+            string memory outcome
+        ) {
             _recordSuccess(scenarioId, scenarioType, outcome, startGas - gasleft());
         } catch Error(string memory reason) {
             _recordGracefulError(scenarioId, scenarioType, reason, startGas - gasleft());
@@ -368,12 +362,8 @@ contract E2ESimulationTest is Test {
         uint256 counterCount
     ) external returns (string memory) {
         vm.prank(initiator);
-        uint256 disputeId = ilrm.initiateBreachDispute(
-            counterparty,
-            stakeAmount,
-            keccak256("initial_evidence"),
-            defaultFallback
-        );
+        uint256 disputeId =
+            ilrm.initiateBreachDispute(counterparty, stakeAmount, keccak256("initial_evidence"), defaultFallback);
 
         vm.prank(counterparty);
         ilrm.depositStake(disputeId);
@@ -416,8 +406,9 @@ contract E2ESimulationTest is Test {
         address initiator = users[scenarioId % users.length];
         address counterparty = users[(scenarioId + 5) % users.length];
 
-        try this.executeTimeoutScenario(initiator, counterparty, stakeAmount, counterpartyStakes)
-            returns (string memory outcome) {
+        try this.executeTimeoutScenario(initiator, counterparty, stakeAmount, counterpartyStakes) returns (
+            string memory outcome
+        ) {
             _recordSuccess(scenarioId, scenarioType, outcome, startGas - gasleft());
         } catch Error(string memory reason) {
             _recordGracefulError(scenarioId, scenarioType, reason, startGas - gasleft());
@@ -433,12 +424,8 @@ contract E2ESimulationTest is Test {
         bool counterpartyStakes
     ) external returns (string memory) {
         vm.prank(initiator);
-        uint256 disputeId = ilrm.initiateBreachDispute(
-            counterparty,
-            stakeAmount,
-            keccak256("timeout_evidence"),
-            defaultFallback
-        );
+        uint256 disputeId =
+            ilrm.initiateBreachDispute(counterparty, stakeAmount, keccak256("timeout_evidence"), defaultFallback);
 
         if (counterpartyStakes) {
             vm.prank(counterparty);
@@ -455,7 +442,9 @@ contract E2ESimulationTest is Test {
             vm.warp(block.timestamp + 4 days);
             ilrm.enforceTimeout(disputeId);
 
-            require(ilrm.disputes(disputeId).outcome == IILRM.DisputeOutcome.DefaultLicenseApplied, "Unexpected outcome");
+            require(
+                ilrm.disputes(disputeId).outcome == IILRM.DisputeOutcome.DefaultLicenseApplied, "Unexpected outcome"
+            );
             require(assetRegistry.appliedFallback(disputeId) == defaultFallback.termsHash, "Fallback not applied");
             return "DefaultLicenseApplied";
         }
@@ -480,11 +469,7 @@ contract E2ESimulationTest is Test {
         }
     }
 
-    function executeDIDScenario(
-        address user,
-        bool hasValidDID,
-        uint256 scenarioId
-    ) external returns (string memory) {
+    function executeDIDScenario(address user, bool hasValidDID, uint256 scenarioId) external returns (string memory) {
         // Register DID if supposed to have one
         if (hasValidDID) {
             // Check if already registered
@@ -544,12 +529,7 @@ contract E2ESimulationTest is Test {
                 previousRoot = l3Bridge.latestFinalizedRoot();
             }
 
-            bytes32 messageHash = keccak256(abi.encodePacked(
-                stateRoot,
-                uint256(scenarioId),
-                uint256(0),
-                previousRoot
-            ));
+            bytes32 messageHash = keccak256(abi.encodePacked(stateRoot, uint256(scenarioId), uint256(0), previousRoot));
 
             // Sign with sequencer key (EIP-191 personal_sign, as verified by L3Bridge)
             bytes32 ethSignedHash = keccak256(abi.encodePacked("\x19Ethereum Signed Message:\n32", messageHash));
@@ -615,20 +595,17 @@ contract E2ESimulationTest is Test {
             vm.prank(user);
             ilrm.initiateBreachDispute(address(0), 1 ether, bytes32(0), defaultFallback);
             return "ShouldHaveFailed_ZeroAddress";
-        }
-        else if (errorType == 1) {
+        } else if (errorType == 1) {
             // Error: Dispute with self
             vm.prank(user);
             ilrm.initiateBreachDispute(user, 1 ether, bytes32(0), defaultFallback);
             return "ShouldHaveFailed_SelfDispute";
-        }
-        else if (errorType == 2) {
+        } else if (errorType == 2) {
             // Error: Zero stake amount
             vm.prank(user);
             ilrm.initiateBreachDispute(users[1], 0, bytes32(0), defaultFallback);
             return "ShouldHaveFailed_ZeroStake";
-        }
-        else if (errorType == 3) {
+        } else if (errorType == 3) {
             // Error: Exclusive fallback license
             IILRM.FallbackLicense memory badFallback = IILRM.FallbackLicense({
                 nonExclusive: false, // Invalid!
@@ -639,20 +616,17 @@ contract E2ESimulationTest is Test {
             vm.prank(user);
             ilrm.initiateBreachDispute(users[1], 1 ether, bytes32(0), badFallback);
             return "ShouldHaveFailed_ExclusiveFallback";
-        }
-        else if (errorType == 4) {
+        } else if (errorType == 4) {
             // Error: Accept non-existent dispute
             vm.prank(user);
-            ilrm.acceptProposal(999999);
+            ilrm.acceptProposal(999_999);
             return "ShouldHaveFailed_NonExistentDispute";
-        }
-        else if (errorType == 5) {
+        } else if (errorType == 5) {
             // Error: Deposit stake for non-existent dispute
             vm.prank(user);
-            ilrm.depositStake(999999);
+            ilrm.depositStake(999_999);
             return "ShouldHaveFailed_NonExistentDispute";
-        }
-        else if (errorType == 6) {
+        } else if (errorType == 6) {
             // Error: Counter-propose with insufficient fee
             vm.prank(user);
             uint256 disputeId = ilrm.initiateBreachDispute(users[1], 1 ether, bytes32(0), defaultFallback);
@@ -662,26 +636,19 @@ contract E2ESimulationTest is Test {
             vm.prank(user);
             ilrm.counterPropose{value: 0.001 ether}(disputeId, bytes32(0)); // Too little!
             return "ShouldHaveFailed_InsufficientFee";
-        }
-        else if (errorType == 7) {
+        } else if (errorType == 7) {
             // Error: Revoke non-existent DID
             vm.prank(user);
             didRegistry.revokeDID(bytes32(uint256(0xdead)), "test");
             return "ShouldHaveFailed_NonExistentDID";
-        }
-        else if (errorType == 8) {
+        } else if (errorType == 8) {
             // Error: Issue credential without being trusted issuer
             vm.prank(users[5]); // Not a trusted issuer
             didRegistry.issueCredential(
-                bytes32(uint256(0x123)),
-                IDIDRegistry.AttestationType.Identity,
-                bytes32(0),
-                0,
-                50
+                bytes32(uint256(0x123)), IDIDRegistry.AttestationType.Identity, bytes32(0), 0, 50
             );
             return "ShouldHaveFailed_NotTrustedIssuer";
-        }
-        else {
+        } else {
             // Error: Voluntary request with insufficient burn fee
             vm.prank(user);
             ilrm.initiateVoluntaryRequest{value: 0.001 ether}(users[1], bytes32(0));
@@ -711,7 +678,7 @@ contract E2ESimulationTest is Test {
         stakeAmounts[6] = 100 ether;
         stakeAmounts[7] = 500 ether;
         stakeAmounts[8] = 1000 ether;
-        stakeAmounts[9] = 10000 ether;
+        stakeAmounts[9] = 10_000 ether;
 
         for (uint256 i = 0; i < stakeAmounts.length; i++) {
             _testStakeAmount(stakeAmounts[i]);
@@ -761,7 +728,10 @@ contract E2ESimulationTest is Test {
     }
 
     // Named execute* (not test*) so forge does not pick it up as a standalone fuzz test
-    function executeTimingScenario(address initiator, address counterparty, uint256 waitTime) external returns (string memory) {
+    function executeTimingScenario(address initiator, address counterparty, uint256 waitTime)
+        external
+        returns (string memory)
+    {
         vm.prank(initiator);
         uint256 disputeId = ilrm.initiateBreachDispute(counterparty, 1 ether, bytes32(0), defaultFallback);
 
@@ -879,10 +849,7 @@ contract E2ESimulationTest is Test {
 
             vm.prank(initiator);
             disputeIds[i] = ilrm.initiateBreachDispute(
-                counterparty,
-                (i + 1) * 1 ether,
-                keccak256(abi.encodePacked("concurrent", i)),
-                defaultFallback
+                counterparty, (i + 1) * 1 ether, keccak256(abi.encodePacked("concurrent", i)), defaultFallback
             );
 
             console.log("  Dispute %s created by user %s", disputeIds[i], i);
@@ -912,38 +879,39 @@ contract E2ESimulationTest is Test {
     }
 
     function _recordSuccess(uint256 id, string memory sType, string memory outcome, uint256 gas) internal {
-        results.push(SimulationResult({
-            scenarioId: id,
-            scenarioType: sType,
-            success: true,
-            outcome: outcome,
-            gasUsed: gas,
-            errorMessage: ""
-        }));
+        results.push(
+            SimulationResult({
+                scenarioId: id, scenarioType: sType, success: true, outcome: outcome, gasUsed: gas, errorMessage: ""
+            })
+        );
         successCount++;
     }
 
     function _recordGracefulError(uint256 id, string memory sType, string memory error, uint256 gas) internal {
-        results.push(SimulationResult({
-            scenarioId: id,
-            scenarioType: sType,
-            success: true, // Graceful = success in error handling
-            outcome: "GracefulError",
-            gasUsed: gas,
-            errorMessage: error
-        }));
+        results.push(
+            SimulationResult({
+                scenarioId: id,
+                scenarioType: sType,
+                success: true, // Graceful = success in error handling
+                outcome: "GracefulError",
+                gasUsed: gas,
+                errorMessage: error
+            })
+        );
         gracefulErrorCount++;
     }
 
     function _recordFailure(uint256 id, string memory sType, string memory error, uint256 gas) internal {
-        results.push(SimulationResult({
-            scenarioId: id,
-            scenarioType: sType,
-            success: false,
-            outcome: "FAILURE",
-            gasUsed: gas,
-            errorMessage: error
-        }));
+        results.push(
+            SimulationResult({
+                scenarioId: id,
+                scenarioType: sType,
+                success: false,
+                outcome: "FAILURE",
+                gasUsed: gas,
+                errorMessage: error
+            })
+        );
         failureCount++;
     }
 

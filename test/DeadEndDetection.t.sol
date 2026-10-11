@@ -22,13 +22,13 @@ import "../contracts/ILRM.sol";
 
 contract L3BridgeStateMachine {
     enum BridgeState {
-        None,           // 0 - Not bridged
-        Bridged,        // 1 - Dispute bridged to L3
-        Committed,      // 2 - State committed by sequencer
-        Challenged,     // 3 - Fraud proof submitted
-        Finalized,      // 4 - Terminal: Challenge period passed
-        Slashed,        // 5 - Terminal: Fraud proven, sequencer slashed
-        Settled         // 6 - Terminal: Settlement processed back to L2
+        None, // 0 - Not bridged
+        Bridged, // 1 - Dispute bridged to L3
+        Committed, // 2 - State committed by sequencer
+        Challenged, // 3 - Fraud proof submitted
+        Finalized, // 4 - Terminal: Challenge period passed
+        Slashed, // 5 - Terminal: Fraud proven, sequencer slashed
+        Settled // 6 - Terminal: Settlement processed back to L2
     }
 
     struct L3Dispute {
@@ -110,14 +110,14 @@ contract L3BridgeStateMachine {
 
 contract ComplianceStateMachine {
     enum WarrantState {
-        None,           // 0
-        Pending,        // 1 - Warrant submitted, voting open
-        Approved,       // 2 - Threshold votes received
-        Rejected,       // 3 - Terminal: Not enough votes
-        Executing,      // 4 - Signatures being collected
-        Appealed,       // 5 - Appeal filed during delay
-        Executed,       // 6 - Terminal: Key reconstructed
-        Cancelled       // 7 - Terminal: Admin cancelled
+        None, // 0
+        Pending, // 1 - Warrant submitted, voting open
+        Approved, // 2 - Threshold votes received
+        Rejected, // 3 - Terminal: Not enough votes
+        Executing, // 4 - Signatures being collected
+        Appealed, // 5 - Appeal filed during delay
+        Executed, // 6 - Terminal: Key reconstructed
+        Cancelled // 7 - Terminal: Admin cancelled
     }
 
     struct Warrant {
@@ -201,9 +201,8 @@ contract ComplianceStateMachine {
 
     function cancelWarrant(uint256 id) external returns (bool) {
         require(
-            warrants[id].state != WarrantState.Executed &&
-            warrants[id].state != WarrantState.Rejected &&
-            warrants[id].state != WarrantState.Cancelled,
+            warrants[id].state != WarrantState.Executed && warrants[id].state != WarrantState.Rejected
+                && warrants[id].state != WarrantState.Cancelled,
             "Already terminal"
         );
         warrants[id].state = WarrantState.Cancelled;
@@ -211,9 +210,7 @@ contract ComplianceStateMachine {
     }
 
     function isTerminal(WarrantState state) public pure returns (bool) {
-        return state == WarrantState.Rejected ||
-               state == WarrantState.Executed ||
-               state == WarrantState.Cancelled;
+        return state == WarrantState.Rejected || state == WarrantState.Executed || state == WarrantState.Cancelled;
     }
 
     function getState(uint256 id) external view returns (WarrantState) {
@@ -395,7 +392,9 @@ contract DeadEndDetectionTest is Test {
 
     function _testCompliance_AppealUpheld(uint256 id) internal {
         compliance.submitWarrant(id);
-        for (uint i = 0; i < 3; i++) compliance.vote(id);
+        for (uint256 i = 0; i < 3; i++) {
+            compliance.vote(id);
+        }
 
         compliance.fileAppeal(id);
         compliance.resolveAppeal(id, true); // upheld
@@ -410,7 +409,9 @@ contract DeadEndDetectionTest is Test {
 
     function _testCompliance_AppealDenied(uint256 id) internal {
         compliance.submitWarrant(id);
-        for (uint i = 0; i < 3; i++) compliance.vote(id);
+        for (uint256 i = 0; i < 3; i++) {
+            compliance.vote(id);
+        }
 
         compliance.fileAppeal(id);
         compliance.resolveAppeal(id, false); // denied
@@ -438,7 +439,9 @@ contract DeadEndDetectionTest is Test {
 
     function _testCompliance_CancelAfterApprove(uint256 id) internal {
         compliance.submitWarrant(id);
-        for (uint i = 0; i < 3; i++) compliance.vote(id);
+        for (uint256 i = 0; i < 3; i++) {
+            compliance.vote(id);
+        }
 
         compliance.cancelWarrant(id);
 

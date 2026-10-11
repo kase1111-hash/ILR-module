@@ -36,31 +36,31 @@ interface IComplianceCouncil {
 
     /// @notice Types of council members
     enum MemberRole {
-        UserRepresentative,     // Elected by protocol users
-        ProtocolGovernance,     // DAO governance multisig
-        IndependentAuditor,     // Third-party auditor
-        LegalCounsel,           // Legal advisor
-        RegulatoryLiaison       // Regulatory body liaison
+        UserRepresentative, // Elected by protocol users
+        ProtocolGovernance, // DAO governance multisig
+        IndependentAuditor, // Third-party auditor
+        LegalCounsel, // Legal advisor
+        RegulatoryLiaison // Regulatory body liaison
     }
 
     /// @notice Status of a warrant request
     enum WarrantStatus {
-        Pending,            // Awaiting votes
-        Approved,           // Threshold met, awaiting signatures
-        Rejected,           // Vote failed
-        Executing,          // Collecting signatures
-        Executed,           // Key reconstructed and delivered
-        Expired,            // Timed out
-        Appealed            // Under appeal
+        Pending, // Awaiting votes
+        Approved, // Threshold met, awaiting signatures
+        Rejected, // Vote failed
+        Executing, // Collecting signatures
+        Executed, // Key reconstructed and delivered
+        Expired, // Timed out
+        Appealed // Under appeal
     }
 
     /// @notice Types of legal requests
     enum RequestType {
-        CourtOrder,         // Court-issued warrant
+        CourtOrder, // Court-issued warrant
         RegulatorySubpoena, // Regulatory authority request
-        LawEnforcement,     // Law enforcement request
-        InternalAudit,      // Protocol internal audit
-        UserConsent         // User-initiated disclosure
+        LawEnforcement, // Law enforcement request
+        InternalAudit, // Protocol internal audit
+        UserConsent // User-initiated disclosure
     }
 
     // ============ Structs ============
@@ -73,8 +73,8 @@ interface IComplianceCouncil {
 
     /// @notice BLS signature on G2 curve (compressed)
     struct BLSSignature {
-        bytes32[2] x;  // x coordinate (Fp2)
-        bytes32[2] y;  // y coordinate (Fp2)
+        bytes32[2] x; // x coordinate (Fp2)
+        bytes32[2] y; // y coordinate (Fp2)
     }
 
     /// @notice Aggregated threshold signature
@@ -89,7 +89,7 @@ interface IComplianceCouncil {
         address memberAddress;
         MemberRole role;
         BLSPublicKey publicKey;
-        uint256 keyIndex;           // Index in threshold scheme (1-based)
+        uint256 keyIndex; // Index in threshold scheme (1-based)
         bool isActive;
         uint256 joinedAt;
         uint256 votesParticipated;
@@ -98,12 +98,12 @@ interface IComplianceCouncil {
 
     /// @notice Council configuration
     struct CouncilConfig {
-        uint256 threshold;          // Minimum signatures required (m)
-        uint256 totalMembers;       // Total council size (n)
-        uint256 votingPeriod;       // Duration for voting (seconds)
-        uint256 executionDelay;     // Delay after approval before execution
-        uint256 appealWindow;       // Time to file appeal
-        uint256 signatureTimeout;   // Time to collect signatures after approval
+        uint256 threshold; // Minimum signatures required (m)
+        uint256 totalMembers; // Total council size (n)
+        uint256 votingPeriod; // Duration for voting (seconds)
+        uint256 executionDelay; // Delay after approval before execution
+        uint256 appealWindow; // Time to file appeal
+        uint256 signatureTimeout; // Time to collect signatures after approval
         bool requiresUserNotification; // Notify affected user before execution
     }
 
@@ -111,17 +111,17 @@ interface IComplianceCouncil {
     struct WarrantRequest {
         uint256 id;
         RequestType requestType;
-        address requester;              // Authority making request
-        uint256 targetDisputeId;        // Dispute to reveal
-        bytes32 documentHash;           // Hash of legal documentation
-        string jurisdiction;            // Legal jurisdiction
+        address requester; // Authority making request
+        uint256 targetDisputeId; // Dispute to reveal
+        bytes32 documentHash; // Hash of legal documentation
+        string jurisdiction; // Legal jurisdiction
         uint256 submittedAt;
         uint256 votingEndsAt;
-        uint256 executionTime;          // When execution can begin
+        uint256 executionTime; // When execution can begin
         WarrantStatus status;
         uint256 approvalsCount;
         uint256 rejectionsCount;
-        bytes32 decryptedKeyHash;       // Set after successful execution
+        bytes32 decryptedKeyHash; // Set after successful execution
     }
 
     /// @notice Vote record
@@ -143,17 +143,10 @@ interface IComplianceCouncil {
     // ============ Events ============
 
     /// @notice Emitted when a new council member is added
-    event MemberAdded(
-        address indexed memberAddress,
-        MemberRole role,
-        uint256 keyIndex
-    );
+    event MemberAdded(address indexed memberAddress, MemberRole role, uint256 keyIndex);
 
     /// @notice Emitted when a council member is removed
-    event MemberRemoved(
-        address indexed memberAddress,
-        MemberRole role
-    );
+    event MemberRemoved(address indexed memberAddress, MemberRole role);
 
     /// @notice Emitted when a warrant request is submitted
     event WarrantRequested(
@@ -166,55 +159,30 @@ interface IComplianceCouncil {
 
     /// @notice Emitted when a council member votes
     event VoteCast(
-        uint256 indexed warrantId,
-        address indexed voter,
-        bool approved,
-        uint256 approvalsCount,
-        uint256 rejectionsCount
+        uint256 indexed warrantId, address indexed voter, bool approved, uint256 approvalsCount, uint256 rejectionsCount
     );
 
     /// @notice Emitted when voting concludes
     event VotingConcluded(
-        uint256 indexed warrantId,
-        WarrantStatus status,
-        uint256 approvalsCount,
-        uint256 rejectionsCount
+        uint256 indexed warrantId, WarrantStatus status, uint256 approvalsCount, uint256 rejectionsCount
     );
 
     /// @notice Emitted when a signature is submitted
     event SignatureSubmitted(
-        uint256 indexed warrantId,
-        address indexed signer,
-        uint256 memberIndex,
-        uint256 totalSignatures
+        uint256 indexed warrantId, address indexed signer, uint256 memberIndex, uint256 totalSignatures
     );
 
     /// @notice Emitted when threshold is reached
-    event ThresholdReached(
-        uint256 indexed warrantId,
-        uint256 signatureCount
-    );
+    event ThresholdReached(uint256 indexed warrantId, uint256 signatureCount);
 
     /// @notice Emitted when key is reconstructed
-    event KeyReconstructed(
-        uint256 indexed warrantId,
-        bytes32 keyHash,
-        address indexed recipient
-    );
+    event KeyReconstructed(uint256 indexed warrantId, bytes32 keyHash, address indexed recipient);
 
     /// @notice Emitted when an appeal is filed
-    event AppealFiled(
-        uint256 indexed warrantId,
-        address indexed appellant,
-        string reason
-    );
+    event AppealFiled(uint256 indexed warrantId, address indexed appellant, string reason);
 
     /// @notice Emitted when council configuration changes
-    event ConfigUpdated(
-        uint256 threshold,
-        uint256 totalMembers,
-        uint256 votingPeriod
-    );
+    event ConfigUpdated(uint256 threshold, uint256 totalMembers, uint256 votingPeriod);
 
     // ============ Member Management ============
 
@@ -225,12 +193,7 @@ interface IComplianceCouncil {
      * @param publicKey BLS public key
      * @param keyIndex Index in threshold scheme
      */
-    function addMember(
-        address member,
-        MemberRole role,
-        BLSPublicKey calldata publicKey,
-        uint256 keyIndex
-    ) external;
+    function addMember(address member, MemberRole role, BLSPublicKey calldata publicKey, uint256 keyIndex) external;
 
     /**
      * @notice Remove a council member
@@ -243,10 +206,7 @@ interface IComplianceCouncil {
      * @param member Member address
      * @param newPublicKey New BLS public key
      */
-    function rotateMemberKey(
-        address member,
-        BLSPublicKey calldata newPublicKey
-    ) external;
+    function rotateMemberKey(address member, BLSPublicKey calldata newPublicKey) external;
 
     /**
      * @notice Check if address is an active council member
@@ -291,11 +251,7 @@ interface IComplianceCouncil {
      * @param approve True to approve, false to reject
      * @param reason Reason for vote
      */
-    function castVote(
-        uint256 warrantId,
-        bool approve,
-        string calldata reason
-    ) external;
+    function castVote(uint256 warrantId, bool approve, string calldata reason) external;
 
     /**
      * @notice Conclude voting on a warrant
@@ -332,10 +288,7 @@ interface IComplianceCouncil {
      * @param warrantId Approved warrant ID
      * @param signature BLS signature
      */
-    function submitSignature(
-        uint256 warrantId,
-        BLSSignature calldata signature
-    ) external;
+    function submitSignature(uint256 warrantId, BLSSignature calldata signature) external;
 
     /**
      * @notice Verify a BLS signature against member's public key
@@ -344,20 +297,20 @@ interface IComplianceCouncil {
      * @param publicKey Signer's public key
      * @return valid True if signature is valid
      */
-    function verifySignature(
-        bytes32 message,
-        BLSSignature calldata signature,
-        BLSPublicKey calldata publicKey
-    ) external view returns (bool valid);
+    function verifySignature(bytes32 message, BLSSignature calldata signature, BLSPublicKey calldata publicKey)
+        external
+        view
+        returns (bool valid);
 
     /**
      * @notice Aggregate multiple BLS signatures
      * @param signatures Array of signatures to aggregate
      * @return aggregated The aggregated signature
      */
-    function aggregateSignatures(
-        BLSSignature[] calldata signatures
-    ) external pure returns (BLSSignature memory aggregated);
+    function aggregateSignatures(BLSSignature[] calldata signatures)
+        external
+        pure
+        returns (BLSSignature memory aggregated);
 
     /**
      * @notice Verify aggregated threshold signature
@@ -365,10 +318,10 @@ interface IComplianceCouncil {
      * @param thresholdSig Aggregated signature with signer info
      * @return valid True if threshold signature is valid
      */
-    function verifyThresholdSignature(
-        uint256 warrantId,
-        ThresholdSignature calldata thresholdSig
-    ) external view returns (bool valid);
+    function verifyThresholdSignature(uint256 warrantId, ThresholdSignature calldata thresholdSig)
+        external
+        view
+        returns (bool valid);
 
     /**
      * @notice Execute key reconstruction after threshold is met

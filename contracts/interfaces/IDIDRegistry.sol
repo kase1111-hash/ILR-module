@@ -20,126 +20,91 @@ interface IDIDRegistry {
 
     /// @notice Types of attestations that can be issued
     enum AttestationType {
-        Identity,           // Basic identity verification
-        KYC,               // Know Your Customer verification
-        Reputation,        // Reputation from other protocols
-        Governance,        // DAO/governance participation
-        Professional,      // Professional credentials
-        Custom             // Custom attestation type
+        Identity, // Basic identity verification
+        KYC, // Know Your Customer verification
+        Reputation, // Reputation from other protocols
+        Governance, // DAO/governance participation
+        Professional, // Professional credentials
+        Custom // Custom attestation type
     }
 
     /// @notice DID document status
     enum DIDStatus {
-        Inactive,          // Not yet activated
-        Active,            // Currently active
-        Suspended,         // Temporarily suspended
-        Revoked            // Permanently revoked
+        Inactive, // Not yet activated
+        Active, // Currently active
+        Suspended, // Temporarily suspended
+        Revoked // Permanently revoked
     }
 
     // ============ Structs ============
 
     /// @notice Core DID document on-chain representation
     struct DIDDocument {
-        bytes32 did;                    // DID identifier hash
-        address controller;             // Address controlling this DID
-        address[] delegates;            // Authorized delegates
-        uint256 created;                // Creation timestamp
-        uint256 updated;                // Last update timestamp
-        DIDStatus status;               // Current status
-        bytes32 documentHash;           // IPFS hash of full DID document
-        uint256 sybilScore;             // Sybil resistance score (0-100, higher = more trusted)
+        bytes32 did; // DID identifier hash
+        address controller; // Address controlling this DID
+        address[] delegates; // Authorized delegates
+        uint256 created; // Creation timestamp
+        uint256 updated; // Last update timestamp
+        DIDStatus status; // Current status
+        bytes32 documentHash; // IPFS hash of full DID document
+        uint256 sybilScore; // Sybil resistance score (0-100, higher = more trusted)
     }
 
     /// @notice Verifiable Credential representation
     struct Credential {
-        bytes32 credentialId;           // Unique credential identifier
-        bytes32 did;                    // DID this credential is issued to
-        address issuer;                 // Credential issuer address
+        bytes32 credentialId; // Unique credential identifier
+        bytes32 did; // DID this credential is issued to
+        address issuer; // Credential issuer address
         AttestationType attestationType; // Type of attestation
-        bytes32 claimHash;              // Hash of the claim data
-        uint256 issuedAt;               // Issuance timestamp
-        uint256 expiresAt;              // Expiration timestamp (0 = never)
-        bool revoked;                   // Whether credential is revoked
-        uint256 weight;                 // Weight for sybil score calculation (0-100)
+        bytes32 claimHash; // Hash of the claim data
+        uint256 issuedAt; // Issuance timestamp
+        uint256 expiresAt; // Expiration timestamp (0 = never)
+        bool revoked; // Whether credential is revoked
+        uint256 weight; // Weight for sybil score calculation (0-100)
     }
 
     /// @notice Trusted issuer configuration
     struct TrustedIssuer {
-        address issuerAddress;          // Issuer's address
-        string name;                    // Issuer name/identifier
+        address issuerAddress; // Issuer's address
+        string name; // Issuer name/identifier
         AttestationType[] allowedTypes; // Types this issuer can issue
-        uint256 trustLevel;             // Trust level (0-100)
-        bool active;                    // Whether issuer is active
+        uint256 trustLevel; // Trust level (0-100)
+        bool active; // Whether issuer is active
     }
 
     // ============ Events ============
 
     /// @notice Emitted when a DID is registered
-    event DIDRegistered(
-        bytes32 indexed did,
-        address indexed controller,
-        bytes32 documentHash
-    );
+    event DIDRegistered(bytes32 indexed did, address indexed controller, bytes32 documentHash);
 
     /// @notice Emitted when a DID is updated
-    event DIDUpdated(
-        bytes32 indexed did,
-        bytes32 oldDocumentHash,
-        bytes32 newDocumentHash
-    );
+    event DIDUpdated(bytes32 indexed did, bytes32 oldDocumentHash, bytes32 newDocumentHash);
 
     /// @notice Emitted when DID status changes
-    event DIDStatusChanged(
-        bytes32 indexed did,
-        DIDStatus oldStatus,
-        DIDStatus newStatus
-    );
+    event DIDStatusChanged(bytes32 indexed did, DIDStatus oldStatus, DIDStatus newStatus);
 
     /// @notice Emitted when a delegate is added
-    event DelegateAdded(
-        bytes32 indexed did,
-        address indexed delegate,
-        uint256 expiresAt
-    );
+    event DelegateAdded(bytes32 indexed did, address indexed delegate, uint256 expiresAt);
 
     /// @notice Emitted when a delegate is removed
-    event DelegateRemoved(
-        bytes32 indexed did,
-        address indexed delegate
-    );
+    event DelegateRemoved(bytes32 indexed did, address indexed delegate);
 
     /// @notice Emitted when a credential is issued
     event CredentialIssued(
-        bytes32 indexed credentialId,
-        bytes32 indexed did,
-        address indexed issuer,
-        AttestationType attestationType
+        bytes32 indexed credentialId, bytes32 indexed did, address indexed issuer, AttestationType attestationType
     );
 
     /// @notice Emitted when a credential is revoked
-    event CredentialRevoked(
-        bytes32 indexed credentialId,
-        address indexed revoker,
-        string reason
-    );
+    event CredentialRevoked(bytes32 indexed credentialId, address indexed revoker, string reason);
 
     /// @notice Emitted when sybil score is updated
-    event SybilScoreUpdated(
-        bytes32 indexed did,
-        uint256 oldScore,
-        uint256 newScore
-    );
+    event SybilScoreUpdated(bytes32 indexed did, uint256 oldScore, uint256 newScore);
 
     /// @notice Emitted when a trusted issuer is added
-    event TrustedIssuerAdded(
-        address indexed issuer,
-        string name
-    );
+    event TrustedIssuerAdded(address indexed issuer, string name);
 
     /// @notice Emitted when a trusted issuer is removed
-    event TrustedIssuerRemoved(
-        address indexed issuer
-    );
+    event TrustedIssuerRemoved(address indexed issuer);
 
     // ============ Errors ============
 
@@ -320,11 +285,7 @@ interface IDIDRegistry {
      * @param allowedTypes New allowed types
      * @param trustLevel New trust level
      */
-    function updateTrustedIssuer(
-        address issuer,
-        AttestationType[] calldata allowedTypes,
-        uint256 trustLevel
-    ) external;
+    function updateTrustedIssuer(address issuer, AttestationType[] calldata allowedTypes, uint256 trustLevel) external;
 
     /**
      * @notice Check if an address is a trusted issuer

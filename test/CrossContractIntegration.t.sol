@@ -17,7 +17,16 @@ import "forge-std/console.sol";
 // ============ Simplified Contract Simulators ============
 
 contract ILRMSim {
-    enum State { None, Initiated, Staked, Proposed, Accepted, Resolved, Timeout, NonParticipation }
+    enum State {
+        None,
+        Initiated,
+        Staked,
+        Proposed,
+        Accepted,
+        Resolved,
+        Timeout,
+        NonParticipation
+    }
 
     struct Dispute {
         State state;
@@ -91,7 +100,15 @@ contract ILRMSim {
 }
 
 contract L3BridgeSim {
-    enum State { None, Bridged, Committed, Challenged, Finalized, Slashed, Settled }
+    enum State {
+        None,
+        Bridged,
+        Committed,
+        Challenged,
+        Finalized,
+        Slashed,
+        Settled
+    }
 
     struct L3Dispute {
         State state;
@@ -116,11 +133,7 @@ contract L3BridgeSim {
         require(ilrm.getState(ilrmId) == ILRMSim.State.Timeout, "ILRM not timed out");
 
         uint256 id = nextL3Id++;
-        disputes[id] = L3Dispute({
-            state: State.Bridged,
-            ilrmId: ilrmId,
-            committedAt: 0
-        });
+        disputes[id] = L3Dispute({state: State.Bridged, ilrmId: ilrmId, committedAt: 0});
 
         ilrm.markEscalated(ilrmId);
         emit L3StateChange(id, State.None, State.Bridged);
@@ -240,7 +253,15 @@ contract BatchQueueSim {
 }
 
 contract ComplianceSim {
-    enum State { None, Pending, Approved, Rejected, Executing, Executed, Cancelled }
+    enum State {
+        None,
+        Pending,
+        Approved,
+        Rejected,
+        Executing,
+        Executed,
+        Cancelled
+    }
 
     struct Warrant {
         State state;
@@ -259,12 +280,7 @@ contract ComplianceSim {
 
     function createWarrant(uint256 disputeId) external returns (uint256) {
         uint256 id = nextWarrantId++;
-        warrants[id] = Warrant({
-            state: State.Pending,
-            votes: 0,
-            createdAt: block.timestamp,
-            targetDispute: disputeId
-        });
+        warrants[id] = Warrant({state: State.Pending, votes: 0, createdAt: block.timestamp, targetDispute: disputeId});
         emit WarrantStateChange(id, State.None, State.Pending);
         return id;
     }
@@ -427,7 +443,7 @@ contract CrossContractIntegrationTest is Test {
 
         // Create multiple ILRM disputes that timeout
         uint256[] memory ilrmIds = new uint256[](5);
-        for (uint i = 0; i < 5; i++) {
+        for (uint256 i = 0; i < 5; i++) {
             vm.prank(alice);
             ilrmIds[i] = ilrm.initiate(bob, 10 ether);
             ilrm.stake(ilrmIds[i]);
@@ -437,7 +453,7 @@ contract CrossContractIntegrationTest is Test {
         vm.warp(block.timestamp + 11 days);
 
         // Timeout all and add to batch
-        for (uint i = 0; i < 5; i++) {
+        for (uint256 i = 0; i < 5; i++) {
             ilrm.timeout(ilrmIds[i]);
             batchQueue.addToBatch(ilrmIds[i]);
         }
@@ -451,14 +467,14 @@ contract CrossContractIntegrationTest is Test {
 
         // Bridge each to L3
         uint256 allSettled = 0;
-        for (uint i = 0; i < 5; i++) {
+        for (uint256 i = 0; i < 5; i++) {
             uint256 l3Id = l3Bridge.bridgeFromILRM(ilrmIds[i]);
             l3Bridge.commit(l3Id);
         }
 
         vm.warp(block.timestamp + 8 days);
 
-        for (uint i = 0; i < 5; i++) {
+        for (uint256 i = 0; i < 5; i++) {
             l3Bridge.finalize(i);
             l3Bridge.settle(i);
             if (l3Bridge.isTerminal(i)) allSettled++;
@@ -472,7 +488,7 @@ contract CrossContractIntegrationTest is Test {
         console.log("\n=== Integration: BatchQueue Emergency Clear ===");
 
         // Add disputes to batch
-        for (uint i = 0; i < 3; i++) {
+        for (uint256 i = 0; i < 3; i++) {
             batchQueue.addToBatch(i);
         }
 
@@ -599,7 +615,7 @@ contract CrossContractIntegrationTest is Test {
         console.log("\n=== Edge Case: Multiple Simultaneous Escalations ===");
 
         // Create 10 disputes, all timeout and escalate to L3
-        for (uint i = 0; i < 10; i++) {
+        for (uint256 i = 0; i < 10; i++) {
             vm.prank(alice);
             uint256 ilrmId = ilrm.initiate(bob, 1 ether);
             ilrm.stake(ilrmId);
@@ -609,27 +625,27 @@ contract CrossContractIntegrationTest is Test {
         vm.warp(block.timestamp + 11 days);
 
         uint256[] memory l3Ids = new uint256[](10);
-        for (uint i = 0; i < 10; i++) {
+        for (uint256 i = 0; i < 10; i++) {
             ilrm.timeout(i);
             l3Ids[i] = l3Bridge.bridgeFromILRM(i);
             l3Bridge.commit(l3Ids[i]);
         }
 
         // Half get challenged, half finalize normally
-        for (uint i = 0; i < 5; i++) {
+        for (uint256 i = 0; i < 5; i++) {
             l3Bridge.challenge(l3Ids[i]);
             l3Bridge.proveValid(l3Ids[i]); // Slashed
         }
 
         vm.warp(block.timestamp + 8 days);
 
-        for (uint i = 5; i < 10; i++) {
+        for (uint256 i = 5; i < 10; i++) {
             l3Bridge.finalize(l3Ids[i]);
             l3Bridge.settle(l3Ids[i]);
         }
 
         uint256 terminal = 0;
-        for (uint i = 0; i < 10; i++) {
+        for (uint256 i = 0; i < 10; i++) {
             if (l3Bridge.isTerminal(l3Ids[i])) terminal++;
         }
 
@@ -674,7 +690,7 @@ contract CrossContractIntegrationTest is Test {
         assertTrue(compliance.isTerminal(wId), "Warrant executed");
 
         // Scenario 4: Batch processing
-        for (uint i = 0; i < 5; i++) {
+        for (uint256 i = 0; i < 5; i++) {
             batchQueue.addToBatch(100 + i);
         }
         uint256 bId = batchQueue.forceFlush();

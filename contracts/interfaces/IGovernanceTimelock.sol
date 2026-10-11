@@ -23,22 +23,22 @@ interface IGovernanceTimelock {
 
     /// @notice Types of governance operations
     enum OperationType {
-        ParameterChange,        // Update protocol parameters
-        ContractUpgrade,        // Upgrade proxy implementations
-        OwnershipTransfer,      // Transfer contract ownership
-        EmergencyAction,        // Security-related actions
-        TreasuryOperation,      // Treasury fund movements
-        OracleManagement,       // Oracle registration/removal
-        ProtocolPause           // Pause/unpause protocol
+        ParameterChange, // Update protocol parameters
+        ContractUpgrade, // Upgrade proxy implementations
+        OwnershipTransfer, // Transfer contract ownership
+        EmergencyAction, // Security-related actions
+        TreasuryOperation, // Treasury fund movements
+        OracleManagement, // Oracle registration/removal
+        ProtocolPause // Pause/unpause protocol
     }
 
     /// @notice Status of a governance operation
     enum OperationStatus {
-        None,           // Not scheduled
-        Pending,        // Scheduled, waiting for delay
-        Ready,          // Delay passed, ready to execute
-        Executed,       // Successfully executed
-        Cancelled       // Cancelled before execution
+        None, // Not scheduled
+        Pending, // Scheduled, waiting for delay
+        Ready, // Delay passed, ready to execute
+        Executed, // Successfully executed
+        Cancelled // Cancelled before execution
     }
 
     // ============ Structs ============
@@ -72,10 +72,10 @@ interface IGovernanceTimelock {
 
     /// @notice Timelock configuration
     struct TimelockConfig {
-        uint256 minDelay;           // Minimum delay for standard operations
-        uint256 emergencyDelay;     // Shorter delay for emergencies
-        uint256 longDelay;          // Longer delay for critical changes
-        bool openExecutor;          // Whether anyone can execute after delay
+        uint256 minDelay; // Minimum delay for standard operations
+        uint256 emergencyDelay; // Shorter delay for emergencies
+        uint256 longDelay; // Longer delay for critical changes
+        bool openExecutor; // Whether anyone can execute after delay
     }
 
     // ============ Events ============
@@ -92,44 +92,22 @@ interface IGovernanceTimelock {
     );
 
     /// @notice Emitted when an operation is executed
-    event OperationExecuted(
-        bytes32 indexed id,
-        OperationType indexed opType,
-        address indexed target,
-        bool success
-    );
+    event OperationExecuted(bytes32 indexed id, OperationType indexed opType, address indexed target, bool success);
 
     /// @notice Emitted when an operation is cancelled
-    event OperationCancelled(
-        bytes32 indexed id,
-        address indexed canceller
-    );
+    event OperationCancelled(bytes32 indexed id, address indexed canceller);
 
     /// @notice Emitted when emergency action is taken
-    event EmergencyActionExecuted(
-        bytes32 indexed id,
-        address indexed executor,
-        string reason
-    );
+    event EmergencyActionExecuted(bytes32 indexed id, address indexed executor, string reason);
 
     /// @notice Emitted when protocol contract is registered
-    event ProtocolContractRegistered(
-        string indexed name,
-        address indexed contractAddress
-    );
+    event ProtocolContractRegistered(string indexed name, address indexed contractAddress);
 
     /// @notice Emitted when timelock configuration is updated
-    event TimelockConfigUpdated(
-        uint256 minDelay,
-        uint256 emergencyDelay,
-        uint256 longDelay
-    );
+    event TimelockConfigUpdated(uint256 minDelay, uint256 emergencyDelay, uint256 longDelay);
 
     /// @notice Emitted when ownership is accepted
-    event OwnershipAccepted(
-        address indexed contractAddress,
-        string contractName
-    );
+    event OwnershipAccepted(address indexed contractAddress, string contractName);
 
     // ============ Scheduling Functions ============
 
@@ -206,13 +184,9 @@ interface IGovernanceTimelock {
      * @param predecessor Required predecessor operation
      * @param salt Salt used when scheduling
      */
-    function executeOperation(
-        address target,
-        uint256 value,
-        bytes calldata data,
-        bytes32 predecessor,
-        bytes32 salt
-    ) external payable;
+    function executeOperation(address target, uint256 value, bytes calldata data, bytes32 predecessor, bytes32 salt)
+        external
+        payable;
 
     /**
      * @notice Execute a batch of ready operations
@@ -246,11 +220,7 @@ interface IGovernanceTimelock {
      * @param reason Reason for emergency action
      * @return id The emergency operation ID
      */
-    function executeEmergency(
-        address target,
-        bytes calldata data,
-        string calldata reason
-    ) external returns (bytes32 id);
+    function executeEmergency(address target, bytes calldata data, string calldata reason) external returns (bytes32 id);
 
     /**
      * @notice Emergency pause all protocol contracts
@@ -270,10 +240,7 @@ interface IGovernanceTimelock {
      * @param name Contract name (e.g., "ilrm", "treasury")
      * @param contractAddress Contract address
      */
-    function registerProtocolContract(
-        string calldata name,
-        address contractAddress
-    ) external;
+    function registerProtocolContract(string calldata name, address contractAddress) external;
 
     /**
      * @notice Accept ownership of a protocol contract
@@ -322,11 +289,7 @@ interface IGovernanceTimelock {
      * @param emergencyDelay New emergency delay
      * @param longDelay New long delay
      */
-    function updateDelays(
-        uint256 minDelay,
-        uint256 emergencyDelay,
-        uint256 longDelay
-    ) external;
+    function updateDelays(uint256 minDelay, uint256 emergencyDelay, uint256 longDelay) external;
 
     /**
      * @notice Set whether executor role is open to anyone

@@ -59,7 +59,7 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
     uint256 public constant COUNTER_FEE_BASE = 0.01 ether;
 
     /// @notice Basis points denominator
-    uint256 public constant BPS_DENOMINATOR = 10000;
+    uint256 public constant BPS_DENOMINATOR = 10_000;
 
     /// @notice FIX M-FINAL-01: Maximum time extension to prevent indefinite delays
     uint256 public constant MAX_TIME_EXTENSION = 3 days;
@@ -95,11 +95,7 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
 
     // ============ Constructor ============
 
-    constructor(
-        IERC20 _token,
-        address _oracle,
-        IAssetRegistry _assetRegistry
-    ) Ownable(msg.sender) {
+    constructor(IERC20 _token, address _oracle, IAssetRegistry _assetRegistry) Ownable(msg.sender) {
         require(address(_token) != address(0), "Invalid token");
         require(_oracle != address(0), "Invalid oracle");
         require(address(_assetRegistry) != address(0), "Invalid registry");
@@ -129,17 +125,14 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
 
         // Validate config
         uint256 stakeWindow = config.stakeWindow > 0 ? config.stakeWindow : DEFAULT_STAKE_WINDOW;
-        uint256 resolutionTimeout = config.resolutionTimeout > 0
-            ? config.resolutionTimeout
-            : DEFAULT_RESOLUTION_TIMEOUT;
+        uint256 resolutionTimeout = config.resolutionTimeout > 0 ? config.resolutionTimeout : DEFAULT_RESOLUTION_TIMEOUT;
 
         require(config.minParties >= MIN_PARTIES, "Min parties too low");
         require(config.maxParties <= MAX_PARTIES, "Max parties too high");
         require(config.minParties <= parties.length, "Not enough initial parties");
 
         if (config.quorumType == QuorumType.Custom) {
-            require(config.customQuorumBps > 0 && config.customQuorumBps <= BPS_DENOMINATOR,
-                "Invalid custom quorum");
+            require(config.customQuorumBps > 0 && config.customQuorumBps <= BPS_DENOMINATOR, "Invalid custom quorum");
         }
 
         // Verify initiator is in parties list
@@ -209,12 +202,7 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
         // Freeze initiator's assets
         assetRegistry.freezeAssets(disputeId, msg.sender);
 
-        emit MultiPartyDisputeCreated(
-            disputeId,
-            msg.sender,
-            parties.length,
-            config.quorumType
-        );
+        emit MultiPartyDisputeCreated(disputeId, msg.sender, parties.length, config.quorumType);
 
         emit PartyStaked(disputeId, msg.sender, baseStake);
     }
@@ -273,10 +261,7 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
     /**
      * @inheritdoc IMultiPartyILRM
      */
-    function submitEvidence(
-        uint256 disputeId,
-        bytes32 evidenceHash
-    ) external override nonReentrant {
+    function submitEvidence(uint256 disputeId, bytes32 evidenceHash) external override nonReentrant {
         MultiPartyDispute storage d = _disputes[disputeId];
         require(!d.resolved, "Dispute resolved");
         require(_partyIndex[disputeId][msg.sender] > 0, "Not a party");
@@ -297,11 +282,10 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
      * @param proposal The proposal text
      * @param signature Oracle signature
      */
-    function submitLLMProposal(
-        uint256 disputeId,
-        string calldata proposal,
-        bytes calldata signature
-    ) external nonReentrant {
+    function submitLLMProposal(uint256 disputeId, string calldata proposal, bytes calldata signature)
+        external
+        nonReentrant
+    {
         require(msg.sender == oracle, "Only oracle");
 
         MultiPartyDispute storage d = _disputes[disputeId];
@@ -311,10 +295,7 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
 
         // Verify signature
         bytes32 proposalHash = keccak256(bytes(proposal));
-        require(
-            IOracle(oracle).verifySignature(disputeId, proposalHash, signature),
-            "Invalid signature"
-        );
+        require(IOracle(oracle).verifySignature(disputeId, proposalHash, signature), "Invalid signature");
 
         d.llmProposal = proposal;
 
@@ -341,10 +322,7 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
         require(bytes(d.llmProposal).length > 0, "No proposal yet");
         require(!_partyInfo[disputeId][msg.sender].hasAccepted, "Already accepted");
         require(!_partyInfo[disputeId][msg.sender].hasRejected, "Already rejected");
-        require(
-            block.timestamp <= d.startTime + d.config.stakeWindow + d.config.resolutionTimeout,
-            "Timeout passed"
-        );
+        require(block.timestamp <= d.startTime + d.config.stakeWindow + d.config.resolutionTimeout, "Timeout passed");
 
         _partyInfo[disputeId][msg.sender].hasAccepted = true;
         d.acceptanceCount++;
@@ -389,10 +367,13 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
     /**
      * @inheritdoc IMultiPartyILRM
      */
-    function counterPropose(
-        uint256 disputeId,
-        bytes32 newEvidenceHash
-    ) external payable override nonReentrant whenNotPaused {
+    function counterPropose(uint256 disputeId, bytes32 newEvidenceHash)
+        external
+        payable
+        override
+        nonReentrant
+        whenNotPaused
+    {
         MultiPartyDispute storage d = _disputes[disputeId];
         require(!d.resolved, "Dispute resolved");
         require(_partyIndex[disputeId][msg.sender] > 0, "Not a party");
@@ -404,7 +385,7 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
         require(msg.value >= fee, "Insufficient counter fee");
 
         // Burn the fee
-        (bool success, ) = BURN_ADDRESS.call{value: fee}("");
+        (bool success,) = BURN_ADDRESS.call{value: fee}("");
         require(success, "Burn failed");
 
         if (msg.value > fee) {
@@ -457,18 +438,14 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
     /**
      * @inheritdoc IMultiPartyILRM
      */
-    function getDispute(
-        uint256 disputeId
-    ) external view override returns (MultiPartyDispute memory) {
+    function getDispute(uint256 disputeId) external view override returns (MultiPartyDispute memory) {
         return _disputes[disputeId];
     }
 
     /**
      * @inheritdoc IMultiPartyILRM
      */
-    function getParties(
-        uint256 disputeId
-    ) external view override returns (PartyInfo[] memory parties) {
+    function getParties(uint256 disputeId) external view override returns (PartyInfo[] memory parties) {
         address[] storage partyAddresses = _partyList[disputeId];
         parties = new PartyInfo[](partyAddresses.length);
 
@@ -480,19 +457,19 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
     /**
      * @inheritdoc IMultiPartyILRM
      */
-    function getPartyInfo(
-        uint256 disputeId,
-        address party
-    ) external view override returns (PartyInfo memory) {
+    function getPartyInfo(uint256 disputeId, address party) external view override returns (PartyInfo memory) {
         return _partyInfo[disputeId][party];
     }
 
     /**
      * @inheritdoc IMultiPartyILRM
      */
-    function checkQuorum(
-        uint256 disputeId
-    ) external view override returns (bool reached, uint256 current, uint256 required) {
+    function checkQuorum(uint256 disputeId)
+        external
+        view
+        override
+        returns (bool reached, uint256 current, uint256 required)
+    {
         MultiPartyDispute storage d = _disputes[disputeId];
         required = _getQuorumRequirement(disputeId);
         current = d.acceptanceCount;
@@ -502,19 +479,14 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
     /**
      * @inheritdoc IMultiPartyILRM
      */
-    function getQuorumRequirement(
-        uint256 disputeId
-    ) external view override returns (uint256) {
+    function getQuorumRequirement(uint256 disputeId) external view override returns (uint256) {
         return _getQuorumRequirement(disputeId);
     }
 
     /**
      * @inheritdoc IMultiPartyILRM
      */
-    function isParty(
-        uint256 disputeId,
-        address account
-    ) external view override returns (bool) {
+    function isParty(uint256 disputeId, address account) external view override returns (bool) {
         return _partyIndex[disputeId][account] > 0;
     }
 
@@ -670,7 +642,7 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
         require(to != address(0), "Invalid recipient");
 
         treasury -= amount;
-        (bool success, ) = to.call{value: amount}("");
+        (bool success,) = to.call{value: amount}("");
         require(success, "Transfer failed");
     }
 

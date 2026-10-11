@@ -74,19 +74,16 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
      * @param executors Addresses with executor role (or empty for open)
      * @param admin Admin address for initial setup (should renounce later)
      */
-    constructor(
-        uint256 minDelay,
-        address[] memory proposers,
-        address[] memory executors,
-        address admin
-    ) TimelockController(minDelay, proposers, executors, admin) {
+    constructor(uint256 minDelay, address[] memory proposers, address[] memory executors, address admin)
+        TimelockController(minDelay, proposers, executors, admin)
+    {
         require(minDelay >= MIN_ALLOWED_DELAY, "Delay too short");
         require(minDelay <= MAX_ALLOWED_DELAY, "Delay too long");
 
         _config = TimelockConfig({
             minDelay: minDelay,
-            emergencyDelay: minDelay / 4,  // 25% of normal delay
-            longDelay: minDelay * 2,       // 200% of normal delay
+            emergencyDelay: minDelay / 4, // 25% of normal delay
+            longDelay: minDelay * 2, // 200% of normal delay
             openExecutor: executors.length == 0
         });
 
@@ -180,13 +177,11 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     // ============ Execution Functions ============
 
     /// @inheritdoc IGovernanceTimelock
-    function executeOperation(
-        address target,
-        uint256 value,
-        bytes calldata data,
-        bytes32 predecessor,
-        bytes32 salt
-    ) external payable override {
+    function executeOperation(address target, uint256 value, bytes calldata data, bytes32 predecessor, bytes32 salt)
+        external
+        payable
+        override
+    {
         bytes32 id = hashOperation(target, value, data, predecessor, salt);
 
         // Execute via parent
@@ -216,12 +211,7 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
         _operations[id].status = OperationStatus.Executed;
         _removePendingOperation(id);
 
-        emit OperationExecuted(
-            id,
-            _operations[id].opType,
-            targets.length > 0 ? targets[0] : address(0),
-            true
-        );
+        emit OperationExecuted(id, _operations[id].opType, targets.length > 0 ? targets[0] : address(0), true);
     }
 
     /// @inheritdoc IGovernanceTimelock
@@ -237,11 +227,12 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     // ============ Emergency Functions ============
 
     /// @inheritdoc IGovernanceTimelock
-    function executeEmergency(
-        address target,
-        bytes calldata data,
-        string calldata reason
-    ) external override onlyRole(EMERGENCY_ROLE) returns (bytes32 id) {
+    function executeEmergency(address target, bytes calldata data, string calldata reason)
+        external
+        override
+        onlyRole(EMERGENCY_ROLE)
+        returns (bytes32 id)
+    {
         bytes32 salt = keccak256(abi.encodePacked(block.timestamp, reason));
         id = hashOperation(target, 0, data, bytes32(0), salt);
 
@@ -249,15 +240,7 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
         schedule(target, 0, data, bytes32(0), salt, _config.emergencyDelay);
 
         _storeOperationMetadata(
-            id,
-            OperationType.EmergencyAction,
-            target,
-            0,
-            data,
-            bytes32(0),
-            salt,
-            _config.emergencyDelay,
-            reason
+            id, OperationType.EmergencyAction, target, 0, data, bytes32(0), salt, _config.emergencyDelay, reason
         );
 
         emit EmergencyActionExecuted(id, msg.sender, reason);
@@ -285,11 +268,7 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
             _pauseContract(_protocolContracts.dummyGenerator);
         }
 
-        emit EmergencyActionExecuted(
-            keccak256(abi.encodePacked("PAUSE_ALL", block.timestamp)),
-            msg.sender,
-            reason
-        );
+        emit EmergencyActionExecuted(keccak256(abi.encodePacked("PAUSE_ALL", block.timestamp)), msg.sender, reason);
     }
 
     /// @inheritdoc IGovernanceTimelock
@@ -314,19 +293,18 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
         }
 
         emit EmergencyActionExecuted(
-            keccak256(abi.encodePacked("UNPAUSE_ALL", block.timestamp)),
-            msg.sender,
-            "Emergency unpause all"
+            keccak256(abi.encodePacked("UNPAUSE_ALL", block.timestamp)), msg.sender, "Emergency unpause all"
         );
     }
 
     // ============ Protocol Management ============
 
     /// @inheritdoc IGovernanceTimelock
-    function registerProtocolContract(
-        string calldata name,
-        address contractAddress
-    ) external override onlyRole(DEFAULT_ADMIN_ROLE) {
+    function registerProtocolContract(string calldata name, address contractAddress)
+        external
+        override
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
         require(contractAddress != address(0), "Invalid address");
 
         _contractRegistry[name] = contractAddress;
@@ -357,9 +335,7 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     /// @inheritdoc IGovernanceTimelock
     function acceptContractOwnership(address contractAddress) external override onlyRole(DEFAULT_ADMIN_ROLE) {
         // Call acceptOwnership on the target contract (for Ownable2Step)
-        (bool success,) = contractAddress.call(
-            abi.encodeWithSignature("acceptOwnership()")
-        );
+        (bool success,) = contractAddress.call(abi.encodeWithSignature("acceptOwnership()"));
         require(success, "Accept ownership failed");
 
         emit OwnershipAccepted(contractAddress, "");
@@ -390,11 +366,11 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     // ============ Configuration Functions ============
 
     /// @inheritdoc IGovernanceTimelock
-    function updateDelays(
-        uint256 minDelay,
-        uint256 emergencyDelay,
-        uint256 longDelay
-    ) external override onlyRole(DEFAULT_ADMIN_ROLE) {
+    function updateDelays(uint256 minDelay, uint256 emergencyDelay, uint256 longDelay)
+        external
+        override
+        onlyRole(DEFAULT_ADMIN_ROLE)
+    {
         require(minDelay >= MIN_ALLOWED_DELAY, "Min delay too short");
         require(minDelay <= MAX_ALLOWED_DELAY, "Min delay too long");
         require(emergencyDelay <= minDelay, "Emergency delay > min delay");
@@ -451,19 +427,21 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
         uint256 delay,
         string memory description
     ) internal {
-        _storeOperation(GovernanceOperation({
-            id: id,
-            opType: opType,
-            target: target,
-            value: value,
-            data: data,
-            predecessor: predecessor,
-            salt: salt,
-            scheduledAt: block.timestamp,
-            readyAt: block.timestamp + delay,
-            status: OperationStatus.Pending,
-            description: description
-        }));
+        _storeOperation(
+            GovernanceOperation({
+                id: id,
+                opType: opType,
+                target: target,
+                value: value,
+                data: data,
+                predecessor: predecessor,
+                salt: salt,
+                scheduledAt: block.timestamp,
+                readyAt: block.timestamp + delay,
+                status: OperationStatus.Pending,
+                description: description
+            })
+        );
     }
 
     /**
@@ -524,12 +502,11 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
      * @return multiPartyPaused MultiPartyILRM contract paused state
      * @return councilPaused ComplianceCouncil contract paused state
      */
-    function getPauseStatus() external view returns (
-        bool ilrmPaused,
-        bool treasuryPaused,
-        bool multiPartyPaused,
-        bool councilPaused
-    ) {
+    function getPauseStatus()
+        external
+        view
+        returns (bool ilrmPaused, bool treasuryPaused, bool multiPartyPaused, bool councilPaused)
+    {
         if (_protocolContracts.ilrm != address(0)) {
             try IPausable(_protocolContracts.ilrm).paused() returns (bool p) {
                 ilrmPaused = p;

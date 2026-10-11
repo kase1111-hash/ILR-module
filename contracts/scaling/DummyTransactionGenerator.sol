@@ -38,7 +38,7 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
     uint256 public constant MAX_INTERVAL_CEILING = 1 days;
 
     /// @notice Basis points denominator
-    uint256 public constant BPS_DENOMINATOR = 10000;
+    uint256 public constant BPS_DENOMINATOR = 10_000;
 
     /// @notice Default voluntary request fee
     uint256 public constant DEFAULT_VOLUNTARY_FEE = 0.01 ether;
@@ -87,21 +87,14 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
      * @param _ilrm Target ILRM contract
      * @param initialConfig Initial generator configuration
      */
-    constructor(
-        address _ilrm,
-        GeneratorConfig memory initialConfig
-    ) Ownable(msg.sender) {
+    constructor(address _ilrm, GeneratorConfig memory initialConfig) Ownable(msg.sender) {
         require(_ilrm != address(0), "Invalid ILRM");
 
         ilrm = _ilrm;
         _validateAndSetConfig(initialConfig);
 
         _stats.periodStartTime = block.timestamp;
-        _randomSeed = uint256(keccak256(abi.encodePacked(
-            block.timestamp,
-            block.prevrandao,
-            msg.sender
-        )));
+        _randomSeed = uint256(keccak256(abi.encodePacked(block.timestamp, block.prevrandao, msg.sender)));
     }
 
     // ============ Generation Functions ============
@@ -109,11 +102,8 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
     /**
      * @inheritdoc IDummyTransactionGenerator
      */
-    function tryGenerate() external override nonReentrant whenNotPaused returns (
-        bool generated,
-        DummyTxType txType
-    ) {
-        (bool canGen, ) = canGenerate();
+    function tryGenerate() external override nonReentrant whenNotPaused returns (bool generated, DummyTxType txType) {
+        (bool canGen,) = canGenerate();
         if (!canGen) {
             return (false, DummyTxType.VoluntaryRequest);
         }
@@ -195,11 +185,8 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
     /**
      * @inheritdoc IDummyTransactionGenerator
      */
-    function checkUpkeep(bytes calldata) external view override returns (
-        bool upkeepNeeded,
-        bytes memory performData
-    ) {
-        (upkeepNeeded, ) = canGenerate();
+    function checkUpkeep(bytes calldata) external view override returns (bool upkeepNeeded, bytes memory performData) {
+        (upkeepNeeded,) = canGenerate();
         performData = "";
     }
 
@@ -216,11 +203,7 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
     function requestRandomness() external override onlyOwner returns (uint256 requestId) {
         // In production, this would call Chainlink VRF
         // For now, use pseudo-random as placeholder
-        requestId = uint256(keccak256(abi.encodePacked(
-            block.timestamp,
-            block.prevrandao,
-            _stats.totalGenerated
-        )));
+        requestId = uint256(keccak256(abi.encodePacked(block.timestamp, block.prevrandao, _stats.totalGenerated)));
 
         _pendingVrfRequests[requestId] = true;
 
@@ -239,12 +222,8 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
         require(!_dummyAddresses[dummyAddr].isActive, "Already registered");
         require(_dummyAddressList.length < MAX_DUMMY_ADDRESSES, "Max addresses reached");
 
-        _dummyAddresses[dummyAddr] = DummyAddress({
-            addr: dummyAddr,
-            isActive: true,
-            registeredAt: block.timestamp,
-            txCount: 0
-        });
+        _dummyAddresses[dummyAddr] =
+            DummyAddress({addr: dummyAddr, isActive: true, registeredAt: block.timestamp, txCount: 0});
 
         _dummyAddressList.push(dummyAddr);
 
@@ -316,7 +295,7 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
         require(amount <= dummyTreasury, "Insufficient balance");
 
         dummyTreasury -= amount;
-        (bool success, ) = to.call{value: amount}("");
+        (bool success,) = to.call{value: amount}("");
         require(success, "Transfer failed");
     }
 
@@ -412,11 +391,7 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
     function updateConfig(GeneratorConfig calldata config) external override onlyOwner {
         _validateAndSetConfig(config);
 
-        emit ConfigUpdated(
-            config.minInterval,
-            config.maxInterval,
-            config.probabilityBps
-        );
+        emit ConfigUpdated(config.minInterval, config.maxInterval, config.probabilityBps);
     }
 
     /**
@@ -465,11 +440,7 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
         }
 
         // Generate random data hash
-        bytes32 dataHash = keccak256(abi.encodePacked(
-            _randomSeed,
-            _dummyTxCounter++,
-            block.timestamp
-        ));
+        bytes32 dataHash = keccak256(abi.encodePacked(_randomSeed, _dummyTxCounter++, block.timestamp));
 
         uint256 cost = 0;
 
@@ -491,12 +462,7 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
             _stats.periodSpent += cost;
             dummyTreasury -= cost;
 
-            emit DummyTransactionGenerated(
-                _stats.totalGenerated,
-                txType,
-                dummyAddr,
-                dataHash
-            );
+            emit DummyTransactionGenerated(_stats.totalGenerated, txType, dummyAddr, dataHash);
         }
 
         return success;
@@ -505,11 +471,7 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
     /**
      * @dev Generate a voluntary request dummy tx
      */
-    function _generateVoluntaryRequest(
-        address dummyAddr,
-        bytes32 dataHash,
-        uint256 fee
-    ) internal returns (bool) {
+    function _generateVoluntaryRequest(address dummyAddr, bytes32 dataHash, uint256 fee) internal returns (bool) {
         if (dummyTreasury < fee) {
             return false;
         }
@@ -522,12 +484,8 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
             counterparty = address(uint160(uint256(keccak256(abi.encodePacked(dummyAddr)))));
         }
 
-        (bool success, ) = ilrm.call{value: fee}(
-            abi.encodeWithSignature(
-                "initiateVoluntaryRequest(address,bytes32)",
-                counterparty,
-                dataHash
-            )
+        (bool success,) = ilrm.call{value: fee}(
+            abi.encodeWithSignature("initiateVoluntaryRequest(address,bytes32)", counterparty, dataHash)
         );
 
         return success;
@@ -536,20 +494,15 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
     /**
      * @dev Generate a batch queue entry dummy tx
      */
-    function _generateBatchQueueEntry(
-        address dummyAddr,
-        bytes32 dataHash
-    ) internal returns (bool) {
+    function _generateBatchQueueEntry(address dummyAddr, bytes32 dataHash) internal returns (bool) {
         if (batchQueue == address(0)) {
             return false;
         }
 
         // Queue a dummy transaction
-        (bool success, ) = batchQueue.call(
+        (bool success,) = batchQueue.call(
             abi.encodeWithSignature(
-                "queueTransaction(uint8,bytes)",
-                uint8(DummyTxType.BatchQueueEntry),
-                abi.encode(dummyAddr, dataHash)
+                "queueTransaction(uint8,bytes)", uint8(DummyTxType.BatchQueueEntry), abi.encode(dummyAddr, dataHash)
             )
         );
 
@@ -559,10 +512,7 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
     /**
      * @dev Generate a viewing key commitment dummy tx
      */
-    function _generateViewingKeyCommit(
-        address,
-        bytes32 dataHash
-    ) internal returns (bool) {
+    function _generateViewingKeyCommit(address, bytes32 dataHash) internal returns (bool) {
         // This would commit a dummy viewing key
         // For now, just emit the event
         // In production, would interact with ComplianceEscrow
@@ -573,13 +523,11 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
      * @dev Update the random seed
      */
     function _updateRandomSeed() internal {
-        _randomSeed = uint256(keccak256(abi.encodePacked(
-            _randomSeed,
-            block.timestamp,
-            block.prevrandao,
-            _stats.totalGenerated,
-            gasleft()
-        )));
+        _randomSeed = uint256(
+            keccak256(
+                abi.encodePacked(_randomSeed, block.timestamp, block.prevrandao, _stats.totalGenerated, gasleft())
+            )
+        );
     }
 
     /**
@@ -639,11 +587,7 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
      */
     function _checkAndResetPeriod() internal {
         if (block.timestamp >= _stats.periodStartTime + _config.periodDuration) {
-            emit PeriodReset(
-                block.timestamp,
-                _stats.periodGenerated,
-                _stats.periodSpent
-            );
+            emit PeriodReset(block.timestamp, _stats.periodGenerated, _stats.periodSpent);
 
             _stats.periodStartTime = block.timestamp;
             _stats.periodGenerated = 0;

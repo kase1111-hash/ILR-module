@@ -61,18 +61,10 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
     // ============ Events ============
 
     /// @notice Emitted when a proposal is requested
-    event ProposalRequested(
-        uint256 indexed disputeId,
-        bytes32 evidenceHash,
-        uint256 timestamp
-    );
+    event ProposalRequested(uint256 indexed disputeId, bytes32 evidenceHash, uint256 timestamp);
 
     /// @notice Emitted when proposal is submitted to ILRM
-    event ProposalSubmittedToILRM(
-        uint256 indexed disputeId,
-        bytes32 proposalHash,
-        address indexed oracle
-    );
+    event ProposalSubmittedToILRM(uint256 indexed disputeId, bytes32 proposalHash, address indexed oracle);
 
     // ============ Errors ============
 
@@ -146,10 +138,7 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
      * @inheritdoc IOracle
      * @dev Called by ILRM when dispute enters Active state
      */
-    function requestProposal(
-        uint256 disputeId,
-        bytes32 evidenceHash
-    ) external override onlyILRM {
+    function requestProposal(uint256 disputeId, bytes32 evidenceHash) external override onlyILRM {
         pendingRequests[disputeId] = true;
 
         emit ProposalRequested(disputeId, evidenceHash, block.timestamp);
@@ -160,11 +149,11 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
      * @inheritdoc IOracle
      * @dev Called by oracle operator after LLM processing
      */
-    function submitProposal(
-        uint256 disputeId,
-        string calldata proposal,
-        bytes calldata signature
-    ) external override onlyOracle {
+    function submitProposal(uint256 disputeId, string calldata proposal, bytes calldata signature)
+        external
+        override
+        onlyOracle
+    {
         if (processedProposals[disputeId] != bytes32(0)) {
             revert ProposalAlreadyProcessed(disputeId);
         }
@@ -200,23 +189,16 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
     /**
      * @inheritdoc IOracle
      */
-    function verifySignature(
-        uint256 disputeId,
-        bytes32 proposalHash,
-        bytes calldata signature
-    ) public view override returns (bool valid) {
-        bytes32 structHash = keccak256(
-            abi.encode(
-                PROPOSAL_TYPEHASH,
-                disputeId,
-                proposalHash,
-                proposalNonces[disputeId]
-            )
-        );
+    function verifySignature(uint256 disputeId, bytes32 proposalHash, bytes calldata signature)
+        public
+        view
+        override
+        returns (bool valid)
+    {
+        bytes32 structHash =
+            keccak256(abi.encode(PROPOSAL_TYPEHASH, disputeId, proposalHash, proposalNonces[disputeId]));
 
-        bytes32 digest = keccak256(
-            abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), structHash)
-        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), structHash));
 
         address signer = digest.recover(signature);
         return _isOracle[signer];
@@ -238,18 +220,10 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
     ) external view returns (bool valid) {
         if (!_isOracle[expectedSigner]) return false;
 
-        bytes32 structHash = keccak256(
-            abi.encode(
-                PROPOSAL_TYPEHASH,
-                disputeId,
-                proposalHash,
-                proposalNonces[disputeId]
-            )
-        );
+        bytes32 structHash =
+            keccak256(abi.encode(PROPOSAL_TYPEHASH, disputeId, proposalHash, proposalNonces[disputeId]));
 
-        bytes32 digest = keccak256(
-            abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), structHash)
-        );
+        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), structHash));
 
         address signer = digest.recover(signature);
         return signer == expectedSigner;
@@ -298,10 +272,7 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
      * @param oracle Oracle address
      * @param publicKeyHash Hash of oracle's public key
      */
-    function registerOracle(
-        address oracle,
-        bytes32 publicKeyHash
-    ) external onlyOwner {
+    function registerOracle(address oracle, bytes32 publicKeyHash) external onlyOwner {
         if (oracle == address(0)) revert InvalidAddress();
         _isOracle[oracle] = true;
         oraclePublicKeyHash[oracle] = publicKeyHash;
@@ -361,10 +332,7 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
      * @param oracle Oracle address
      * @param publicKeyHash New public key hash
      */
-    function updateOracleKey(
-        address oracle,
-        bytes32 publicKeyHash
-    ) external onlyOwner {
+    function updateOracleKey(address oracle, bytes32 publicKeyHash) external onlyOwner {
         if (!_isOracle[oracle]) revert NotOracle(oracle);
         oraclePublicKeyHash[oracle] = publicKeyHash;
         emit OracleRegistered(oracle, publicKeyHash);

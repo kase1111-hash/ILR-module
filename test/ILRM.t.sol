@@ -42,10 +42,7 @@ contract ILRMTest is Test {
     uint256 constant STAKE = 10 ether;
 
     IILRM.FallbackLicense fallbackLicense = IILRM.FallbackLicense({
-        nonExclusive: true,
-        termDuration: 365 days,
-        royaltyCapBps: 500,
-        termsHash: bytes32(uint256(0xabc))
+        nonExclusive: true, termDuration: 365 days, royaltyCapBps: 500, termsHash: bytes32(uint256(0xabc))
     });
 
     function setUp() public {
@@ -72,12 +69,7 @@ contract ILRMTest is Test {
 
     function testInitiateBreachDispute() public {
         vm.prank(initiator);
-        uint256 disputeId = ilrm.initiateBreachDispute(
-            counterparty,
-            STAKE,
-            bytes32(uint256(0x123)),
-            fallbackLicense
-        );
+        uint256 disputeId = ilrm.initiateBreachDispute(counterparty, STAKE, bytes32(uint256(0x123)), fallbackLicense);
 
         assertEq(uint256(ilrm.disputeCounter()), 1);
         IILRM.Dispute memory d = ilrm.disputes(disputeId);
@@ -183,8 +175,7 @@ contract ILRMTest is Test {
         // Second dispute within cooldown is charged 1.5x the requested stake
         uint256 balanceBefore = token.balanceOf(initiator);
         vm.prank(initiator);
-        uint256 secondId =
-            ilrm.initiateBreachDispute(counterparty, STAKE, bytes32(uint256(0x222)), fallbackLicense);
+        uint256 secondId = ilrm.initiateBreachDispute(counterparty, STAKE, bytes32(uint256(0x222)), fallbackLicense);
 
         assertEq(ilrm.disputes(secondId).initiatorStake, STAKE * 150 / 100);
         assertEq(token.balanceOf(initiator), balanceBefore - STAKE * 150 / 100);
@@ -192,19 +183,13 @@ contract ILRMTest is Test {
         // After the cooldown, stakes are no longer escalated
         vm.warp(block.timestamp + ilrm.COOLDOWN_PERIOD() + 1);
         vm.prank(initiator);
-        uint256 thirdId =
-            ilrm.initiateBreachDispute(counterparty, STAKE, bytes32(uint256(0x333)), fallbackLicense);
+        uint256 thirdId = ilrm.initiateBreachDispute(counterparty, STAKE, bytes32(uint256(0x333)), fallbackLicense);
         assertEq(ilrm.disputes(thirdId).initiatorStake, STAKE);
     }
 
     // Helper
     function _initiateDispute() internal returns (uint256) {
         vm.prank(initiator);
-        return ilrm.initiateBreachDispute(
-            counterparty,
-            STAKE,
-            bytes32(uint256(0x123)),
-            fallbackLicense
-        );
+        return ilrm.initiateBreachDispute(counterparty, STAKE, bytes32(uint256(0x123)), fallbackLicense);
     }
 }

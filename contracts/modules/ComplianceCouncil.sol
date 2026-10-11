@@ -27,9 +27,9 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
 
     /// @notice Execution mode determines trust model
     enum ExecutionMode {
-        DISABLED,           // No execution allowed
-        STRICT_ONCHAIN,     // Requires BLS precompiles (cryptographic finality)
-        HYBRID_ATTESTED     // Off-chain verification with operator attestation
+        DISABLED, // No execution allowed
+        STRICT_ONCHAIN, // Requires BLS precompiles (cryptographic finality)
+        HYBRID_ATTESTED // Off-chain verification with operator attestation
     }
 
     /// @notice Current execution mode
@@ -37,18 +37,12 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
 
     /// @notice Emitted when execution mode changes
     event ExecutionModeChanged(
-        ExecutionMode indexed oldMode,
-        ExecutionMode indexed newMode,
-        address indexed changedBy,
-        string reason
+        ExecutionMode indexed oldMode, ExecutionMode indexed newMode, address indexed changedBy, string reason
     );
 
     /// @notice Emitted when hybrid execution is attested by operator
     event HybridExecutionAttested(
-        uint256 indexed warrantId,
-        address indexed operator,
-        bytes32 attestationHash,
-        string verificationMethod
+        uint256 indexed warrantId, address indexed operator, bytes32 attestationHash, string verificationMethod
     );
 
     // ============ Constants ============
@@ -118,13 +112,7 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
 
     // ============ Constructor ============
 
-    constructor(
-        uint256 threshold,
-        uint256 votingPeriod,
-        uint256 executionDelay,
-        uint256 appealWindow,
-        address admin
-    ) {
+    constructor(uint256 threshold, uint256 votingPeriod, uint256 executionDelay, uint256 appealWindow, address admin) {
         require(threshold > 0, "Threshold must be positive");
         require(votingPeriod >= 1 hours, "Voting period too short");
 
@@ -148,10 +136,17 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         // STRICT_ONCHAIN if precompiles available, DISABLED otherwise (requires explicit enablement)
         if (_blsPrecompilesAvailable) {
             executionMode = ExecutionMode.STRICT_ONCHAIN;
-            emit ExecutionModeChanged(ExecutionMode.DISABLED, ExecutionMode.STRICT_ONCHAIN, admin, "BLS precompiles available");
+            emit ExecutionModeChanged(
+                ExecutionMode.DISABLED, ExecutionMode.STRICT_ONCHAIN, admin, "BLS precompiles available"
+            );
         } else {
             executionMode = ExecutionMode.DISABLED;
-            emit ExecutionModeChanged(ExecutionMode.DISABLED, ExecutionMode.DISABLED, admin, "BLS precompiles unavailable - manual mode selection required");
+            emit ExecutionModeChanged(
+                ExecutionMode.DISABLED,
+                ExecutionMode.DISABLED,
+                admin,
+                "BLS precompiles unavailable - manual mode selection required"
+            );
         }
     }
 
@@ -214,17 +209,13 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
      * @param attestationHash Hash of off-chain verification artifacts
      * @param verificationMethod Description of verification method used
      */
-    function attestHybridVerification(
-        uint256 warrantId,
-        bytes32 attestationHash,
-        string calldata verificationMethod
-    ) external onlyRole(OPERATOR_ROLE) {
+    function attestHybridVerification(uint256 warrantId, bytes32 attestationHash, string calldata verificationMethod)
+        external
+        onlyRole(OPERATOR_ROLE)
+    {
         require(executionMode == ExecutionMode.HYBRID_ATTESTED, "Not in hybrid mode");
         require(_warrants[warrantId].id != 0, "Warrant not found");
-        require(
-            _warrants[warrantId].status == WarrantStatus.Executing,
-            "Warrant not in executing state"
-        );
+        require(_warrants[warrantId].status == WarrantStatus.Executing, "Warrant not in executing state");
         require(!_isHybridAttested[warrantId], "Already attested");
 
         _hybridAttestations[warrantId] = attestationHash;
@@ -254,12 +245,11 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
     // ============ Member Management ============
 
     /// @inheritdoc IComplianceCouncil
-    function addMember(
-        address member,
-        MemberRole role,
-        BLSPublicKey calldata publicKey,
-        uint256 keyIndex
-    ) external override onlyRole(ADMIN_ROLE) {
+    function addMember(address member, MemberRole role, BLSPublicKey calldata publicKey, uint256 keyIndex)
+        external
+        override
+        onlyRole(ADMIN_ROLE)
+    {
         require(member != address(0), "Invalid address");
         require(!_members[member].isActive, "Member already exists");
         require(keyIndex > 0 && keyIndex <= _config.threshold * 2, "Invalid key index");
@@ -303,10 +293,11 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
     }
 
     /// @inheritdoc IComplianceCouncil
-    function rotateMemberKey(
-        address member,
-        BLSPublicKey calldata newPublicKey
-    ) external override onlyRole(ADMIN_ROLE) {
+    function rotateMemberKey(address member, BLSPublicKey calldata newPublicKey)
+        external
+        override
+        onlyRole(ADMIN_ROLE)
+    {
         require(_members[member].isActive, "Member not found");
         require(_validateBLSPublicKey(newPublicKey), "Invalid BLS public key");
 
@@ -373,21 +364,17 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
 
         _warrantIds.push(warrantId);
 
-        emit WarrantRequested(
-            warrantId,
-            requestType,
-            msg.sender,
-            targetDisputeId,
-            documentHash
-        );
+        emit WarrantRequested(warrantId, requestType, msg.sender, targetDisputeId, documentHash);
     }
 
     /// @inheritdoc IComplianceCouncil
-    function castVote(
-        uint256 warrantId,
-        bool approve,
-        string calldata reason
-    ) external override onlyRole(MEMBER_ROLE) whenNotPaused nonReentrant {
+    function castVote(uint256 warrantId, bool approve, string calldata reason)
+        external
+        override
+        onlyRole(MEMBER_ROLE)
+        whenNotPaused
+        nonReentrant
+    {
         WarrantRequest storage warrant = _warrants[warrantId];
 
         require(warrant.id != 0, "Warrant not found");
@@ -404,20 +391,11 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
             warrant.rejectionsCount++;
         }
 
-        _warrantVotes[warrantId].push(Vote({
-            voter: msg.sender,
-            approved: approve,
-            timestamp: block.timestamp,
-            reason: reason
-        }));
-
-        emit VoteCast(
-            warrantId,
-            msg.sender,
-            approve,
-            warrant.approvalsCount,
-            warrant.rejectionsCount
+        _warrantVotes[warrantId].push(
+            Vote({voter: msg.sender, approved: approve, timestamp: block.timestamp, reason: reason})
         );
+
+        emit VoteCast(warrantId, msg.sender, approve, warrant.approvalsCount, warrant.rejectionsCount);
 
         // Auto-conclude if all members voted
         if (warrant.approvalsCount + warrant.rejectionsCount >= _config.totalMembers) {
@@ -447,12 +425,7 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
             warrant.status = WarrantStatus.Rejected;
         }
 
-        emit VotingConcluded(
-            warrantId,
-            warrant.status,
-            warrant.approvalsCount,
-            warrant.rejectionsCount
-        );
+        emit VotingConcluded(warrantId, warrant.status, warrant.approvalsCount, warrant.rejectionsCount);
     }
 
     /// @inheritdoc IComplianceCouncil
@@ -461,10 +434,7 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
 
         require(warrant.id != 0, "Warrant not found");
         require(warrant.status == WarrantStatus.Approved, "Not approved");
-        require(
-            block.timestamp < warrant.executionTime,
-            "Appeal window closed"
-        );
+        require(block.timestamp < warrant.executionTime, "Appeal window closed");
 
         warrant.status = WarrantStatus.Appealed;
 
@@ -477,16 +447,12 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
      * @param warrantId The warrant to cancel
      * @param reason Human-readable reason for cancellation
      */
-    function cancelWarrant(
-        uint256 warrantId,
-        string calldata reason
-    ) external onlyRole(ADMIN_ROLE) {
+    function cancelWarrant(uint256 warrantId, string calldata reason) external onlyRole(ADMIN_ROLE) {
         WarrantRequest storage warrant = _warrants[warrantId];
 
         require(warrant.id != 0, "Warrant not found");
         require(
-            warrant.status != WarrantStatus.Executed &&
-            warrant.status != WarrantStatus.Rejected,
+            warrant.status != WarrantStatus.Executed && warrant.status != WarrantStatus.Rejected,
             "Cannot cancel executed or rejected warrant"
         );
 
@@ -498,10 +464,7 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
 
     /// @notice Emitted when a warrant is cancelled by admin
     event WarrantCancelled(
-        uint256 indexed warrantId,
-        WarrantStatus oldStatus,
-        address indexed cancelledBy,
-        string reason
+        uint256 indexed warrantId, WarrantStatus oldStatus, address indexed cancelledBy, string reason
     );
 
     /// @inheritdoc IComplianceCouncil
@@ -517,23 +480,19 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
     // ============ Threshold Signature Functions ============
 
     /// @inheritdoc IComplianceCouncil
-    function submitSignature(
-        uint256 warrantId,
-        BLSSignature calldata signature
-    ) external override onlyRole(MEMBER_ROLE) whenNotPaused nonReentrant {
+    function submitSignature(uint256 warrantId, BLSSignature calldata signature)
+        external
+        override
+        onlyRole(MEMBER_ROLE)
+        whenNotPaused
+        nonReentrant
+    {
         WarrantRequest storage warrant = _warrants[warrantId];
 
         require(warrant.id != 0, "Warrant not found");
-        require(
-            warrant.status == WarrantStatus.Approved ||
-            warrant.status == WarrantStatus.Executing,
-            "Not approved"
-        );
+        require(warrant.status == WarrantStatus.Approved || warrant.status == WarrantStatus.Executing, "Not approved");
         require(block.timestamp >= warrant.executionTime, "Execution delayed");
-        require(
-            block.timestamp <= warrant.executionTime + _config.signatureTimeout,
-            "Signature timeout"
-        );
+        require(block.timestamp <= warrant.executionTime + _config.signatureTimeout, "Signature timeout");
         require(!_hasSubmittedSig[warrantId][msg.sender], "Already submitted");
 
         // Update status if first signature
@@ -545,23 +504,21 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         bool verified = false;
         if (_blsPrecompilesAvailable) {
             bytes32 message = _getSigningMessage(warrantId);
-            verified = _verifyBLSSignature(
-                message,
-                signature,
-                _members[msg.sender].publicKey
-            );
+            verified = _verifyBLSSignature(message, signature, _members[msg.sender].publicKey);
             require(verified, "Invalid signature");
         }
 
         _hasSubmittedSig[warrantId][msg.sender] = true;
         _members[msg.sender].signaturesProvided++;
 
-        _warrantSignatures[warrantId].push(SignatureSubmission({
-            memberIndex: _members[msg.sender].keyIndex,
-            signature: signature,
-            timestamp: block.timestamp,
-            verified: verified
-        }));
+        _warrantSignatures[warrantId].push(
+            SignatureSubmission({
+                memberIndex: _members[msg.sender].keyIndex,
+                signature: signature,
+                timestamp: block.timestamp,
+                verified: verified
+            })
+        );
 
         uint256 sigCount = _warrantSignatures[warrantId].length;
 
@@ -574,11 +531,12 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
     }
 
     /// @inheritdoc IComplianceCouncil
-    function verifySignature(
-        bytes32 message,
-        BLSSignature calldata signature,
-        BLSPublicKey calldata publicKey
-    ) external view override returns (bool valid) {
+    function verifySignature(bytes32 message, BLSSignature calldata signature, BLSPublicKey calldata publicKey)
+        external
+        view
+        override
+        returns (bool valid)
+    {
         if (_blsPrecompilesAvailable) {
             return _verifyBLSSignature(message, signature, publicKey);
         }
@@ -587,9 +545,12 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
     }
 
     /// @inheritdoc IComplianceCouncil
-    function aggregateSignatures(
-        BLSSignature[] calldata signatures
-    ) external pure override returns (BLSSignature memory aggregated) {
+    function aggregateSignatures(BLSSignature[] calldata signatures)
+        external
+        pure
+        override
+        returns (BLSSignature memory aggregated)
+    {
         require(signatures.length > 0, "No signatures");
 
         // Start with first signature
@@ -605,10 +566,12 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
     }
 
     /// @inheritdoc IComplianceCouncil
-    function verifyThresholdSignature(
-        uint256 warrantId,
-        ThresholdSignature calldata thresholdSig
-    ) external view override returns (bool valid) {
+    function verifyThresholdSignature(uint256 warrantId, ThresholdSignature calldata thresholdSig)
+        external
+        view
+        override
+        returns (bool valid)
+    {
         require(thresholdSig.signatureCount >= _config.threshold, "Below threshold");
 
         if (_blsPrecompilesAvailable) {
@@ -622,7 +585,12 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
     }
 
     /// @inheritdoc IComplianceCouncil
-    function executeReconstruction(uint256 warrantId) external override nonReentrant returns (bytes32 decryptedKeyHash) {
+    function executeReconstruction(uint256 warrantId)
+        external
+        override
+        nonReentrant
+        returns (bytes32 decryptedKeyHash)
+    {
         // EXECUTION MODE GATING - Enforce trust model
         require(executionMode != ExecutionMode.DISABLED, "Execution disabled");
 
@@ -630,10 +598,7 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
 
         require(warrant.id != 0, "Warrant not found");
         require(warrant.status == WarrantStatus.Executing, "Not executing");
-        require(
-            _warrantSignatures[warrantId].length >= _config.threshold,
-            "Insufficient signatures"
-        );
+        require(_warrantSignatures[warrantId].length >= _config.threshold, "Insufficient signatures");
 
         // Mode-specific verification requirements
         if (executionMode == ExecutionMode.STRICT_ONCHAIN) {
@@ -657,13 +622,7 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
 
         // Generate key hash from collected signatures
         // In practice, this triggers off-chain key reconstruction
-        decryptedKeyHash = keccak256(
-            abi.encodePacked(
-                warrantId,
-                warrant.targetDisputeId,
-                block.timestamp
-            )
-        );
+        decryptedKeyHash = keccak256(abi.encodePacked(warrantId, warrant.targetDisputeId, block.timestamp));
 
         warrant.decryptedKeyHash = decryptedKeyHash;
 
@@ -779,8 +738,10 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         // If it reverts, precompiles not available
         (bool success,) = BLS_G1_ADD.staticcall(
             abi.encodePacked(
-                bytes32(0), bytes32(0), // Point 1 (identity)
-                bytes32(0), bytes32(0)  // Point 2 (identity)
+                bytes32(0),
+                bytes32(0), // Point 1 (identity)
+                bytes32(0),
+                bytes32(0) // Point 2 (identity)
             )
         );
         return success;
@@ -817,12 +778,7 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
                     // Use G1 addition precompile to aggregate keys
                     // Input format: pk1.x (32 bytes) || pk1.y (32 bytes) || pk2.x (32 bytes) || pk2.y (32 bytes)
                     (bool success, bytes memory result) = BLS_G1_ADD.staticcall(
-                        abi.encodePacked(
-                            _aggregatedPublicKey.x,
-                            _aggregatedPublicKey.y,
-                            memberKey.x,
-                            memberKey.y
-                        )
+                        abi.encodePacked(_aggregatedPublicKey.x, _aggregatedPublicKey.y, memberKey.x, memberKey.y)
                     );
 
                     if (success && result.length == 64) {
@@ -841,14 +797,8 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
                 } else {
                     // Without precompiles, store concatenated hash as placeholder
                     // Actual verification must be done off-chain in HYBRID_ATTESTED mode
-                    _aggregatedPublicKey.x = keccak256(abi.encodePacked(
-                        _aggregatedPublicKey.x,
-                        memberKey.x
-                    ));
-                    _aggregatedPublicKey.y = keccak256(abi.encodePacked(
-                        _aggregatedPublicKey.y,
-                        memberKey.y
-                    ));
+                    _aggregatedPublicKey.x = keccak256(abi.encodePacked(_aggregatedPublicKey.x, memberKey.x));
+                    _aggregatedPublicKey.y = keccak256(abi.encodePacked(_aggregatedPublicKey.y, memberKey.y));
                 }
             }
         }
@@ -864,11 +814,7 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         WarrantRequest storage warrant = _warrants[warrantId];
         return keccak256(
             abi.encodePacked(
-                "COMPLIANCE_REVEAL",
-                warrantId,
-                warrant.targetDisputeId,
-                warrant.documentHash,
-                warrant.executionTime
+                "COMPLIANCE_REVEAL", warrantId, warrant.targetDisputeId, warrant.documentHash, warrant.executionTime
             )
         );
     }
@@ -877,19 +823,17 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
      * @notice Verify BLS signature using precompiles
      * @dev Uses pairing check: e(sig, g2) == e(H(m), pk)
      */
-    function _verifyBLSSignature(
-        bytes32 message,
-        BLSSignature memory signature,
-        BLSPublicKey memory publicKey
-    ) internal view returns (bool) {
+    function _verifyBLSSignature(bytes32 message, BLSSignature memory signature, BLSPublicKey memory publicKey)
+        internal
+        view
+        returns (bool)
+    {
         if (!_blsPrecompilesAvailable) {
             return false;
         }
 
         // Hash message to G2 point
-        (bool mapSuccess, bytes memory g2Point) = BLS_MAP_G2.staticcall(
-            abi.encodePacked(message)
-        );
+        (bool mapSuccess, bytes memory g2Point) = BLS_MAP_G2.staticcall(abi.encodePacked(message));
         if (!mapSuccess) return false;
 
         // Prepare pairing input:
@@ -898,8 +842,10 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
 
         bytes memory pairingInput = abi.encodePacked(
             // First pairing: signature with G2 generator
-            signature.x[0], signature.x[1],
-            signature.y[0], signature.y[1],
+            signature.x[0],
+            signature.x[1],
+            signature.y[0],
+            signature.y[1],
             // G2 generator (standard BLS12-381)
             hex"024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb8",
             hex"13e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e",
@@ -907,7 +853,8 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
             hex"0606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be",
             // Second pairing: -H(m) with public key
             g2Point,
-            publicKey.x, publicKey.y
+            publicKey.x,
+            publicKey.y
         );
 
         // Execute pairing check

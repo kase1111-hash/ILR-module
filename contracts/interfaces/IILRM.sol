@@ -11,9 +11,9 @@ interface IILRM {
 
     /// @notice Possible outcomes for a dispute
     enum DisputeOutcome {
-        Pending,              // Dispute in progress
-        AcceptedProposal,     // Both parties accepted LLM proposal
-        TimeoutWithBurn,      // Timeout reached, stakes partially burned
+        Pending, // Dispute in progress
+        AcceptedProposal, // Both parties accepted LLM proposal
+        TimeoutWithBurn, // Timeout reached, stakes partially burned
         DefaultLicenseApplied // Counterparty failed to stake
     }
 
@@ -21,10 +21,10 @@ interface IILRM {
 
     /// @notice Fallback license terms applied on timeout/default
     struct FallbackLicense {
-        bytes32 termsHash;      // IPFS hash or on-chain reference to license terms
-        uint256 termDuration;   // Time-limited grant in seconds
-        uint256 royaltyCapBps;  // Maximum royalty in basis points (e.g., 500 = 5%)
-        bool nonExclusive;      // Must be true per spec
+        bytes32 termsHash; // IPFS hash or on-chain reference to license terms
+        uint256 termDuration; // Time-limited grant in seconds
+        uint256 royaltyCapBps; // Maximum royalty in basis points (e.g., 500 = 5%)
+        bool nonExclusive; // Must be true per spec
     }
 
     /// @notice Full dispute state
@@ -48,71 +48,38 @@ interface IILRM {
 
     /// @notice Emitted when a dispute is initiated
     event DisputeInitiated(
-        uint256 indexed disputeId,
-        address indexed initiator,
-        address indexed counterparty,
-        bytes32 evidenceHash
+        uint256 indexed disputeId, address indexed initiator, address indexed counterparty, bytes32 evidenceHash
     );
 
     /// @notice Emitted when counterparty deposits matching stake
-    event StakeDeposited(
-        uint256 indexed disputeId,
-        address indexed depositor,
-        uint256 amount
-    );
+    event StakeDeposited(uint256 indexed disputeId, address indexed depositor, uint256 amount);
 
     /// @notice Emitted when oracle submits LLM proposal
-    event ProposalSubmitted(
-        uint256 indexed disputeId,
-        string proposal
-    );
+    event ProposalSubmitted(uint256 indexed disputeId, string proposal);
 
     /// @notice Emitted when a party accepts the proposal
-    event AcceptanceSignaled(
-        uint256 indexed disputeId,
-        address indexed party
-    );
+    event AcceptanceSignaled(uint256 indexed disputeId, address indexed party);
 
     /// @notice Emitted when a counter-proposal is submitted
-    event CounterProposed(
-        uint256 indexed disputeId,
-        address indexed party,
-        uint256 counterNumber
-    );
+    event CounterProposed(uint256 indexed disputeId, address indexed party, uint256 counterNumber);
 
     /// @notice Emitted when stakes are burned on timeout
-    event StakesBurned(
-        uint256 indexed disputeId,
-        uint256 burnAmount
-    );
+    event StakesBurned(uint256 indexed disputeId, uint256 burnAmount);
 
     /// @notice Emitted when fallback license is applied
     event DefaultLicenseApplied(uint256 indexed disputeId);
 
     /// @notice Emitted when dispute is fully resolved
-    event DisputeResolved(
-        uint256 indexed disputeId,
-        DisputeOutcome outcome
-    );
+    event DisputeResolved(uint256 indexed disputeId, DisputeOutcome outcome);
 
     /// @notice Emitted when tokens are deposited to reserves for incentives
-    event TokenReservesDeposited(
-        address indexed depositor,
-        uint256 amount
-    );
+    event TokenReservesDeposited(address indexed depositor, uint256 amount);
 
     /// @notice Emitted when harassment score is updated
-    event HarassmentScoreUpdated(
-        address indexed participant,
-        uint256 oldScore,
-        uint256 newScore
-    );
+    event HarassmentScoreUpdated(address indexed participant, uint256 oldScore, uint256 newScore);
 
     /// @notice Emitted when treasury is withdrawn (L-02)
-    event TreasuryWithdrawn(
-        address indexed recipient,
-        uint256 amount
-    );
+    event TreasuryWithdrawn(address indexed recipient, uint256 amount);
 
     // ============ Core Functions ============
 
@@ -138,10 +105,7 @@ interface IILRM {
      * @param counterparty The party being requested
      * @param evidenceHash Hash of canonicalized evidence bundle
      */
-    function initiateVoluntaryRequest(
-        address counterparty,
-        bytes32 evidenceHash
-    ) external payable;
+    function initiateVoluntaryRequest(address counterparty, bytes32 evidenceHash) external payable;
 
     /**
      * @notice Counterparty deposits matching stake within stake window
@@ -156,11 +120,7 @@ interface IILRM {
      * @param proposal JSON-encoded reconciliation proposal
      * @param signature Oracle signature for verification
      */
-    function submitLLMProposal(
-        uint256 disputeId,
-        string calldata proposal,
-        bytes calldata signature
-    ) external;
+    function submitLLMProposal(uint256 disputeId, string calldata proposal, bytes calldata signature) external;
 
     /**
      * @notice Accept the current LLM proposal
@@ -175,10 +135,7 @@ interface IILRM {
      * @param disputeId The dispute to counter
      * @param newEvidenceHash Updated evidence bundle hash
      */
-    function counterPropose(
-        uint256 disputeId,
-        bytes32 newEvidenceHash
-    ) external payable;
+    function counterPropose(uint256 disputeId, bytes32 newEvidenceHash) external payable;
 
     /**
      * @notice Enforce timeout resolution after T_resolution expires
@@ -207,5 +164,4 @@ interface IILRM {
      * @return Total number of disputes created
      */
     function getDisputeCount() external view returns (uint256);
-
 }

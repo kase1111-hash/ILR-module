@@ -95,11 +95,7 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable2S
      * @dev FIX H-05: Only the owner can register assets for themselves
      *      This prevents attackers from registering fake assets under victim's address
      */
-    function registerAsset(
-        bytes32 assetId,
-        address owner,
-        bytes32 licenseTermsHash
-    ) external override nonReentrant {
+    function registerAsset(bytes32 assetId, address owner, bytes32 licenseTermsHash) external override nonReentrant {
         if (owner == address(0)) revert InvalidAddress();
         // FIX H-05: Only owner can register their own assets
         // Prevents attack where attacker registers fake assets under victim's address
@@ -131,10 +127,12 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable2S
      * @param assetId The asset to transfer
      * @param newOwner New owner address
      */
-    function transferAsset(
-        bytes32 assetId,
-        address newOwner
-    ) external assetExists(assetId) assetNotFrozen(assetId) nonReentrant {
+    function transferAsset(bytes32 assetId, address newOwner)
+        external
+        assetExists(assetId)
+        assetNotFrozen(assetId)
+        nonReentrant
+    {
         Asset storage asset = _assets[assetId];
         if (msg.sender != asset.owner) revert NotAssetOwner(msg.sender, asset.owner);
         if (newOwner == address(0)) revert InvalidAddress();
@@ -205,10 +203,7 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable2S
     /**
      * @inheritdoc IAssetRegistry
      */
-    function revokeLicense(
-        bytes32 assetId,
-        address licensee
-    ) external override assetExists(assetId) nonReentrant {
+    function revokeLicense(bytes32 assetId, address licensee) external override assetExists(assetId) nonReentrant {
         Asset storage asset = _assets[assetId];
         if (msg.sender != asset.owner && !_authorizedILRM[msg.sender]) {
             revert NotAssetOwner(msg.sender, asset.owner);
@@ -230,10 +225,7 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable2S
     /**
      * @inheritdoc IAssetRegistry
      */
-    function freezeAssets(
-        uint256 disputeId,
-        address party
-    ) external override onlyAuthorizedILRM nonReentrant {
+    function freezeAssets(uint256 disputeId, address party) external override onlyAuthorizedILRM nonReentrant {
         bytes32[] storage partyAssets = _ownerAssets[party];
         bytes32[] storage frozen = _disputeFrozenAssets[disputeId];
 
@@ -255,10 +247,12 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable2S
     /**
      * @inheritdoc IAssetRegistry
      */
-    function unfreezeAssets(
-        uint256 disputeId,
-        bytes calldata outcome
-    ) external override onlyAuthorizedILRM nonReentrant {
+    function unfreezeAssets(uint256 disputeId, bytes calldata outcome)
+        external
+        override
+        onlyAuthorizedILRM
+        nonReentrant
+    {
         bytes32[] storage frozen = _disputeFrozenAssets[disputeId];
 
         // Must not revert when nothing was frozen (initiator had no active assets, or they were
@@ -284,10 +278,12 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable2S
     /**
      * @inheritdoc IAssetRegistry
      */
-    function applyFallbackLicense(
-        uint256 disputeId,
-        bytes32 fallbackTermsHash
-    ) external override onlyAuthorizedILRM nonReentrant {
+    function applyFallbackLicense(uint256 disputeId, bytes32 fallbackTermsHash)
+        external
+        override
+        onlyAuthorizedILRM
+        nonReentrant
+    {
         bytes32[] storage frozen = _disputeFrozenAssets[disputeId];
 
         for (uint256 i = 0; i < frozen.length; i++) {
@@ -314,10 +310,7 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable2S
     /**
      * @inheritdoc IAssetRegistry
      */
-    function getLicense(
-        bytes32 assetId,
-        address licensee
-    ) external view override returns (LicenseGrant memory) {
+    function getLicense(bytes32 assetId, address licensee) external view override returns (LicenseGrant memory) {
         return _licenses[assetId][licensee];
     }
 
@@ -360,10 +353,7 @@ contract NatLangChainAssetRegistry is IAssetRegistry, ReentrancyGuard, Ownable2S
      * @param licensee The licensee address to check
      * @return valid True if license is active and not expired, false otherwise
      */
-    function isLicenseValid(
-        bytes32 assetId,
-        address licensee
-    ) external view returns (bool valid) {
+    function isLicenseValid(bytes32 assetId, address licensee) external view returns (bool valid) {
         LicenseGrant storage grant = _licenses[assetId][licensee];
         return grant.active && block.timestamp < grant.expiresAt;
     }

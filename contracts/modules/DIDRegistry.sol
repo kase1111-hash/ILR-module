@@ -113,7 +113,7 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
             updated: block.timestamp,
             status: DIDStatus.Active,
             documentHash: documentHash,
-            sybilScore: 0  // Starts at 0, increases with credentials
+            sybilScore: 0 // Starts at 0, increases with credentials
         });
 
         // Map address to DID
@@ -223,7 +223,12 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
     /**
      * @inheritdoc IDIDRegistry
      */
-    function addDelegate(bytes32 did, address delegate, uint256 expiresAt) external override nonReentrant whenNotPaused {
+    function addDelegate(bytes32 did, address delegate, uint256 expiresAt)
+        external
+        override
+        nonReentrant
+        whenNotPaused
+    {
         _requireController(did);
         _requireActiveDID(did);
 
@@ -308,14 +313,9 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
 
         // Generate credential ID
         _credentialCounter++;
-        credentialId = keccak256(abi.encodePacked(
-            did,
-            msg.sender,
-            attestationType,
-            claimHash,
-            block.timestamp,
-            _credentialCounter
-        ));
+        credentialId = keccak256(
+            abi.encodePacked(did, msg.sender, attestationType, claimHash, block.timestamp, _credentialCounter)
+        );
 
         // Store credential
         _credentials[credentialId] = Credential({
@@ -376,8 +376,7 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
             Credential storage cred = _credentials[credIds[i]];
 
             // Check if credential should be removed (revoked or expired)
-            bool shouldRemove = cred.revoked ||
-                (cred.expiresAt != 0 && block.timestamp > cred.expiresAt);
+            bool shouldRemove = cred.revoked || (cred.expiresAt != 0 && block.timestamp > cred.expiresAt);
 
             if (shouldRemove) {
                 // Swap with last element and pop
@@ -523,11 +522,7 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
         require(allowedTypes.length <= MAX_ATTESTATION_TYPES, "Too many attestation types");
 
         _trustedIssuers[issuer] = TrustedIssuer({
-            issuerAddress: issuer,
-            name: name,
-            allowedTypes: allowedTypes,
-            trustLevel: trustLevel,
-            active: true
+            issuerAddress: issuer, name: name, allowedTypes: allowedTypes, trustLevel: trustLevel, active: true
         });
 
         // Add to list if not already present
@@ -559,11 +554,11 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
     /**
      * @inheritdoc IDIDRegistry
      */
-    function updateTrustedIssuer(
-        address issuer,
-        AttestationType[] calldata allowedTypes,
-        uint256 trustLevel
-    ) external override onlyOwner {
+    function updateTrustedIssuer(address issuer, AttestationType[] calldata allowedTypes, uint256 trustLevel)
+        external
+        override
+        onlyOwner
+    {
         if (!_trustedIssuers[issuer].active) revert NotTrustedIssuer(issuer);
         if (trustLevel > 100) trustLevel = 100;
         // FIX L-02: Limit attestation types to prevent unbounded loops

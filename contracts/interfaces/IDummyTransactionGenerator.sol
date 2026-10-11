@@ -27,34 +27,34 @@ interface IDummyTransactionGenerator {
 
     /// @notice Types of dummy transactions that can be generated
     enum DummyTxType {
-        VoluntaryRequest,     // Empty voluntary reconciliation request
-        BatchQueueEntry,      // Dummy entry in batch queue
-        ViewingKeyCommit,     // Dummy viewing key commitment
-        ZKProofSubmit,        // Dummy ZK proof submission
-        StakeDeposit          // Dummy stake (immediately refunded)
+        VoluntaryRequest, // Empty voluntary reconciliation request
+        BatchQueueEntry, // Dummy entry in batch queue
+        ViewingKeyCommit, // Dummy viewing key commitment
+        ZKProofSubmit, // Dummy ZK proof submission
+        StakeDeposit // Dummy stake (immediately refunded)
     }
 
     // ============ Structs ============
 
     /// @notice Configuration for dummy generation
     struct GeneratorConfig {
-        uint256 minInterval;          // Minimum time between generations (seconds)
-        uint256 maxInterval;          // Maximum time between generations (seconds)
-        uint256 probabilityBps;       // Probability per check in basis points (e.g., 5000 = 50%)
-        uint256 maxPerPeriod;         // Maximum dummy txs per period
-        uint256 periodDuration;       // Period duration in seconds
-        uint256 maxTreasurySpend;     // Maximum treasury spend per period
-        bool enabled;                 // Whether generation is enabled
+        uint256 minInterval; // Minimum time between generations (seconds)
+        uint256 maxInterval; // Maximum time between generations (seconds)
+        uint256 probabilityBps; // Probability per check in basis points (e.g., 5000 = 50%)
+        uint256 maxPerPeriod; // Maximum dummy txs per period
+        uint256 periodDuration; // Period duration in seconds
+        uint256 maxTreasurySpend; // Maximum treasury spend per period
+        bool enabled; // Whether generation is enabled
     }
 
     /// @notice Statistics for dummy generation
     struct GeneratorStats {
-        uint256 totalGenerated;       // Total dummy txs ever generated
-        uint256 periodGenerated;      // Dummy txs in current period
-        uint256 periodSpent;          // Treasury spent in current period
-        uint256 lastGenerationTime;   // Last generation timestamp
-        uint256 periodStartTime;      // Current period start
-        uint256 consecutiveSkips;     // Consecutive probability misses
+        uint256 totalGenerated; // Total dummy txs ever generated
+        uint256 periodGenerated; // Dummy txs in current period
+        uint256 periodSpent; // Treasury spent in current period
+        uint256 lastGenerationTime; // Last generation timestamp
+        uint256 periodStartTime; // Current period start
+        uint256 consecutiveSkips; // Consecutive probability misses
     }
 
     /// @notice A registered dummy address
@@ -69,48 +69,26 @@ interface IDummyTransactionGenerator {
 
     /// @notice Emitted when a dummy transaction is generated
     event DummyTransactionGenerated(
-        uint256 indexed txIndex,
-        DummyTxType txType,
-        address indexed dummyAddress,
-        bytes32 dataHash
+        uint256 indexed txIndex, DummyTxType txType, address indexed dummyAddress, bytes32 dataHash
     );
 
     /// @notice Emitted when generation is triggered but skipped (probability)
-    event GenerationSkipped(
-        uint256 randomValue,
-        uint256 threshold
-    );
+    event GenerationSkipped(uint256 randomValue, uint256 threshold);
 
     /// @notice Emitted when a dummy address is registered
-    event DummyAddressRegistered(
-        address indexed dummyAddress,
-        uint256 index
-    );
+    event DummyAddressRegistered(address indexed dummyAddress, uint256 index);
 
     /// @notice Emitted when a dummy address is deactivated
-    event DummyAddressDeactivated(
-        address indexed dummyAddress
-    );
+    event DummyAddressDeactivated(address indexed dummyAddress);
 
     /// @notice Emitted when configuration is updated
-    event ConfigUpdated(
-        uint256 minInterval,
-        uint256 maxInterval,
-        uint256 probabilityBps
-    );
+    event ConfigUpdated(uint256 minInterval, uint256 maxInterval, uint256 probabilityBps);
 
     /// @notice Emitted when treasury funds are deposited
-    event TreasuryFunded(
-        address indexed funder,
-        uint256 amount
-    );
+    event TreasuryFunded(address indexed funder, uint256 amount);
 
     /// @notice Emitted when a new period starts
-    event PeriodReset(
-        uint256 periodStart,
-        uint256 previousGenerated,
-        uint256 previousSpent
-    );
+    event PeriodReset(uint256 periodStart, uint256 previousGenerated, uint256 previousSpent);
 
     // ============ Generation Functions ============
 
@@ -145,10 +123,7 @@ interface IDummyTransactionGenerator {
      * @return upkeepNeeded True if generation should be attempted
      * @return performData Encoded generation parameters
      */
-    function checkUpkeep(bytes calldata) external view returns (
-        bool upkeepNeeded,
-        bytes memory performData
-    );
+    function checkUpkeep(bytes calldata) external view returns (bool upkeepNeeded, bytes memory performData);
 
     /**
      * @notice Chainlink Automation perform function

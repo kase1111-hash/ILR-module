@@ -17,19 +17,19 @@ interface IMultiPartyILRM {
 
     /// @notice Possible outcomes for a multi-party dispute
     enum MultiPartyOutcome {
-        Pending,              // Dispute in progress
-        QuorumAccepted,       // Quorum of parties accepted proposal
-        TimeoutWithBurn,      // Timeout reached, stakes proportionally burned
-        Cancelled,            // Dispute cancelled (all parties agree)
-        PartialResolution     // Some parties resolved, others in fallback
+        Pending, // Dispute in progress
+        QuorumAccepted, // Quorum of parties accepted proposal
+        TimeoutWithBurn, // Timeout reached, stakes proportionally burned
+        Cancelled, // Dispute cancelled (all parties agree)
+        PartialResolution // Some parties resolved, others in fallback
     }
 
     /// @notice Quorum type for acceptance
     enum QuorumType {
-        Unanimous,            // All parties must accept (default)
-        SuperMajority,        // 2/3 of parties (67%)
-        SimpleMajority,       // More than half (51%)
-        Custom                // Custom threshold set at creation
+        Unanimous, // All parties must accept (default)
+        SuperMajority, // 2/3 of parties (67%)
+        SimpleMajority, // More than half (51%)
+        Custom // Custom threshold set at creation
     }
 
     // ============ Structs ============
@@ -49,19 +49,19 @@ interface IMultiPartyILRM {
         bool hasStaked;
         bool hasAccepted;
         bool hasRejected;
-        bytes32 evidenceHash;     // Optional per-party evidence
+        bytes32 evidenceHash; // Optional per-party evidence
         uint256 joinedAt;
     }
 
     /// @notice Multi-party dispute configuration
     struct DisputeConfig {
         QuorumType quorumType;
-        uint256 customQuorumBps;  // Custom quorum in basis points (e.g., 7500 = 75%)
-        uint256 minParties;       // Minimum parties required to proceed
-        uint256 maxParties;       // Maximum allowed parties
-        uint256 stakeWindow;      // Time for parties to stake
-        uint256 resolutionTimeout;// Time to reach resolution
-        bool allowLateJoin;       // Can parties join after initiation?
+        uint256 customQuorumBps; // Custom quorum in basis points (e.g., 7500 = 75%)
+        uint256 minParties; // Minimum parties required to proceed
+        uint256 maxParties; // Maximum allowed parties
+        uint256 stakeWindow; // Time for parties to stake
+        uint256 resolutionTimeout; // Time to reach resolution
+        bool allowLateJoin; // Can parties join after initiation?
     }
 
     /// @notice Full multi-party dispute state
@@ -71,7 +71,7 @@ interface IMultiPartyILRM {
         uint256 baseStake;
         uint256 totalStaked;
         uint256 startTime;
-        bytes32 evidenceHash;     // Aggregated evidence hash
+        bytes32 evidenceHash; // Aggregated evidence hash
         string llmProposal;
         uint256 acceptanceCount;
         uint256 rejectionCount;
@@ -86,61 +86,31 @@ interface IMultiPartyILRM {
 
     /// @notice Emitted when multi-party dispute is created
     event MultiPartyDisputeCreated(
-        uint256 indexed disputeId,
-        address indexed initiator,
-        uint256 partyCount,
-        QuorumType quorumType
+        uint256 indexed disputeId, address indexed initiator, uint256 partyCount, QuorumType quorumType
     );
 
     /// @notice Emitted when a party joins the dispute
-    event PartyJoined(
-        uint256 indexed disputeId,
-        address indexed party,
-        uint256 partyIndex
-    );
+    event PartyJoined(uint256 indexed disputeId, address indexed party, uint256 partyIndex);
 
     /// @notice Emitted when a party stakes
-    event PartyStaked(
-        uint256 indexed disputeId,
-        address indexed party,
-        uint256 amount
-    );
+    event PartyStaked(uint256 indexed disputeId, address indexed party, uint256 amount);
 
     /// @notice Emitted when a party accepts
     event PartyAccepted(
-        uint256 indexed disputeId,
-        address indexed party,
-        uint256 acceptanceCount,
-        uint256 requiredForQuorum
+        uint256 indexed disputeId, address indexed party, uint256 acceptanceCount, uint256 requiredForQuorum
     );
 
     /// @notice Emitted when a party rejects
-    event PartyRejected(
-        uint256 indexed disputeId,
-        address indexed party,
-        uint256 rejectionCount
-    );
+    event PartyRejected(uint256 indexed disputeId, address indexed party, uint256 rejectionCount);
 
     /// @notice Emitted when quorum is reached
-    event QuorumReached(
-        uint256 indexed disputeId,
-        uint256 acceptanceCount,
-        uint256 totalParties
-    );
+    event QuorumReached(uint256 indexed disputeId, uint256 acceptanceCount, uint256 totalParties);
 
     /// @notice Emitted when dispute is resolved
-    event MultiPartyResolved(
-        uint256 indexed disputeId,
-        MultiPartyOutcome outcome,
-        uint256 burnAmount
-    );
+    event MultiPartyResolved(uint256 indexed disputeId, MultiPartyOutcome outcome, uint256 burnAmount);
 
     /// @notice Emitted when evidence is aggregated
-    event EvidenceAggregated(
-        uint256 indexed disputeId,
-        address indexed party,
-        bytes32 newAggregateHash
-    );
+    event EvidenceAggregated(uint256 indexed disputeId, address indexed party, bytes32 newAggregateHash);
 
     // ============ Core Functions ============
 
@@ -236,11 +206,7 @@ interface IMultiPartyILRM {
      * @return current Current acceptance count
      * @return required Required for quorum
      */
-    function checkQuorum(uint256 disputeId) external view returns (
-        bool reached,
-        uint256 current,
-        uint256 required
-    );
+    function checkQuorum(uint256 disputeId) external view returns (bool reached, uint256 current, uint256 required);
 
     /**
      * @notice Get required acceptances for quorum

@@ -107,7 +107,6 @@ import "forge-std/console.sol";
  */
 
 contract NoDeadEndsVerification is Test {
-
     function test_ILRM_NoDeadEnds() public {
         console.log("\n=== ILRM State Machine Verification ===\n");
         console.log("States: 11 (4 terminal)");

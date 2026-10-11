@@ -93,11 +93,7 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
      * @param _token Staking token
      * @param initialConfig Initial batch configuration
      */
-    constructor(
-        address _ilrm,
-        IERC20 _token,
-        BatchConfig memory initialConfig
-    ) Ownable(msg.sender) {
+    constructor(address _ilrm, IERC20 _token, BatchConfig memory initialConfig) Ownable(msg.sender) {
         require(_ilrm != address(0), "Invalid ILRM");
         require(address(_token) != address(0), "Invalid token");
 
@@ -127,12 +123,7 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
         token.safeTransferFrom(msg.sender, address(this), stakeAmount);
 
         // Encode transaction data
-        bytes memory data = abi.encode(
-            counterparty,
-            stakeAmount,
-            evidenceHash,
-            fallbackData
-        );
+        bytes memory data = abi.encode(counterparty, stakeAmount, evidenceHash, fallbackData);
 
         txId = _queueTx(TxType.DisputeInitiation, data, 0);
         _escrowedTokens[txId] = stakeAmount;
@@ -141,9 +132,7 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
     /**
      * @inheritdoc IBatchQueue
      */
-    function queueStakeDeposit(
-        uint256 disputeId
-    ) external override nonReentrant whenNotPaused returns (uint256 txId) {
+    function queueStakeDeposit(uint256 disputeId) external override nonReentrant whenNotPaused returns (uint256 txId) {
         // Note: User must have approved tokens; actual transfer happens at execution
         bytes memory data = abi.encode(disputeId, msg.sender);
         txId = _queueTx(TxType.StakeDeposit, data, 0);
@@ -152,9 +141,7 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
     /**
      * @inheritdoc IBatchQueue
      */
-    function queueAcceptance(
-        uint256 disputeId
-    ) external override nonReentrant whenNotPaused returns (uint256 txId) {
+    function queueAcceptance(uint256 disputeId) external override nonReentrant whenNotPaused returns (uint256 txId) {
         bytes memory data = abi.encode(disputeId, msg.sender);
         txId = _queueTx(TxType.ProposalAcceptance, data, 0);
     }
@@ -162,10 +149,13 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
     /**
      * @inheritdoc IBatchQueue
      */
-    function queueZKProof(
-        uint256 disputeId,
-        bytes calldata proofData
-    ) external override nonReentrant whenNotPaused returns (uint256 txId) {
+    function queueZKProof(uint256 disputeId, bytes calldata proofData)
+        external
+        override
+        nonReentrant
+        whenNotPaused
+        returns (uint256 txId)
+    {
         bytes memory data = abi.encode(disputeId, msg.sender, proofData);
         txId = _queueTx(TxType.ZKProofSubmission, data, 0);
     }
@@ -173,10 +163,14 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
     /**
      * @inheritdoc IBatchQueue
      */
-    function queueTransaction(
-        TxType txType,
-        bytes calldata data
-    ) external payable override nonReentrant whenNotPaused returns (uint256 txId) {
+    function queueTransaction(TxType txType, bytes calldata data)
+        external
+        payable
+        override
+        nonReentrant
+        whenNotPaused
+        returns (uint256 txId)
+    {
         txId = _queueTx(txType, data, msg.value);
         if (msg.value > 0) {
             _escrowedEth[txId] = msg.value;
@@ -226,10 +220,7 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
     /**
      * @inheritdoc IBatchQueue
      */
-    function releaseBatch() external override nonReentrant whenNotPaused returns (
-        uint256 batchId,
-        uint256 txCount
-    ) {
+    function releaseBatch() external override nonReentrant whenNotPaused returns (uint256 batchId, uint256 txCount) {
         (bool canRelease, uint256 pendingCount) = canReleaseBatch();
         require(canRelease, "Cannot release yet");
 
@@ -244,9 +235,7 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
         uint256 collected = 0;
 
         // Bound loop iterations to prevent DOS from large pending queue
-        uint256 maxIterations = _pendingQueue.length > MAX_LOOP_ITERATIONS
-            ? MAX_LOOP_ITERATIONS
-            : _pendingQueue.length;
+        uint256 maxIterations = _pendingQueue.length > MAX_LOOP_ITERATIONS ? MAX_LOOP_ITERATIONS : _pendingQueue.length;
 
         for (uint256 i = 0; i < maxIterations && collected < txCount; ++i) {
             uint256 txId = _pendingQueue[i];
@@ -301,10 +290,12 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
     /**
      * @inheritdoc IBatchQueue
      */
-    function executeBatch(uint256 batchId) external override nonReentrant returns (
-        uint256 successCount,
-        uint256 failCount
-    ) {
+    function executeBatch(uint256 batchId)
+        external
+        override
+        nonReentrant
+        returns (uint256 successCount, uint256 failCount)
+    {
         Batch storage batch = _batches[batchId];
         require(batch.txCount > 0, "Invalid batch");
         require(!batch.executed, "Already executed");
@@ -337,11 +328,8 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
     /**
      * @inheritdoc IBatchQueue
      */
-    function checkUpkeep(bytes calldata) external view override returns (
-        bool upkeepNeeded,
-        bytes memory performData
-    ) {
-        (upkeepNeeded, ) = canReleaseBatch();
+    function checkUpkeep(bytes calldata) external view override returns (bool upkeepNeeded, bytes memory performData) {
+        (upkeepNeeded,) = canReleaseBatch();
         performData = "";
     }
 
@@ -457,17 +445,13 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
      * @param amount Amount to withdraw
      * @param isToken True for token, false for ETH
      */
-    function emergencyWithdraw(
-        address to,
-        uint256 amount,
-        bool isToken
-    ) external onlyOwner {
+    function emergencyWithdraw(address to, uint256 amount, bool isToken) external onlyOwner {
         require(to != address(0), "Invalid recipient");
 
         if (isToken) {
             token.safeTransfer(to, amount);
         } else {
-            (bool success, ) = to.call{value: amount}("");
+            (bool success,) = to.call{value: amount}("");
             require(success, "ETH transfer failed");
         }
     }
@@ -477,20 +461,10 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
     /**
      * @dev Queue a transaction
      */
-    function _queueTx(
-        TxType txType,
-        bytes memory data,
-        uint256 value
-    ) internal returns (uint256 txId) {
+    function _queueTx(TxType txType, bytes memory data, uint256 value) internal returns (uint256 txId) {
         txId = _txCounter++;
 
-        bytes32 commitmentHash = keccak256(abi.encodePacked(
-            txId,
-            msg.sender,
-            txType,
-            data,
-            block.timestamp
-        ));
+        bytes32 commitmentHash = keccak256(abi.encodePacked(txId, msg.sender, txType, data, block.timestamp));
 
         _transactions[txId] = QueuedTx({
             id: txId,
@@ -531,18 +505,14 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
      * @dev Execute dispute initiation
      */
     function _executeDisputeInitiation(QueuedTx storage tx_) internal returns (bool) {
-        (
-            address counterparty,
-            uint256 stakeAmount,
-            bytes32 evidenceHash,
-            bytes memory fallbackData
-        ) = abi.decode(tx_.data, (address, uint256, bytes32, bytes));
+        (address counterparty, uint256 stakeAmount, bytes32 evidenceHash, bytes memory fallbackData) =
+            abi.decode(tx_.data, (address, uint256, bytes32, bytes));
 
         // Approve tokens to ILRM
         token.approve(ilrm, stakeAmount);
 
         // Call ILRM (simplified - actual implementation would use interface)
-        (bool success, ) = ilrm.call(
+        (bool success,) = ilrm.call(
             abi.encodeWithSignature(
                 "initiateBreachDisputeFor(address,address,uint256,bytes32,bytes)",
                 tx_.submitter,
@@ -562,13 +532,7 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
     function _executeStakeDeposit(QueuedTx storage tx_) internal returns (bool) {
         (uint256 disputeId, address depositor) = abi.decode(tx_.data, (uint256, address));
 
-        (bool success, ) = ilrm.call(
-            abi.encodeWithSignature(
-                "depositStakeFor(uint256,address)",
-                disputeId,
-                depositor
-            )
-        );
+        (bool success,) = ilrm.call(abi.encodeWithSignature("depositStakeFor(uint256,address)", disputeId, depositor));
 
         return success;
     }
@@ -579,13 +543,7 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
     function _executeAcceptance(QueuedTx storage tx_) internal returns (bool) {
         (uint256 disputeId, address acceptor) = abi.decode(tx_.data, (uint256, address));
 
-        (bool success, ) = ilrm.call(
-            abi.encodeWithSignature(
-                "acceptProposalFor(uint256,address)",
-                disputeId,
-                acceptor
-            )
-        );
+        (bool success,) = ilrm.call(abi.encodeWithSignature("acceptProposalFor(uint256,address)", disputeId, acceptor));
 
         return success;
     }
@@ -605,7 +563,7 @@ contract BatchQueue is IBatchQueue, Ownable2Step, ReentrancyGuard, Pausable {
         uint256 ethAmount = _escrowedEth[txId];
         if (ethAmount > 0) {
             _escrowedEth[txId] = 0;
-            (bool success, ) = tx_.submitter.call{value: ethAmount}("");
+            (bool success,) = tx_.submitter.call{value: ethAmount}("");
             require(success, "ETH refund failed");
         }
     }

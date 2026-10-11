@@ -55,28 +55,13 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
 
     // ============ Events ============
 
-    event DisputeQueued(
-        uint256 indexed l2DisputeId,
-        address indexed initiator,
-        uint256 batchPosition
-    );
+    event DisputeQueued(uint256 indexed l2DisputeId, address indexed initiator, uint256 batchPosition);
 
-    event SettlementQueued(
-        uint256 indexed l2DisputeId,
-        uint256 indexed l3DisputeId,
-        uint256 batchPosition
-    );
+    event SettlementQueued(uint256 indexed l2DisputeId, uint256 indexed l3DisputeId, uint256 batchPosition);
 
-    event BatchSubmitted(
-        uint256 indexed batchId,
-        uint256 disputeCount,
-        bytes32 batchHash
-    );
+    event BatchSubmitted(uint256 indexed batchId, uint256 disputeCount, bytes32 batchHash);
 
-    event SettlementBatchProcessed(
-        uint256 indexed batchId,
-        uint256 settlementCount
-    );
+    event SettlementBatchProcessed(uint256 indexed batchId, uint256 settlementCount);
 
     event SubmitterAuthorized(address indexed submitter, bool authorized);
 
@@ -119,9 +104,12 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
      * @param message The dispute initiation data
      * @return position Position in current batch
      */
-    function queueDisputeInitiation(
-        IL3Bridge.DisputeInitiationMessage calldata message
-    ) external onlyAuthorizedSubmitter nonReentrant returns (uint256 position) {
+    function queueDisputeInitiation(IL3Bridge.DisputeInitiationMessage calldata message)
+        external
+        onlyAuthorizedSubmitter
+        nonReentrant
+        returns (uint256 position)
+    {
         // Check batch capacity
         if (_pendingInitiations.length >= MAX_BATCH_SIZE) {
             revert BatchFull();
@@ -149,9 +137,12 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
      * @param message The settlement data
      * @return position Position in current batch
      */
-    function queueSettlement(
-        IL3Bridge.DisputeSettlementMessage calldata message
-    ) external onlyAuthorizedSubmitter nonReentrant returns (uint256 position) {
+    function queueSettlement(IL3Bridge.DisputeSettlementMessage calldata message)
+        external
+        onlyAuthorizedSubmitter
+        nonReentrant
+        returns (uint256 position)
+    {
         // Check batch capacity
         if (_pendingSettlements.length >= MAX_BATCH_SIZE) {
             revert BatchFull();
@@ -171,10 +162,12 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
      * @return batchId The batch identifier
      * @return count Number of disputes bridged
      */
-    function submitInitiationBatch() external onlyAuthorizedSubmitter nonReentrant returns (
-        uint256 batchId,
-        uint256 count
-    ) {
+    function submitInitiationBatch()
+        external
+        onlyAuthorizedSubmitter
+        nonReentrant
+        returns (uint256 batchId, uint256 count)
+    {
         return _submitInitiationBatch();
     }
 
@@ -289,9 +282,7 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
      * @param index The index
      * @return The initiation message
      */
-    function getPendingInitiation(uint256 index) external view returns (
-        IL3Bridge.DisputeInitiationMessage memory
-    ) {
+    function getPendingInitiation(uint256 index) external view returns (IL3Bridge.DisputeInitiationMessage memory) {
         require(index < _pendingInitiations.length, "Index out of bounds");
         return _pendingInitiations[index];
     }
@@ -301,9 +292,7 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
      * @param index The index
      * @return The settlement message
      */
-    function getPendingSettlement(uint256 index) external view returns (
-        IL3Bridge.DisputeSettlementMessage memory
-    ) {
+    function getPendingSettlement(uint256 index) external view returns (IL3Bridge.DisputeSettlementMessage memory) {
         require(index < _pendingSettlements.length, "Index out of bounds");
         return _pendingSettlements[index];
     }

@@ -74,35 +74,19 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
     // ============ Events ============
 
     /// @notice Emitted when subsidy is granted
-    event SubsidyFunded(
-        address indexed participant,
-        uint256 indexed disputeId,
-        uint256 amount
-    );
+    event SubsidyFunded(address indexed participant, uint256 indexed disputeId, uint256 amount);
 
     /// @notice Emitted when treasury receives funds
-    event TreasuryReceived(
-        address indexed from,
-        uint256 amount,
-        string reason
-    );
+    event TreasuryReceived(address indexed from, uint256 amount, string reason);
 
     /// @notice Emitted when harassment score is updated
-    event HarassmentScoreUpdated(
-        address indexed participant,
-        uint256 oldScore,
-        uint256 newScore
-    );
+    event HarassmentScoreUpdated(address indexed participant, uint256 oldScore, uint256 newScore);
 
     /// @notice Emitted when ILRM address is updated
     event ILRMUpdated(address indexed oldILRM, address indexed newILRM);
 
     /// @notice Emitted when caps are updated
-    event CapsUpdated(
-        uint256 maxPerDispute,
-        uint256 maxPerParticipant,
-        uint256 windowDuration
-    );
+    event CapsUpdated(uint256 maxPerDispute, uint256 maxPerParticipant, uint256 windowDuration);
 
     // ============ Errors ============
 
@@ -127,12 +111,9 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
      * @param _maxPerParticipant Maximum subsidy per participant in window
      * @param _windowDuration Rolling window duration in seconds
      */
-    constructor(
-        IERC20 _token,
-        uint256 _maxPerDispute,
-        uint256 _maxPerParticipant,
-        uint256 _windowDuration
-    ) Ownable(msg.sender) {
+    constructor(IERC20 _token, uint256 _maxPerDispute, uint256 _maxPerParticipant, uint256 _windowDuration)
+        Ownable(msg.sender)
+    {
         if (address(_token) == address(0)) revert InvalidAddress();
 
         token = _token;
@@ -194,11 +175,12 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
      * @param stakeNeeded Amount of stake required
      * @param participant The participant requesting subsidy (must be counterparty)
      */
-    function requestSubsidy(
-        uint256 disputeId,
-        uint256 stakeNeeded,
-        address participant
-    ) external nonReentrant whenNotPaused returns (uint256 subsidyAmount) {
+    function requestSubsidy(uint256 disputeId, uint256 stakeNeeded, address participant)
+        external
+        nonReentrant
+        whenNotPaused
+        returns (uint256 subsidyAmount)
+    {
         // Only the participant themselves can request their subsidy
         if (msg.sender != participant) {
             revert NotCounterparty(msg.sender, participant);
@@ -261,9 +243,7 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
 
         // Cap by treasury balance (minus reserve)
         uint256 treasuryBalance = token.balanceOf(address(this));
-        uint256 availableBalance = treasuryBalance > minReserve
-            ? treasuryBalance - minReserve
-            : 0;
+        uint256 availableBalance = treasuryBalance > minReserve ? treasuryBalance - minReserve : 0;
         if (subsidyAmount > availableBalance) {
             subsidyAmount = availableBalance;
         }
@@ -292,11 +272,11 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
      * @return subsidyAmount Potential subsidy amount
      * @return eligible Whether participant is eligible
      */
-    function calculateSubsidy(
-        uint256 disputeId,
-        uint256 stakeNeeded,
-        address participant
-    ) external view returns (uint256 subsidyAmount, bool eligible) {
+    function calculateSubsidy(uint256 disputeId, uint256 stakeNeeded, address participant)
+        external
+        view
+        returns (uint256 subsidyAmount, bool eligible)
+    {
         // Check basic eligibility
         if (disputeSubsidized[disputeId]) return (0, false);
         if (stakeNeeded == 0) return (0, false);
@@ -314,18 +294,14 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
         if (block.timestamp > participantWindowStart[participant] + windowDuration) {
             usedInWindow = 0; // Window expired, would reset
         }
-        uint256 participantAvailable = maxPerParticipant > usedInWindow
-            ? maxPerParticipant - usedInWindow
-            : 0;
+        uint256 participantAvailable = maxPerParticipant > usedInWindow ? maxPerParticipant - usedInWindow : 0;
         if (subsidyAmount > participantAvailable) {
             subsidyAmount = participantAvailable;
         }
 
         // Check treasury balance
         uint256 treasuryBalance = token.balanceOf(address(this));
-        uint256 availableBalance = treasuryBalance > minReserve
-            ? treasuryBalance - minReserve
-            : 0;
+        uint256 availableBalance = treasuryBalance > minReserve ? treasuryBalance - minReserve : 0;
         if (subsidyAmount > availableBalance) {
             subsidyAmount = availableBalance;
         }
@@ -341,10 +317,7 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
      * @param participant The participant to update
      * @param scoreDelta Change in score (positive = worse behavior)
      */
-    function updateHarassmentScore(
-        address participant,
-        int256 scoreDelta
-    ) external onlyILRM {
+    function updateHarassmentScore(address participant, int256 scoreDelta) external onlyILRM {
         // Reasonable bound: delta should be between -100 and +100
         if (scoreDelta < -100 || scoreDelta > 100) revert ScoreDeltaOutOfBounds(scoreDelta);
 
@@ -395,11 +368,10 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
      * @param _maxPerParticipant New per-participant cap
      * @param _windowDuration New window duration
      */
-    function updateCaps(
-        uint256 _maxPerDispute,
-        uint256 _maxPerParticipant,
-        uint256 _windowDuration
-    ) external onlyOwner {
+    function updateCaps(uint256 _maxPerDispute, uint256 _maxPerParticipant, uint256 _windowDuration)
+        external
+        onlyOwner
+    {
         maxPerDispute = _maxPerDispute;
         maxPerParticipant = _maxPerParticipant;
         windowDuration = _windowDuration;
@@ -432,7 +404,7 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
      */
     function emergencyWithdrawETH(address to, uint256 amount) external onlyOwner nonReentrant {
         if (to == address(0)) revert InvalidAddress();
-        (bool success, ) = to.call{value: amount}("");
+        (bool success,) = to.call{value: amount}("");
         if (!success) revert ETHTransferFailed();
     }
 

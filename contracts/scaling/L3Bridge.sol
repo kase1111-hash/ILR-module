@@ -55,7 +55,7 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     uint256 public constant MAX_BATCH_SIZE = 100;
 
     /// @notice Basis points denominator
-    uint256 public constant BPS_DENOMINATOR = 10000;
+    uint256 public constant BPS_DENOMINATOR = 10_000;
 
     /// @notice Minimum reveal delay after commitment (prevents same-block front-running)
     /// @dev FIX H-02: MEV protection via commit-reveal scheme
@@ -148,7 +148,7 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
         // Default sequencer config
         sequencerConfig = SequencerConfig({
             sequencerAddress: msg.sender,
-            commitmentInterval: 100,      // Every 100 L3 blocks
+            commitmentInterval: 100, // Every 100 L3 blocks
             challengePeriod: DEFAULT_CHALLENGE_PERIOD,
             minBatchSize: 1,
             maxBatchSize: MAX_BATCH_SIZE
@@ -179,9 +179,14 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     /**
      * @inheritdoc IL3Bridge
      */
-    function bridgeDisputeToL3(
-        DisputeInitiationMessage calldata message
-    ) external override onlyILRM onlyActive nonReentrant returns (uint256 l3DisputeId) {
+    function bridgeDisputeToL3(DisputeInitiationMessage calldata message)
+        external
+        override
+        onlyILRM
+        onlyActive
+        nonReentrant
+        returns (uint256 l3DisputeId)
+    {
         uint256 l2Id = message.l2DisputeId;
 
         // Ensure not already bridged
@@ -208,18 +213,26 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     /**
      * @inheritdoc IL3Bridge
      */
-    function processSettlementFromL3(
-        DisputeSettlementMessage calldata message
-    ) external override onlySequencer onlyActive nonReentrant {
+    function processSettlementFromL3(DisputeSettlementMessage calldata message)
+        external
+        override
+        onlySequencer
+        onlyActive
+        nonReentrant
+    {
         _processSettlement(message);
     }
 
     /**
      * @inheritdoc IL3Bridge
      */
-    function batchProcessSettlements(
-        DisputeSettlementMessage[] calldata messages
-    ) external override onlySequencer onlyActive nonReentrant {
+    function batchProcessSettlements(DisputeSettlementMessage[] calldata messages)
+        external
+        override
+        onlySequencer
+        onlyActive
+        nonReentrant
+    {
         if (messages.length > MAX_BATCH_SIZE) {
             revert BatchSizeExceeded(messages.length, MAX_BATCH_SIZE);
         }
@@ -266,11 +279,7 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
         }
 
         emit DisputeSettledFromL3(
-            l2Id,
-            message.l3DisputeId,
-            message.outcome,
-            message.initiatorReturn,
-            message.counterpartyReturn
+            l2Id, message.l3DisputeId, message.outcome, message.initiatorReturn, message.counterpartyReturn
         );
 
         // Note: Actual stake distribution is handled by ILRM
@@ -282,9 +291,13 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     /**
      * @inheritdoc IL3Bridge
      */
-    function submitStateCommitment(
-        StateCommitment calldata commitment
-    ) external override onlySequencer onlyActive nonReentrant {
+    function submitStateCommitment(StateCommitment calldata commitment)
+        external
+        override
+        onlySequencer
+        onlyActive
+        nonReentrant
+    {
         bytes32 root = commitment.stateRoot;
 
         // Verify not already committed
@@ -296,20 +309,20 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
         // This prevents forks where multiple commitments point to the same previousRoot
         if (latestCommittedRoot != bytes32(0)) {
             // Must chain from the latest committed root
-            require(commitment.previousRoot == latestCommittedRoot, "Invalid chain: must reference latest committed root");
+            require(
+                commitment.previousRoot == latestCommittedRoot, "Invalid chain: must reference latest committed root"
+            );
         } else if (latestFinalizedRoot != bytes32(0)) {
             // If no pending commitments, chain from latest finalized
-            require(commitment.previousRoot == latestFinalizedRoot, "Invalid chain: must reference latest finalized root");
+            require(
+                commitment.previousRoot == latestFinalizedRoot, "Invalid chain: must reference latest finalized root"
+            );
         }
         // else: genesis case - no previous root required
 
         // Verify sequencer signature
-        bytes32 messageHash = keccak256(abi.encodePacked(
-            root,
-            commitment.blockNumber,
-            commitment.disputeCount,
-            commitment.previousRoot
-        ));
+        bytes32 messageHash =
+            keccak256(abi.encodePacked(root, commitment.blockNumber, commitment.disputeCount, commitment.previousRoot));
 
         bytes32 ethSignedHash = messageHash.toEthSignedMessageHash();
         address signer = ethSignedHash.recover(commitment.sequencerSignature);
@@ -324,12 +337,7 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
         // FIX M-03: Track latest committed root for chain integrity
         latestCommittedRoot = root;
 
-        emit StateCommitmentSubmitted(
-            root,
-            commitment.blockNumber,
-            commitment.disputeCount,
-            msg.sender
-        );
+        emit StateCommitmentSubmitted(root, commitment.blockNumber, commitment.disputeCount, msg.sender);
     }
 
     /**
@@ -370,10 +378,7 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     /**
      * @inheritdoc IL3Bridge
      */
-    function getLatestFinalizedState() external view override returns (
-        bytes32 stateRoot,
-        uint256 blockNumber
-    ) {
+    function getLatestFinalizedState() external view override returns (bytes32 stateRoot, uint256 blockNumber) {
         return (latestFinalizedRoot, latestFinalizedBlock);
     }
 
@@ -390,10 +395,13 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
      * @inheritdoc IL3Bridge
      * @dev FIX H-02: Phase 1 of commit-reveal scheme for MEV protection
      */
-    function commitFraudProof(
-        bytes32 commitHash,
-        bytes32 stateRoot
-    ) external payable override nonReentrant whenNotPaused {
+    function commitFraudProof(bytes32 commitHash, bytes32 stateRoot)
+        external
+        payable
+        override
+        nonReentrant
+        whenNotPaused
+    {
         // Verify commit-reveal mode is enabled
         require(commitRevealEnabled, "Commit-reveal disabled");
 
@@ -456,18 +464,11 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
      * @inheritdoc IL3Bridge
      * @dev FIX H-02: Phase 2 of commit-reveal scheme for MEV protection
      */
-    function revealFraudProof(
-        FraudProof calldata proof,
-        bytes32 salt
-    ) external override nonReentrant whenNotPaused {
+    function revealFraudProof(FraudProof calldata proof, bytes32 salt) external override nonReentrant whenNotPaused {
         // Compute commitment hash
-        bytes32 commitHash = keccak256(abi.encodePacked(
-            proof.claimedRoot,
-            proof.correctRoot,
-            proof.disputeId,
-            proof.invalidStateData,
-            salt
-        ));
+        bytes32 commitHash = keccak256(
+            abi.encodePacked(proof.claimedRoot, proof.correctRoot, proof.disputeId, proof.invalidStateData, salt)
+        );
 
         FraudProofCommitment storage commitment = _fraudProofCommitments[commitHash];
 
@@ -546,7 +547,7 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
         uint256 totalPayout = bond + reward;
 
         // Return bond + reward
-        (bool success, ) = msg.sender.call{value: totalPayout}("");
+        (bool success,) = msg.sender.call{value: totalPayout}("");
         require(success, "Reward transfer failed");
 
         emit FraudProofValidated(claimedRoot, msg.sender, reward);
@@ -624,7 +625,7 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
         uint256 totalPayout = msg.value + reward;
 
         // Return bond + reward
-        (bool success, ) = msg.sender.call{value: totalPayout}("");
+        (bool success,) = msg.sender.call{value: totalPayout}("");
         require(success, "Reward transfer failed");
 
         emit FraudProofValidated(claimedRoot, msg.sender, reward);
@@ -659,27 +660,30 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     /**
      * @inheritdoc IL3Bridge
      */
-    function verifyDisputeState(
-        bytes32 stateRoot,
-        L3DisputeSummary calldata summary,
-        bytes32[] calldata merkleProof
-    ) external view override returns (bool valid) {
+    function verifyDisputeState(bytes32 stateRoot, L3DisputeSummary calldata summary, bytes32[] calldata merkleProof)
+        external
+        view
+        override
+        returns (bool valid)
+    {
         // Verify state root is finalized
         if (!_finalizedStates[stateRoot]) {
             return false;
         }
 
         // Compute leaf from summary
-        bytes32 leaf = keccak256(abi.encodePacked(
-            summary.l3DisputeId,
-            summary.l2DisputeId,
-            uint8(summary.state),
-            summary.counterCount,
-            summary.initiatorAccepted,
-            summary.counterpartyAccepted,
-            summary.currentProposalHash,
-            summary.lastUpdateBlock
-        ));
+        bytes32 leaf = keccak256(
+            abi.encodePacked(
+                summary.l3DisputeId,
+                summary.l2DisputeId,
+                uint8(summary.state),
+                summary.counterCount,
+                summary.initiatorAccepted,
+                summary.counterpartyAccepted,
+                summary.currentProposalHash,
+                summary.lastUpdateBlock
+            )
+        );
 
         // Verify Merkle proof
         bytes32 computed = leaf;
@@ -882,7 +886,7 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
      */
     function withdrawFees(address to, uint256 amount) external onlyOwner {
         require(to != address(0), "Invalid recipient");
-        (bool success, ) = to.call{value: amount}("");
+        (bool success,) = to.call{value: amount}("");
         require(success, "Withdrawal failed");
     }
 
@@ -908,14 +912,19 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
      * @return _totalSettled Total disputes settled
      * @return _pendingCount Current pending count
      */
-    function getMigrationState() external view onlyOwner returns (
-        bytes32 _latestFinalizedRoot,
-        uint256 _latestFinalizedBlock,
-        bytes32 _latestCommittedRoot,
-        uint256 _totalBridged,
-        uint256 _totalSettled,
-        uint256 _pendingCount
-    ) {
+    function getMigrationState()
+        external
+        view
+        onlyOwner
+        returns (
+            bytes32 _latestFinalizedRoot,
+            uint256 _latestFinalizedBlock,
+            bytes32 _latestCommittedRoot,
+            uint256 _totalBridged,
+            uint256 _totalSettled,
+            uint256 _pendingCount
+        )
+    {
         return (
             latestFinalizedRoot,
             latestFinalizedBlock,
