@@ -13,7 +13,7 @@ pragma solidity ^0.8.20;
  *
  * Flow:
  * 1. User initiates dispute on L2 (stakes locked)
- * 2. Dispute bridged to L3 for processing
+ * 2. Dispute bridged to L3 for processing (by the ILRM or an authorized dispute bridger)
  * 3. L3 handles proposals, counters, acceptances at high throughput
  * 4. Settlement bridged back to L2 for stake distribution
  */
@@ -35,6 +35,15 @@ interface IL3Bridge {
         Active, // Normal operation
         Paused, // Temporarily halted
         Deprecated // Migrated to new bridge
+    }
+
+    /// @notice Lifecycle of a bonded fraud-proof commitment
+    enum CommitmentStatus {
+        None, // No commitment under this (challenger, commitHash)
+        Pending, // Bond escrowed, awaiting reveal
+        Won, // Valid proof rejected the root: bond + reward paid
+        Refunded, // Valid proof, but the root was already rejected or orphaned: bond returned
+        Forfeited // Invalid or mismatched proof, or never revealed: bond kept by the bridge
     }
 
     /// @notice L3 dispute state (compressed)
@@ -149,12 +158,14 @@ interface IL3Bridge {
     event BridgeStatusChanged(BridgeStatus oldStatus, BridgeStatus newStatus);
 
     /// @notice Fraud proof commitment for MEV protection
+    /// @dev Keyed by (challenger, commitHash); any number may be open against the same state root
     struct FraudProofCommitment {
-        bytes32 commitHash; // Hash of fraud proof data
+        bytes32 commitHash; // computeFraudProofCommitHash(challenger, proof, salt)
+        bytes32 stateRoot; // Root the bond was posted against
         address challenger; // Committer address
+        CommitmentStatus status; // Lifecycle status (packs with challenger)
         uint256 bond; // Bond amount
         uint256 commitTime; // Block timestamp of commit
-        bool revealed; // Whether proof has been revealed
     }
 
     // ============ Events (Commit-Reveal) ============
@@ -165,7 +176,35 @@ interface IL3Bridge {
     );
 
     /// @notice Emitted when fraud proof is revealed
-    event FraudProofRevealed(bytes32 indexed commitHash, bytes32 indexed claimedRoot, address indexed challenger);
+    /// @dev The second argument is the state root the commitment was bonded against
+    event FraudProofRevealed(bytes32 indexed commitHash, bytes32 indexed stateRoot, address indexed challenger);
+
+    /// @notice Emitted when a valid reveal is refunded because its root was already rejected or orphaned
+    event FraudProofRefunded(
+        bytes32 indexed commitHash, bytes32 indexed stateRoot, address indexed challenger, uint256 bond
+    );
+
+    /// @notice Emitted when a bond is forfeited (invalid or mismatched reveal, or never revealed)
+    event FraudProofForfeited(
+        bytes32 indexed commitHash, bytes32 indexed stateRoot, address indexed challenger, uint256 bond
+    );
+
+    /// @notice Emitted when a successful challenge rolls the committed chain head back to the rejected root's parent
+    event CommittedChainRolledBack(bytes32 indexed rejectedRoot, bytes32 indexed newHead, uint256 newHeight);
+
+    // ============ Events (Roles & Admin) ============
+
+    /// @notice Emitted when an account is granted or revoked the dispute-bridger role
+    event DisputeBridgerUpdated(address indexed account, bool authorized);
+
+    /// @notice Emitted when an account is granted or revoked the settlement-relayer role
+    event SettlementRelayerUpdated(address indexed account, bool authorized);
+
+    /// @notice Emitted when a batched dispute is skipped because it is already bridged
+    event DisputeBridgeSkipped(uint256 indexed l2DisputeId, uint256 existingL3DisputeId);
+
+    /// @notice Emitted when the owner withdraws free (non-escrowed) balance
+    event FeesWithdrawn(address indexed to, uint256 amount);
 
     // ============ Errors ============
 
@@ -186,19 +225,36 @@ interface IL3Bridge {
     error CommitmentNotFound();
     error RevealTooEarly(uint256 remaining);
     error RevealTooLate();
-    error NotCommitter(address caller, address committer);
     error AlreadyRevealed();
     error InvalidCommitment();
+    error StateRootNotCanonical(bytes32 root);
+    error ParentNotFinalized(bytes32 parentRoot);
+    error CommitmentNotExpired(uint256 remaining);
+    error NotAuthorizedBridger(address caller);
+    error InsufficientFreeBalance(uint256 requested, uint256 available);
 
     // ============ Bridge Operations ============
 
     /**
      * @notice Bridge a dispute from L2 to L3 for high-throughput processing
-     * @dev Called by ILRM when dispute is fully staked
+     * @dev Callable by the ILRM or an owner-authorized dispute bridger (e.g. L3DisputeBatcher).
+     *      Reverts DisputeAlreadyBridged if the L2 dispute was bridged before.
      * @param message Dispute initiation data
      * @return l3DisputeId The assigned L3 dispute ID
      */
     function bridgeDisputeToL3(DisputeInitiationMessage calldata message) external returns (uint256 l3DisputeId);
+
+    /**
+     * @notice Bridge a batch of disputes from L2 to L3 in one call
+     * @dev Callable by the ILRM or an owner-authorized dispute bridger. Reverts BatchSizeExceeded above
+     *      MAX_BATCH_SIZE but never reverts for a single item: a dispute that is already bridged
+     *      (including a duplicate earlier in the same batch) is skipped and DisputeBridgeSkipped is emitted.
+     * @param messages Dispute initiation data
+     * @return l3DisputeIds The assigned L3 dispute IDs, index-aligned with messages (0 = skipped)
+     */
+    function bridgeDisputeBatchToL3(DisputeInitiationMessage[] calldata messages)
+        external
+        returns (uint256[] memory l3DisputeIds);
 
     /**
      * @notice Process settlement from L3 back to L2
@@ -209,7 +265,8 @@ interface IL3Bridge {
 
     /**
      * @notice Batch process multiple settlements
-     * @dev More gas efficient for multiple resolutions
+     * @dev Callable by the sequencer or an owner-authorized settlement relayer (e.g. L3DisputeBatcher
+     *      relaying a batch the sequencer queued). More gas efficient for multiple resolutions.
      * @param messages Array of settlement messages
      */
     function batchProcessSettlements(DisputeSettlementMessage[] calldata messages) external;
@@ -247,19 +304,50 @@ interface IL3Bridge {
 
     /**
      * @notice Commit to a fraud proof (Phase 1 of commit-reveal)
-     * @dev Prevents MEV front-running by hiding proof until reveal
-     * @param commitHash Hash of (fraud proof data + salt)
-     * @param stateRoot The state root being challenged
+     * @dev Prevents MEV front-running by hiding the proof until reveal. The commit hash is
+     *      keccak256(abi.encode(FRAUD_PROOF_COMMIT_TYPEHASH, block.chainid, bridge, challenger,
+     *      keccak256(abi.encode(proof)), salt)), see computeFraudProofCommitHash. Because it binds the
+     *      challenger, a copied hash is useless to anyone else. Any number of commitments may be open
+     *      against the same root; they are keyed by (challenger, commitHash). Commits close once a reveal
+     *      window opened now could still be open at the root's challenge deadline.
+     * @param commitHash computeFraudProofCommitHash(msg.sender, proof, salt)
+     * @param stateRoot The state root being challenged (the reveal is bound to it)
      */
     function commitFraudProof(bytes32 commitHash, bytes32 stateRoot) external payable;
 
     /**
      * @notice Reveal a committed fraud proof (Phase 2 of commit-reveal)
-     * @dev Must be called by original committer after reveal delay
+     * @dev Must be called by the original committer between MIN_REVEAL_DELAY and
+     *      MIN_REVEAL_DELAY + MAX_REVEAL_WINDOW after the commit. The reveal only acts on the root the
+     *      bond was posted against. The bond ends in exactly one outcome, none of which reverts:
+     *      - Forfeited: proof.claimedRoot differs from the committed root, or the proof is invalid
+     *      - Refunded: valid proof, but the root was already rejected or is no longer canonical
+     *      - Won: valid proof; the root is rejected, the chain head rolls back to its parent and the
+     *        challenger receives bond + reward (the reward is paid only from free, non-escrowed balance)
      * @param proof The fraud proof data
      * @param salt Random salt used in commitment
      */
     function revealFraudProof(FraudProof calldata proof, bytes32 salt) external;
+
+    /**
+     * @notice Forfeit the bond of a commitment that was not revealed within its reveal window
+     * @dev Permissionless. Reverts CommitmentNotExpired while the reveal window is still open.
+     * @param challenger The committer
+     * @param commitHash The commitment hash
+     */
+    function forfeitExpiredCommitment(address challenger, bytes32 commitHash) external;
+
+    /**
+     * @notice Compute the commit hash a challenger must commit for a given proof and salt
+     * @param challenger The address that will commit and reveal
+     * @param proof The fraud proof data
+     * @param salt Random salt
+     * @return The commit hash
+     */
+    function computeFraudProofCommitHash(address challenger, FraudProof calldata proof, bytes32 salt)
+        external
+        view
+        returns (bytes32);
 
     /**
      * @notice Submit fraud proof to challenge invalid state (DEPRECATED)
@@ -356,10 +444,14 @@ interface IL3Bridge {
 
     /**
      * @notice Get fraud proof commitment details
+     * @param challenger The committer
      * @param commitHash The commitment hash
-     * @return commitment The commitment data
+     * @return commitment The commitment data (status None if absent)
      */
-    function getFraudProofCommitment(bytes32 commitHash) external view returns (FraudProofCommitment memory);
+    function getFraudProofCommitment(address challenger, bytes32 commitHash)
+        external
+        view
+        returns (FraudProofCommitment memory);
 
     /**
      * @notice Check if commit-reveal mode is enabled
