@@ -149,11 +149,11 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 | Warrant Request Submission | ✅ | `ComplianceCouncil.sol:295-335` | With document hash and jurisdiction |
 | Threshold Voting | ✅ | `ComplianceCouncil.sol:340-390` | m-of-n approval/rejection |
 | Appeal Mechanism | ✅ | `ComplianceCouncil.sol:410-425` | Before execution delay expires |
-| BLS Signature Submission | ✅ | `ComplianceCouncil.sol:435-495` | Per-member signatures |
-| Signature Aggregation | ✅ | `ComplianceCouncil.sol:515-535` | Lagrange interpolation |
-| Threshold Verification | ✅ | `ComplianceCouncil.sol:536-550` | Aggregated signature check |
+| BLS Signature Submission | ✅ | `ComplianceCouncil.sol:486-534` | Per-member signatures, verified on chain against the member's G1 key share |
+| Signature Aggregation | ✅ | `ComplianceCouncil.sol:551-567` | Plain G2 sum on chain; threshold (Lagrange) aggregation off chain in the SDK |
+| Threshold Verification | ✅ | `ComplianceCouncil.sol:570-592` | Aggregate checked against the admin-set DKG group key; signer indices validated; informational |
 | Key Reconstruction | ✅ | `ComplianceCouncil.sol:552-600` | Execute reveal after threshold |
-| BLS12-381 Precompiles | ✅ | `ComplianceCouncil.sol:20-24` | EIP-2537 with fallback detection |
+| BLS12-381 Precompiles | ✅ | `libraries/BLS12381.sol` | Final EIP-2537 addresses, RFC 9380 hash-to-G2, known-answer detection, fails closed without them |
 | **Execution Modes** | ✅ | `ComplianceCouncil.sol:29-52` | DISABLED, STRICT_ONCHAIN, HYBRID_ATTESTED |
 | **Mode Governance** | ✅ | `ComplianceCouncil.sol:159-169` | Admin-controlled with reason logging |
 | **Hybrid Attestation** | ✅ | `ComplianceCouncil.sol:178-195` | Operator confirmation for off-chain verification |
@@ -1082,8 +1082,8 @@ treasury.setTieredSubsidyConfig(
 
 | Struct | Description |
 |--------|-------------|
-| `BLSPublicKey` | G1 point coordinates (x, y) |
-| `BLSSignature` | G2 point coordinates (Fp2) |
+| `BLSPublicKey` | G1 point, EIP-2537 encoding (each coordinate as two 32-byte words) |
+| `BLSSignature` | G2 point, EIP-2537 encoding (each Fp2 coordinate as four 32-byte words) |
 | `ThresholdSignature` | Aggregated sig with signer indices |
 | `CouncilMember` | Member details with BLS key and role |
 | `CouncilConfig` | Threshold, voting period, delays |
@@ -1100,7 +1100,10 @@ treasury.setTieredSubsidyConfig(
 | `concludeVoting()` | Finalize voting after period ends |
 | `fileAppeal()` | Appeal approved warrant |
 | `submitSignature()` | Submit partial BLS signature |
-| `aggregateSignatures()` | Combine partial signatures |
+| `aggregateSignatures()` | Plain G2 sum of signatures |
+| `setAggregatedPublicKey()` | Set the DKG group public key (admin) |
+| `getSigningMessage()` | Warrant message bound to chain id and council address |
+| `verifyThresholdSignature()` | Verify an aggregate against the group key |
 | `executeReconstruction()` | Reconstruct key after threshold |
 
 #### Member Roles:

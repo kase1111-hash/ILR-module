@@ -12,11 +12,17 @@ pragma solidity ^0.8.20;
  * - Signature aggregation enables key reconstruction
  * - Transparent on-chain voting with event emission
  *
- * BLS Threshold Signatures:
- * - Uses BLS12-381 curve for signature aggregation
- * - Individual signatures can be verified independently
- * - Aggregated signature verifies against aggregated public key
- * - FROST-style key generation for secure distributed setup
+ * BLS Threshold Signatures (BLS12-381, verified with the EIP-2537 precompiles of Prague):
+ * - Public keys are G1 points, signatures are G2 points (minimal-pubkey-size scheme)
+ * - H(m) is RFC 9380 hash_to_curve to G2 (BLS12381G2_XMD:SHA-256_SSWU_RO_) with the DST
+ *   "ILRM-COMPLIANCE-COUNCIL-V01-CS01-with-BLS12381G2_XMD:SHA-256_SSWU_RO_"
+ * - A signature is valid iff e(pk, H(m)) * e(-G1, sig) == 1
+ * - Precompiles: G1ADD 0x0b, G1MSM 0x0c, G2ADD 0x0d, PAIRING_CHECK 0x0f, MAP_FP2_TO_G2 0x11 (and MODEXP 0x05)
+ * - Points use the EIP-2537 encoding: every Fp element is 64 bytes big-endian (16 zero bytes followed by
+ *   the 48-byte value) and the all-zero encoding is the point at infinity
+ * - Individual (partial) signatures verify against each member's key share
+ * - The threshold signature verifies against the DKG group public key set by the admin
+ * - The signed message is getSigningMessage(warrantId), bound to the chain id and the council address
  *
  * Legal Compliance Flow:
  * 1. Authority submits warrant request with legal documentation
@@ -65,16 +71,24 @@ interface IComplianceCouncil {
 
     // ============ Structs ============
 
-    /// @notice BLS public key on G1 curve (compressed)
+    /**
+     * @notice BLS public key: an uncompressed G1 point in EIP-2537 encoding
+     * @dev Each Fp coordinate is [hi, lo]: hi holds 16 zero bytes followed by the top 16 bytes of the value,
+     *      lo holds the low 32 bytes. abi.encodePacked(pk.x, pk.y) is the 128-byte EIP-2537 G1 encoding.
+     */
     struct BLSPublicKey {
-        bytes32 x;
-        bytes32 y;
+        bytes32[2] x; // [hi, lo]
+        bytes32[2] y; // [hi, lo]
     }
 
-    /// @notice BLS signature on G2 curve (compressed)
+    /**
+     * @notice BLS signature: an uncompressed G2 point in EIP-2537 encoding
+     * @dev Each Fp2 coordinate is [c0.hi, c0.lo, c1.hi, c1.lo] (Fp words as in BLSPublicKey).
+     *      abi.encodePacked(sig.x, sig.y) is the 256-byte EIP-2537 G2 encoding.
+     */
     struct BLSSignature {
-        bytes32[2] x; // x coordinate (Fp2)
-        bytes32[2] y; // y coordinate (Fp2)
+        bytes32[4] x; // [c0.hi, c0.lo, c1.hi, c1.lo]
+        bytes32[4] y; // [c0.hi, c0.lo, c1.hi, c1.lo]
     }
 
     /// @notice Aggregated threshold signature
@@ -184,14 +198,19 @@ interface IComplianceCouncil {
     /// @notice Emitted when council configuration changes
     event ConfigUpdated(uint256 threshold, uint256 totalMembers, uint256 votingPeriod);
 
+    /// @notice Emitted when the threshold group public key is set
+    event AggregatedPublicKeyUpdated(BLSPublicKey groupKey, address indexed updatedBy);
+
     // ============ Member Management ============
 
     /**
      * @notice Add a new council member
+     * @dev The key must be a valid G1 point (curve and subgroup checked when the precompiles are available,
+     *      encoding checked otherwise). At most one active member may hold a given key index.
      * @param member Member address
      * @param role Member's role
-     * @param publicKey BLS public key
-     * @param keyIndex Index in threshold scheme
+     * @param publicKey BLS public key share (G1)
+     * @param keyIndex Index in threshold scheme (1-based, the share's DKG index)
      */
     function addMember(address member, MemberRole role, BLSPublicKey calldata publicKey, uint256 keyIndex) external;
 
@@ -285,13 +304,17 @@ interface IComplianceCouncil {
 
     /**
      * @notice Submit a partial signature for key reconstruction
+     * @dev Signs getSigningMessage(warrantId). When the precompiles are available the signature must verify
+     *      against the caller's registered key share.
      * @param warrantId Approved warrant ID
-     * @param signature BLS signature
+     * @param signature BLS signature (G2)
      */
     function submitSignature(uint256 warrantId, BLSSignature calldata signature) external;
 
     /**
      * @notice Verify a BLS signature against member's public key
+     * @dev The BLS message is the 32 bytes of `message`, hashed to G2 with the council DST. Returns false
+     *      (never reverts) for malformed points, an infinity public key, or when the precompiles are absent.
      * @param message Message that was signed
      * @param signature BLS signature
      * @param publicKey Signer's public key
@@ -303,17 +326,24 @@ interface IComplianceCouncil {
         returns (bool valid);
 
     /**
-     * @notice Aggregate multiple BLS signatures
+     * @notice Aggregate multiple BLS signatures as a plain G2 sum
+     * @dev Requires the BLS precompiles. This is plain (non-threshold) aggregation; threshold (Lagrange)
+     *      aggregation of partial signatures is done off-chain by the SDK.
      * @param signatures Array of signatures to aggregate
      * @return aggregated The aggregated signature
      */
     function aggregateSignatures(BLSSignature[] calldata signatures)
         external
-        pure
+        view
         returns (BLSSignature memory aggregated);
 
     /**
-     * @notice Verify aggregated threshold signature
+     * @notice Verify aggregated threshold signature against the group public key
+     * @dev The signer indices must be strictly increasing key indices of active members and their number must
+     *      equal signatureCount (>= threshold). For shares of one DKG any valid t-subset yields the same
+     *      signature, so a valid result proves that t shares signed, not which members did. Informational only:
+     *      it never gates execution. Returns false without the precompiles, for an unknown warrant or while the
+     *      group key is unset.
      * @param warrantId Warrant ID
      * @param thresholdSig Aggregated signature with signer info
      * @return valid True if threshold signature is valid
@@ -346,10 +376,19 @@ interface IComplianceCouncil {
     function getConfig() external view returns (CouncilConfig memory config);
 
     /**
-     * @notice Get aggregated public key for threshold verification
-     * @return aggregatedKey The aggregated public key
+     * @notice Get the threshold group public key used by verifyThresholdSignature
+     * @return aggregatedKey The group public key (all-zero until setAggregatedPublicKey is called)
      */
     function getAggregatedPublicKey() external view returns (BLSPublicKey memory aggregatedKey);
+
+    /**
+     * @notice Get the 32-byte message council members sign for a warrant
+     * @dev keccak256(abi.encode(keccak256("COMPLIANCE_REVEAL"), block.chainid, address(this), warrantId,
+     *      targetDisputeId, documentHash, executionTime)). The bytes of this hash are the BLS message.
+     * @param warrantId Warrant ID
+     * @return message The signing message
+     */
+    function getSigningMessage(uint256 warrantId) external view returns (bytes32 message);
 
     /**
      * @notice Get pending warrant count
@@ -387,6 +426,13 @@ interface IComplianceCouncil {
      * @param config New configuration
      */
     function updateConfig(CouncilConfig calldata config) external;
+
+    /**
+     * @notice Set the threshold group public key
+     * @dev The DKG group key g1^f(0) (the SDK's DKGOutput.aggregatedPublicKey). Must be a valid G1 point.
+     * @param groupKey Group public key (G1)
+     */
+    function setAggregatedPublicKey(BLSPublicKey calldata groupKey) external;
 
     /**
      * @notice Emergency pause for all warrant operations

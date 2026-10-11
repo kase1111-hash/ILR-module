@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "../interfaces/IComplianceCouncil.sol";
 import "../interfaces/IComplianceEscrow.sol";
+import {BLS12381} from "./libraries/BLS12381.sol";
 
 /**
  * @title ComplianceCouncil
@@ -17,10 +18,14 @@ import "../interfaces/IComplianceEscrow.sol";
  * - HYBRID_ATTESTED: Allows off-chain verification with operator attestation. Audit trail required.
  * - DISABLED: No execution allowed. Emergency or pre-deployment state.
  *
- * BLS12-381 Precompiles (EIP-2537):
- * - 0x0b: G1 Add, 0x0c: G1 Mul, 0x0d: G1 MultiExp
- * - 0x0e: G2 Add, 0x0f: G2 Mul, 0x10: G2 MultiExp
- * - 0x11: Pairing, 0x12: Map to G1, 0x13: Map to G2
+ * BLS12-381 (EIP-2537 precompiles, Prague; math in libraries/BLS12381.sol):
+ * - Final addresses: G1ADD 0x0b, G1MSM 0x0c, G2ADD 0x0d, PAIRING_CHECK 0x0f, MAP_FP2_TO_G2 0x11 (+ MODEXP 0x05)
+ * - Public keys (member shares and the DKG group key) are G1 points; signatures are G2 points
+ * - H(m) = RFC 9380 hash_to_curve to G2 with DST BLS_SIGNATURE_DST; valid iff e(pk, H(m)) * e(-G1, sig) == 1
+ * - Message: keccak256(abi.encode(keccak256("COMPLIANCE_REVEAL"), chainid, council, warrantId,
+ *   targetDisputeId, documentHash, executionTime)), see getSigningMessage
+ * - Availability is detected once at deployment by a known-answer test; without the precompiles every
+ *   verification fails closed and STRICT_ONCHAIN cannot be selected
  */
 contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard, Pausable {
     // ============ Execution Mode ============
@@ -52,18 +57,11 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
     bytes32 public constant REQUESTER_ROLE = keccak256("REQUESTER_ROLE");
     bytes32 public constant OPERATOR_ROLE = keccak256("OPERATOR_ROLE");
 
-    // BLS12-381 precompile addresses (EIP-2537)
-    address constant BLS_G1_ADD = address(0x0b);
-    address constant BLS_G1_MUL = address(0x0c);
-    address constant BLS_G2_ADD = address(0x0e);
-    address constant BLS_G2_MUL = address(0x0f);
-    address constant BLS_PAIRING = address(0x11);
-    address constant BLS_MAP_G1 = address(0x12);
-    address constant BLS_MAP_G2 = address(0x13);
+    /// @notice RFC 9380 domain separation tag for hashing warrant messages to G2 (must match the SDK)
+    bytes public constant BLS_SIGNATURE_DST = "ILRM-COMPLIANCE-COUNCIL-V01-CS01-with-BLS12381G2_XMD:SHA-256_SSWU_RO_";
 
-    // BLS12-381 field modulus (for validation); 381 bits, so it does not fit in a uint256
-    bytes constant BLS_MODULUS =
-        hex"1a0111ea397fe69a4b1ba7b6434bacd764774b84f38512bf6730d2a0f6b0f6241eabfffeb153ffffb9feffffffffaaab";
+    /// @dev Domain tag of the warrant signing message
+    bytes32 private constant WARRANT_MESSAGE_TAG = keccak256("COMPLIANCE_REVEAL");
 
     // ============ State Variables ============
 
@@ -89,11 +87,15 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
     mapping(uint256 => SignatureSubmission[]) private _warrantSignatures;
     mapping(uint256 => mapping(address => bool)) private _hasSubmittedSig;
 
-    /// @notice Aggregated public key for threshold verification
+    /// @notice Threshold group public key (DKG output), set by the admin; all-zero until set
     BLSPublicKey private _aggregatedPublicKey;
 
-    /// @notice Whether BLS precompiles are available
-    bool private _blsPrecompilesAvailable;
+    /// @notice Active member holding each key index (keyIndex => member)
+    mapping(uint256 => address) private _keyIndexHolder;
+
+    /// @notice Whether BLS precompiles are available (detected once at deployment)
+    // forge-lint: disable-next-line(screaming-snake-case-immutable)
+    bool private immutable _blsPrecompilesAvailable;
 
     /// @notice Compliance escrow reference
     IComplianceEscrow public complianceEscrow;
@@ -129,12 +131,13 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         _grantRole(DEFAULT_ADMIN_ROLE, admin);
         _grantRole(ADMIN_ROLE, admin);
 
-        // Check if BLS precompiles are available
-        _blsPrecompilesAvailable = _checkBLSPrecompiles();
+        // Check if BLS precompiles are available (immutables cannot be read during construction)
+        bool avail = BLS12381.precompilesAvailable();
+        _blsPrecompilesAvailable = avail;
 
         // Set execution mode based on precompile availability
         // STRICT_ONCHAIN if precompiles available, DISABLED otherwise (requires explicit enablement)
-        if (_blsPrecompilesAvailable) {
+        if (avail) {
             executionMode = ExecutionMode.STRICT_ONCHAIN;
             emit ExecutionModeChanged(
                 ExecutionMode.DISABLED, ExecutionMode.STRICT_ONCHAIN, admin, "BLS precompiles available"
@@ -253,7 +256,11 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         require(member != address(0), "Invalid address");
         require(!_members[member].isActive, "Member already exists");
         require(keyIndex > 0 && keyIndex <= _config.threshold * 2, "Invalid key index");
+        require(_keyIndexHolder[keyIndex] == address(0), "Key index in use");
         require(_validateBLSPublicKey(publicKey), "Invalid BLS public key");
+
+        // A removed member keeps its struct, so re-adding it must not push a duplicate address
+        bool firstAdd = _members[member].memberAddress == address(0);
 
         _members[member] = CouncilMember({
             memberAddress: member,
@@ -266,13 +273,11 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
             signaturesProvided: 0
         });
 
-        _memberAddresses.push(member);
+        if (firstAdd) _memberAddresses.push(member);
+        _keyIndexHolder[keyIndex] = member;
         _config.totalMembers++;
 
         _grantRole(MEMBER_ROLE, member);
-
-        // Update aggregated public key
-        _updateAggregatedPublicKey();
 
         emit MemberAdded(member, role, keyIndex);
     }
@@ -284,10 +289,10 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
 
         MemberRole role = _members[member].role;
         _members[member].isActive = false;
+        delete _keyIndexHolder[_members[member].keyIndex];
         _config.totalMembers--;
 
         _revokeRole(MEMBER_ROLE, member);
-        _updateAggregatedPublicKey();
 
         emit MemberRemoved(member, role);
     }
@@ -302,7 +307,6 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         require(_validateBLSPublicKey(newPublicKey), "Invalid BLS public key");
 
         _members[member].publicKey = newPublicKey;
-        _updateAggregatedPublicKey();
     }
 
     /// @inheritdoc IComplianceCouncil
@@ -547,22 +551,20 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
     /// @inheritdoc IComplianceCouncil
     function aggregateSignatures(BLSSignature[] calldata signatures)
         external
-        pure
+        view
         override
         returns (BLSSignature memory aggregated)
     {
         require(signatures.length > 0, "No signatures");
+        require(_blsPrecompilesAvailable, "BLS precompiles required");
 
-        // Start with first signature
-        aggregated = signatures[0];
-
-        // Aggregate remaining signatures using G2 addition
-        // Note: This is a simplified version; real impl uses precompile
+        bytes memory sum = abi.encodePacked(signatures[0].x, signatures[0].y);
+        bool ok;
         for (uint256 i = 1; i < signatures.length; i++) {
-            // G2 point addition would happen here via precompile
-            // For now, we store the last signature as placeholder
-            aggregated = signatures[i];
+            (ok, sum) = BLS12381.g2Add(sum, abi.encodePacked(signatures[i].x, signatures[i].y));
+            require(ok, "Invalid signature");
         }
+        return abi.decode(sum, (BLSSignature));
     }
 
     /// @inheritdoc IComplianceCouncil
@@ -573,15 +575,21 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         returns (bool valid)
     {
         require(thresholdSig.signatureCount >= _config.threshold, "Below threshold");
+        require(thresholdSig.signerIndices.length == thresholdSig.signatureCount, "Signer count mismatch");
 
-        if (_blsPrecompilesAvailable) {
-            bytes32 message = _getSigningMessage(warrantId);
-            // Verify aggregated signature against aggregated public key
-            return _verifyBLSSignature(message, thresholdSig.aggregatedSig, _aggregatedPublicKey);
+        // Strictly increasing indices of active members: also rejects index 0 and duplicates
+        uint256 prev = 0;
+        for (uint256 i = 0; i < thresholdSig.signerIndices.length; i++) {
+            uint256 idx = thresholdSig.signerIndices[i];
+            require(idx > prev, "Unsorted signers");
+            require(_keyIndexHolder[idx] != address(0), "Unknown signer");
+            prev = idx;
         }
 
-        // Off-chain verification required
-        return false;
+        if (!_blsPrecompilesAvailable || _warrants[warrantId].id == 0) return false;
+
+        // An unset (all-zero) group key is rejected by the library's infinity check
+        return _verifyBLSSignature(_getSigningMessage(warrantId), thresholdSig.aggregatedSig, _aggregatedPublicKey);
     }
 
     /// @inheritdoc IComplianceCouncil
@@ -649,6 +657,11 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
     }
 
     /// @inheritdoc IComplianceCouncil
+    function getSigningMessage(uint256 warrantId) external view override returns (bytes32) {
+        return _getSigningMessage(warrantId);
+    }
+
+    /// @inheritdoc IComplianceCouncil
     function getPendingWarrantCount() external view override returns (uint256 count) {
         for (uint256 i = 0; i < _warrantIds.length; i++) {
             if (_warrants[_warrantIds[i]].status == WarrantStatus.Pending) {
@@ -702,6 +715,13 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
     }
 
     /// @inheritdoc IComplianceCouncil
+    function setAggregatedPublicKey(BLSPublicKey calldata groupKey) external override onlyRole(ADMIN_ROLE) {
+        require(_validateBLSPublicKey(groupKey), "Invalid BLS public key");
+        _aggregatedPublicKey = groupKey;
+        emit AggregatedPublicKeyUpdated(groupKey, msg.sender);
+    }
+
+    /// @inheritdoc IComplianceCouncil
     function pause() external override onlyRole(ADMIN_ROLE) {
         _pause();
     }
@@ -731,138 +751,50 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
     // ============ Internal Functions ============
 
     /**
-     * @notice Check if BLS precompiles are available
+     * @notice Validate a BLS public key (G1 point, EIP-2537 encoding)
+     * @dev With the precompiles: canonical encoding, on the curve, in the subgroup, not infinity.
+     *      Without them only the encoding can be checked; that is acceptable because STRICT_ONCHAIN cannot be
+     *      selected there and every later use goes through the pairing, which fails closed.
      */
-    function _checkBLSPrecompiles() internal view returns (bool) {
-        // Try calling G1 add with identity points
-        // If it reverts, precompiles not available
-        (bool success,) = BLS_G1_ADD.staticcall(
-            abi.encodePacked(
-                bytes32(0),
-                bytes32(0), // Point 1 (identity)
-                bytes32(0),
-                bytes32(0) // Point 2 (identity)
-            )
-        );
-        return success;
+    function _validateBLSPublicKey(BLSPublicKey memory pk) internal view returns (bool) {
+        bytes memory enc = abi.encodePacked(pk.x, pk.y);
+        return _blsPrecompilesAvailable ? BLS12381.isValidG1(enc) : BLS12381.isCanonicalG1(enc);
     }
-
-    /**
-     * @notice Validate BLS public key is on curve
-     */
-    function _validateBLSPublicKey(BLSPublicKey calldata pk) internal pure returns (bool) {
-        // Basic validation: non-zero coordinates
-        return pk.x != bytes32(0) || pk.y != bytes32(0);
-    }
-
-    /**
-     * @notice Update aggregated public key from all active members
-     * @dev FIX CRITICAL: Properly aggregate all member public keys using BLS G1 addition
-     *      aggregatedPK = sum(pk_i) for all active members
-     */
-    function _updateAggregatedPublicKey() internal {
-        // Reset aggregated key
-        _aggregatedPublicKey = BLSPublicKey({x: bytes32(0), y: bytes32(0)});
-
-        bool firstKey = true;
-
-        for (uint256 i = 0; i < _memberAddresses.length; i++) {
-            if (_members[_memberAddresses[i]].isActive) {
-                BLSPublicKey memory memberKey = _members[_memberAddresses[i]].publicKey;
-
-                if (firstKey) {
-                    // First key becomes the base
-                    _aggregatedPublicKey = memberKey;
-                    firstKey = false;
-                } else if (_blsPrecompilesAvailable) {
-                    // Use G1 addition precompile to aggregate keys
-                    // Input format: pk1.x (32 bytes) || pk1.y (32 bytes) || pk2.x (32 bytes) || pk2.y (32 bytes)
-                    (bool success, bytes memory result) = BLS_G1_ADD.staticcall(
-                        abi.encodePacked(_aggregatedPublicKey.x, _aggregatedPublicKey.y, memberKey.x, memberKey.y)
-                    );
-
-                    if (success && result.length == 64) {
-                        // Parse result: x (32 bytes) || y (32 bytes)
-                        bytes32 newX;
-                        bytes32 newY;
-                        assembly {
-                            newX := mload(add(result, 32))
-                            newY := mload(add(result, 64))
-                        }
-                        _aggregatedPublicKey.x = newX;
-                        _aggregatedPublicKey.y = newY;
-                    }
-                    // If precompile call fails, continue without aggregation
-                    // This is safe because verification will fail in STRICT_ONCHAIN mode
-                } else {
-                    // Without precompiles, store concatenated hash as placeholder
-                    // Actual verification must be done off-chain in HYBRID_ATTESTED mode
-                    _aggregatedPublicKey.x = keccak256(abi.encodePacked(_aggregatedPublicKey.x, memberKey.x));
-                    _aggregatedPublicKey.y = keccak256(abi.encodePacked(_aggregatedPublicKey.y, memberKey.y));
-                }
-            }
-        }
-    }
-
-    /// @notice Event for aggregated public key updates
-    event AggregatedPublicKeyUpdated(bytes32 x, bytes32 y, uint256 memberCount);
 
     /**
      * @notice Get the message to be signed for a warrant
+     * @dev Bound to the chain and this council so signatures cannot be replayed across deployments
      */
     function _getSigningMessage(uint256 warrantId) internal view returns (bytes32) {
         WarrantRequest storage warrant = _warrants[warrantId];
         return keccak256(
-            abi.encodePacked(
-                "COMPLIANCE_REVEAL", warrantId, warrant.targetDisputeId, warrant.documentHash, warrant.executionTime
+            abi.encode(
+                WARRANT_MESSAGE_TAG,
+                block.chainid,
+                address(this),
+                warrantId,
+                warrant.targetDisputeId,
+                warrant.documentHash,
+                warrant.executionTime
             )
         );
     }
 
     /**
-     * @notice Verify BLS signature using precompiles
-     * @dev Uses pairing check: e(sig, g2) == e(H(m), pk)
+     * @notice Verify a BLS signature using the EIP-2537 precompiles
+     * @dev e(pk, H(message)) * e(-G1, sig) == 1 with H the RFC 9380 hash to G2 under BLS_SIGNATURE_DST
      */
     function _verifyBLSSignature(bytes32 message, BLSSignature memory signature, BLSPublicKey memory publicKey)
         internal
         view
         returns (bool)
     {
-        if (!_blsPrecompilesAvailable) {
-            return false;
-        }
-
-        // Hash message to G2 point
-        (bool mapSuccess, bytes memory g2Point) = BLS_MAP_G2.staticcall(abi.encodePacked(message));
-        if (!mapSuccess) return false;
-
-        // Prepare pairing input:
-        // e(sig, G2_generator) * e(-H(m), pk) == 1
-        // This is equivalent to e(sig, G2_gen) == e(H(m), pk)
-
-        bytes memory pairingInput = abi.encodePacked(
-            // First pairing: signature with G2 generator
-            signature.x[0],
-            signature.x[1],
-            signature.y[0],
-            signature.y[1],
-            // G2 generator (standard BLS12-381)
-            hex"024aa2b2f08f0a91260805272dc51051c6e47ad4fa403b02b4510b647ae3d1770bac0326a805bbefd48056c8c121bdb8",
-            hex"13e02b6052719f607dacd3a088274f65596bd0d09920b61ab5da61bbdc7f5049334cf11213945d57e5ac7d055d042b7e",
-            hex"0ce5d527727d6e118cc9cdc6da2e351aadfd9baa8cbdd3a76d429a695160d12c923ac9cc3baca289e193548608b82801",
-            hex"0606c4a02ea734cc32acd2b02bc28b99cb3e287e85a763af267492ab572e99ab3f370d275cec1da1aaa9075ff05f79be",
-            // Second pairing: -H(m) with public key
-            g2Point,
-            publicKey.x,
-            publicKey.y
+        if (!_blsPrecompilesAvailable) return false;
+        return BLS12381.verify(
+            abi.encodePacked(publicKey.x, publicKey.y),
+            abi.encodePacked(signature.x, signature.y),
+            abi.encodePacked(message),
+            BLS_SIGNATURE_DST
         );
-
-        // Execute pairing check
-        (bool pairingSuccess, bytes memory result) = BLS_PAIRING.staticcall(pairingInput);
-
-        if (!pairingSuccess || result.length != 32) return false;
-
-        // Pairing returns 1 if valid, 0 if invalid
-        return abi.decode(result, (uint256)) == 1;
     }
 }
