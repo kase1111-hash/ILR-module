@@ -231,16 +231,16 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 
 | Feature | Status | Location | Notes |
 |---------|--------|----------|-------|
-| Dispute Bridging (L2→L3) | ✅ | `L3Bridge.sol:135-165` | ILRM-authorized |
-| Settlement Processing (L3→L2) | ✅ | `L3Bridge.sol:170-215` | Sequencer-signed |
-| Batch Settlements | ✅ | `L3Bridge.sol:185-195` | Up to 100 per batch |
-| State Commitment | ✅ | `L3Bridge.sol:220-275` | With challenge period |
-| State Finalization | ✅ | `L3Bridge.sol:280-310` | After 7-day period |
-| Fraud Proof System | ✅ | `L3Bridge.sol:315-380` | With challenger bonds |
+| Dispute Bridging (L2→L3) | ✅ | `L3Bridge.sol:250-313` | ILRM or owner-authorized bridger |
+| Settlement Processing (L3→L2) | ✅ | `L3Bridge.sol:319-390` | Sequencer-signed |
+| Batch Settlements | ✅ | `L3Bridge.sol:332-345` | Up to 100 per batch |
+| State Commitment | ✅ | `L3Bridge.sol:397-456` | With challenge period |
+| State Finalization | ✅ | `L3Bridge.sol:462-502` | After 7-day period |
+| Fraud Proof System | ✅ | `L3Bridge.sol:532-837` | With challenger bonds |
 | Merkle Proof Verification | ✅ | `L3StateVerifier.sol:55-110` | Sparse tree support |
 | Batch Verification | ✅ | `L3StateVerifier.sol:115-160` | Gas-efficient |
-| Dispute Queue | ✅ | `L3DisputeBatcher.sol:75-130` | Auto-trigger |
-| Settlement Queue | ✅ | `L3DisputeBatcher.sol:135-160` | Authorized submitters |
+| Dispute Queue | ✅ | `L3DisputeBatcher.sol:136-176` | Auto-trigger |
+| Settlement Queue | ✅ | `L3DisputeBatcher.sol:185-290` | Sequencer-queued, submitter-relayed |
 
 ### Protocol Safety Invariants
 
@@ -548,8 +548,10 @@ L2 (Arbitrum/Optimism)          L3 (App-Specific Rollup)
 **Security Model:**
 - Optimistic rollup: State assumed valid unless challenged
 - Challenger bond: 0.1 ETH minimum to prevent spam
-- Fraud reward: 50% of bond for valid challenges
+- Fraud reward: fixed 0.05 ETH (50% of the minimum bond) for valid challenges, paid only from free balance
 - State chain integrity: Each commitment links to previous root
+
+**Fraud-proof lifecycle:** A challenger commits `computeFraudProofCommitHash(challenger, proof, salt)` (domain-separated and bound to the challenger, chain, bridge and full proof) with a bond against a state root. Any number of commitments may be open per root, so no challenger can block another. The reveal (2 minutes to 62 minutes after the commit) only acts on the root the bond was posted against, and every bond ends in one of three ways: **Won** (valid proof on a canonical, unchallenged root: bond + reward), **Refunded** (valid proof, but the root was already rejected or orphaned: bond only) or **Forfeited** (invalid or mismatched proof, or never revealed, via the permissionless `forfeitExpiredCommitment`). Pending bonds are escrowed and never fund rewards or `withdrawFees`. Each root's challenge deadline is snapshotted at submission, and commits close once a reveal window opened now could still be open at that deadline, so no challenge can be pending when a root becomes finalizable. Roots finalize strictly in chain order; a successful challenge on any canonical root rolls the committed head back to its parent, so that root and all its descendants can never finalize and the sequencer rebuilds from the parent. `pause()` freezes only finalization: commits, reveals, forfeits and legacy submissions are never paused, and bridging and settlements are gated by the bridge status. Disputes are bridged by the ILRM or an owner-authorized dispute bridger (`setDisputeBridger`, e.g. the L3DisputeBatcher), and settlement batches by the sequencer or an owner-authorized settlement relayer (`setSettlementRelayer`).
 
 ### Category 5: Treasury Enhancements (Low Priority)
 

@@ -17,6 +17,26 @@ import "../interfaces/IILRM.sol";
  * - Gas-efficient batch operations
  * - Automatic batch triggers based on size/time
  * - FIX I-02: Two-step ownership transfer via Ownable2Step
+ *
+ * Required bridge grants (the bridge owner must run these once the batcher is deployed):
+ * - l3Bridge.setDisputeBridger(batcher, true)    - lets batches call bridgeDisputeBatchToL3
+ * - l3Bridge.setSettlementRelayer(batcher, true) - lets processSettlementBatch call batchProcessSettlements
+ *
+ * Dispute batches:
+ * - A batch is submitted with one bridgeDisputeBatchToL3 call. Disputes that are already bridged
+ *   (or duplicated within the batch) are skipped by the bridge, and BatchSubmitted.disputeCount
+ *   counts only the disputes actually bridged.
+ * - The queue is cleared before the bridge is called. A manual submission (submitInitiationBatch,
+ *   forceSubmitBatch) reverts as a whole if the bridge reverts, restoring the queue.
+ * - Auto-batching (on the queue call that fills the batch, or once MIN_BATCH_SIZE items have waited
+ *   MAX_BATCH_WAIT) runs as an isolated self-call. If it fails for any reason (bridge revert, missing
+ *   role, bridge inactive, out of gas) the self-call is rolled back, the queue stays intact,
+ *   AutoBatchFailed is emitted and the queue call itself still succeeds.
+ *
+ * Settlement batches:
+ * - Only the bridge's current sequencer can queue settlements; any authorized submitter can relay them.
+ * - A batch queued by a sequencer that has since been replaced is never relayed: processSettlementBatch
+ *   reverts SequencerChanged, and the new sequencer's first queueSettlement discards the stale batch.
  */
 contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
     // ============ Constants ============
@@ -53,6 +73,9 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
     /// @notice Authorized batch submitters
     mapping(address => bool) public authorizedSubmitters;
 
+    /// @notice Bridge sequencer that queued the current settlement batch (zero when the queue is empty)
+    address public settlementBatchSequencer;
+
     // ============ Events ============
 
     event DisputeQueued(uint256 indexed l2DisputeId, address indexed initiator, uint256 batchPosition);
@@ -65,6 +88,10 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
 
     event SubmitterAuthorized(address indexed submitter, bool authorized);
 
+    event AutoBatchFailed(uint256 pendingCount, bytes reason);
+
+    event StaleSettlementsDiscarded(address indexed queuedBy, uint256 count);
+
     // ============ Errors ============
 
     error BatchFull();
@@ -72,6 +99,8 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
     error NotAuthorizedSubmitter(address caller);
     error BatchNotReady();
     error InvalidBatchData();
+    error NotBridgeSequencer(address caller);
+    error SequencerChanged(address queuedBy, address current);
 
     // ============ Constructor ============
 
@@ -126,31 +155,59 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
 
         emit DisputeQueued(message.l2DisputeId, message.initiator, position);
 
-        // Check if auto-batch should trigger
+        // Check if auto-batch should trigger. The batch runs as an isolated self-call so that a failure
+        // (of any kind, including out-of-gas with empty revert data) rolls back atomically, keeps the
+        // queue intact and never makes this queue call revert.
         if (autoBatchEnabled && _shouldTriggerBatch()) {
-            _submitInitiationBatch();
+            try this.executeAutoBatch() {}
+            catch (bytes memory reason) {
+                emit AutoBatchFailed(_pendingInitiations.length, reason);
+            }
         }
     }
 
     /**
+     * @notice Execute an auto-triggered batch submission
+     * @dev Only callable by this contract (from queueDisputeInitiation, which holds the reentrancy lock)
+     */
+    function executeAutoBatch() external {
+        if (msg.sender != address(this)) revert NotAuthorizedSubmitter(msg.sender);
+        _submitInitiationBatch();
+    }
+
+    /**
      * @notice Queue a settlement for batched processing
+     * @dev Only the bridge's current sequencer can queue settlements. If the queue holds a batch queued
+     *      by a previous sequencer, that stale batch is discarded first.
      * @param message The settlement data
      * @return position Position in current batch
      */
     function queueSettlement(IL3Bridge.DisputeSettlementMessage calldata message)
         external
-        onlyAuthorizedSubmitter
         nonReentrant
         returns (uint256 position)
     {
+        address seq = l3Bridge.getSequencerConfig().sequencerAddress;
+        if (msg.sender != seq) revert NotBridgeSequencer(msg.sender);
+
+        uint256 len = _pendingSettlements.length;
+        if (len != 0 && settlementBatchSequencer != msg.sender) {
+            emit StaleSettlementsDiscarded(settlementBatchSequencer, len);
+            delete _pendingSettlements;
+            len = 0;
+        }
+        if (len == 0) {
+            settlementBatchSequencer = msg.sender;
+        }
+
         // Check batch capacity
-        if (_pendingSettlements.length >= MAX_BATCH_SIZE) {
+        if (len >= MAX_BATCH_SIZE) {
             revert BatchFull();
         }
 
         // Add to batch
         _pendingSettlements.push(message);
-        position = _pendingSettlements.length - 1;
+        position = len;
 
         emit SettlementQueued(message.l2DisputeId, message.l3DisputeId, position);
     }
@@ -173,43 +230,63 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
 
     /**
      * @notice Internal batch submission
+     * @dev Checks-effects-interactions: the queue is copied and cleared before the bridge is called.
+     *      If the bridge reverts, the whole call (including the clear) is rolled back.
+     * @return batchId The batch identifier (hash of the submitted batch)
+     * @return count Number of disputes actually bridged (already-bridged disputes are skipped)
      */
     function _submitInitiationBatch() internal returns (uint256 batchId, uint256 count) {
-        count = _pendingInitiations.length;
-        if (count == 0) revert BatchEmpty();
+        uint256 len = _pendingInitiations.length;
+        if (len == 0) revert BatchEmpty();
+
+        IL3Bridge.DisputeInitiationMessage[] memory batch = _pendingInitiations;
 
         // Compute batch hash for tracking
-        bytes32 batchHash = keccak256(abi.encode(_pendingInitiations));
+        bytes32 batchHash = keccak256(abi.encode(batch));
         batchId = uint256(batchHash);
 
-        // Bridge each dispute
-        for (uint256 i = 0; i < count; i++) {
-            l3Bridge.bridgeDisputeToL3(_pendingInitiations[i]);
+        // Clear batch before the external call
+        delete _pendingInitiations;
+        batchStartTime = 0;
+
+        // Bridge the whole batch in one call
+        uint256[] memory l3Ids = l3Bridge.bridgeDisputeBatchToL3(batch);
+        if (l3Ids.length != len) revert InvalidBatchData();
+
+        for (uint256 i = 0; i < len; i++) {
+            if (l3Ids[i] != 0) count++;
         }
 
         emit BatchSubmitted(batchId, count, batchHash);
-
-        // Clear batch
-        delete _pendingInitiations;
-        batchStartTime = 0;
     }
 
     /**
      * @notice Process settlement batch through L3 bridge
+     * @dev Requires the batcher to be an authorized settlement relayer on the bridge, and the bridge's
+     *      sequencer to be the one that queued the batch.
      * @return count Number of settlements processed
      */
     function processSettlementBatch() external onlyAuthorizedSubmitter nonReentrant returns (uint256 count) {
         count = _pendingSettlements.length;
         if (count == 0) revert BatchEmpty();
 
-        // Process through bridge
-        l3Bridge.batchProcessSettlements(_pendingSettlements);
+        // Never relay a batch queued by a sequencer that has since been replaced
+        address current = l3Bridge.getSequencerConfig().sequencerAddress;
+        if (settlementBatchSequencer != current) {
+            revert SequencerChanged(settlementBatchSequencer, current);
+        }
 
-        uint256 batchId = uint256(keccak256(abi.encode(_pendingSettlements)));
-        emit SettlementBatchProcessed(batchId, count);
+        IL3Bridge.DisputeSettlementMessage[] memory batch = _pendingSettlements;
+        uint256 batchId = uint256(keccak256(abi.encode(batch)));
 
-        // Clear batch
+        // Clear batch before the external call
         delete _pendingSettlements;
+        settlementBatchSequencer = address(0);
+
+        // Process through bridge
+        l3Bridge.batchProcessSettlements(batch);
+
+        emit SettlementBatchProcessed(batchId, count);
     }
 
     // ============ Batch Status ============
@@ -340,6 +417,7 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
         delete _pendingInitiations;
         delete _pendingSettlements;
         batchStartTime = 0;
+        settlementBatchSequencer = address(0);
     }
 
     /**

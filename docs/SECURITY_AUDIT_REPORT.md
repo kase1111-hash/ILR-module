@@ -158,6 +158,8 @@ function revealFraudProof(FraudProof calldata proof, bytes32 salt) external;
 4. Reveal must occur within `MAX_REVEAL_WINDOW` (1 hour) or commitment expires
 5. `submitFraudProof()` is disabled when commit-reveal mode is enabled
 
+**Follow-up (challenge griefing):** The first version allowed only one live commitment per state root, so a griefer could front-run honest commits and re-commit at every expiry to keep a fraudulent root unchallengeable until it finalized, and a reveal was never checked against the root it was committed for. Commitments are now keyed by `(challenger, commitHash)`, any number may be open per root, and the commit hash (`computeFraudProofCommitHash`) is domain-separated and binds the challenger, so a copied hash or a copied reveal is useless to anyone else. A reveal only acts on its committed root and always settles the bond (Won, Refunded or Forfeited; invalid reveals now forfeit instead of reverting), escrowed bonds never fund rewards or fee withdrawals, challenge deadlines are snapshotted at submission with a commit cutoff, roots finalize in chain order with rollback of rejected roots and their descendants, and `pause()` freezes finalization rather than challenges. Regression tests: `test/L3FraudProofs.t.sol`.
+
 ---
 
 ### H-03: Duplicate Fraud Challenges (Previously Fixed)
