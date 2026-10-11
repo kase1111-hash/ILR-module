@@ -123,6 +123,8 @@ interface IDIDRegistry {
     error CredentialExpired(bytes32 credentialId);
     error InsufficientSybilScore(bytes32 did, uint256 required, uint256 actual);
     error AddressAlreadyHasDID(address controller);
+    /// @notice DID already holds MAX_CREDENTIALS_FOR_SCORE credentials that are neither revoked nor expired.
+    error TooManyCredentials(bytes32 did);
 
     // ============ DID Management Functions ============
 
@@ -202,6 +204,9 @@ interface IDIDRegistry {
      * @param expiresAt Expiration timestamp (0 = never)
      * @param weight Weight for sybil score (0-100)
      * @return credentialId The issued credential ID
+     * @dev A DID holds at most MAX_CREDENTIALS_FOR_SCORE (50) credentials, all of which are scored. When the
+     *      DID's array is full, revoked and expired entries are pruned first (swap-and-pop); if it is still full
+     *      the call reverts with TooManyCredentials. The DID controller can revoke a credential to make room.
      */
     function issueCredential(
         bytes32 did,
@@ -229,6 +234,8 @@ interface IDIDRegistry {
      * @notice Get all credentials for a DID
      * @param did The DID to get credentials for
      * @return Array of credential IDs
+     * @dev At most MAX_CREDENTIALS_FOR_SCORE entries. Order is not preserved: revoked/expired entries are removed
+     *      by cleanupCredentials or automatically when issuance finds the array full.
      */
     function getCredentials(bytes32 did) external view returns (bytes32[] memory);
 

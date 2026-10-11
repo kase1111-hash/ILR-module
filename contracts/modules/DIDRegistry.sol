@@ -28,7 +28,8 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
     /// @notice Maximum delegates per DID
     uint256 public constant MAX_DELEGATES = 10;
 
-    /// @notice Maximum credentials per DID for score calculation
+    /// @notice Maximum credentials a DID can hold; the sybil score covers all of them.
+    /// @dev Bounds every per-DID credential loop (FIX M-04). Revoked/expired entries are pruned to make room.
     uint256 public constant MAX_CREDENTIALS_FOR_SCORE = 50;
 
     /// @notice Maximum sybil score
@@ -311,6 +312,13 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
         // Cap weight at 100
         if (weight > 100) weight = 100;
 
+        // FIX M-04: a DID holds at most MAX_CREDENTIALS_FOR_SCORE credentials so the score always covers all of
+        // them. When full, prune revoked/expired entries first; reject if every slot is still held.
+        if (_didCredentials[did].length >= MAX_CREDENTIALS_FOR_SCORE) {
+            _pruneCredentials(did);
+            if (_didCredentials[did].length >= MAX_CREDENTIALS_FOR_SCORE) revert TooManyCredentials(did);
+        }
+
         // Generate credential ID
         _credentialCounter++;
         credentialId = keccak256(
@@ -334,7 +342,7 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
         _didCredentials[did].push(credentialId);
         totalCredentials++;
 
-        // Recalculate sybil score
+        // Recalculate sybil score (covers any entries pruned above and the new credential)
         _updateSybilScore(did);
 
         emit CredentialIssued(credentialId, did, msg.sender, attestationType);
@@ -364,11 +372,29 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
 
     /**
      * @notice FIX M-04: Clean up revoked and expired credentials from DID's credential array
-     * @dev Removes credentials that are revoked or expired to prevent unbounded array growth
+     * @dev Removes credentials that are revoked or expired (swap-and-pop). Permissionless and callable while
+     *      paused. Bounded: at most MAX_CREDENTIALS_FOR_SCORE (50) iterations, since a DID never holds more.
      * @param did The DID to clean up credentials for
      * @return removedCount Number of credentials removed
      */
     function cleanupCredentials(bytes32 did) external nonReentrant returns (uint256 removedCount) {
+        removedCount = _pruneCredentials(did);
+
+        // Recalculate sybil score after cleanup
+        if (removedCount > 0) {
+            _updateSybilScore(did);
+        }
+    }
+
+    /**
+     * @notice Remove revoked and expired credentials from a DID's credential array (swap-and-pop)
+     * @dev Bounded by MAX_CREDENTIALS_FOR_SCORE: the array can never exceed it. Emits nothing and does not
+     *      update the sybil score; callers do. Zero-weight and inactive-issuer credentials are kept on purpose:
+     *      they count again if the issuer is re-added, consistent with verifyCredential.
+     * @param did The DID to prune
+     * @return removedCount Number of credentials removed
+     */
+    function _pruneCredentials(bytes32 did) internal returns (uint256 removedCount) {
         bytes32[] storage credIds = _didCredentials[did];
         uint256 i = 0;
 
@@ -388,16 +414,12 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
                 i++;
             }
         }
-
-        // Recalculate sybil score after cleanup
-        if (removedCount > 0) {
-            _updateSybilScore(did);
-        }
     }
 
     /**
      * @notice Get count of active (non-revoked, non-expired) credentials for a DID
-     * @dev Iterates through all credentials checking revocation status and expiration
+     * @dev Iterates through all of the DID's credentials checking revocation status and expiration; bounded by
+     *      MAX_CREDENTIALS_FOR_SCORE (50) since a DID never holds more
      * @param did The DID to check credentials for
      * @return count Number of active (valid) credentials associated with the DID
      */
@@ -459,6 +481,8 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
 
     /**
      * @notice Internal function to update sybil score
+     * @dev Scores every credential the DID holds (array length <= MAX_CREDENTIALS_FOR_SCORE); the length cap
+     *      below is defensive only.
      */
     function _updateSybilScore(bytes32 did) internal returns (uint256 score) {
         bytes32[] storage credIds = _didCredentials[did];
