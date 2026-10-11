@@ -25,14 +25,19 @@ describe("Integration Tests", function () {
     const types = {
       Proposal: [
         { name: "disputeId", type: "uint256" },
+        { name: "round", type: "uint256" },
+        { name: "evidenceHash", type: "bytes32" },
         { name: "proposalHash", type: "bytes32" },
         { name: "nonce", type: "uint256" }
       ]
     };
+    const [round, evidenceHash, nonce] = await oracle.proposalContext(disputeId);
     const value = {
       disputeId,
+      round,
+      evidenceHash,
       proposalHash: ethers.keccak256(ethers.toUtf8Bytes(proposal)),
-      nonce: await oracle.getNonce(disputeId)
+      nonce
     };
     const signature = await operator.signTypedData(domain, types, value);
     return oracle.connect(operator).submitProposal(disputeId, proposal, signature);
@@ -289,8 +294,6 @@ describe("Integration Tests", function () {
       console.log("     🔥 0.02 ETH counter fee burned");
 
       console.log("\n  📋 Step 4: Oracle submits new proposal");
-      // The Oracle accepts one proposal per dispute; the owner re-opens it for the new round
-      await oracle.resetProposal(0, "counter-proposal round");
       await submitSignedProposal(oracle, oracleOperator, 0, '{"round":2,"compromise":true}');
 
       console.log("\n  📋 Step 5: Both accept compromise");
@@ -303,8 +306,8 @@ describe("Integration Tests", function () {
 
       console.log("     ✓ Agreement reached after 2 counter-proposals");
 
-      // Each submission consumed a nonce (round 1, reset, round 2)
-      expect(await oracle.getNonce(0)).to.equal(3);
+      // Each submission consumed a nonce (initial round, final round); no admin reset needed
+      expect(await oracle.getNonce(0)).to.equal(2);
       console.log("     💰 Total counter fees: 0.03 ETH burned");
       console.log("\n  🎉 Negotiation successful!\n");
     });
@@ -312,7 +315,7 @@ describe("Integration Tests", function () {
 
   describe("Scenario 4b: Oracle Signature Replay Protection", function () {
     /**
-     * SCENARIO: After the owner re-opens a dispute for a new proposal round,
+     * SCENARIO: After the owner voids a round's proposal (recovery),
      * a signature produced for the previous nonce must not be accepted.
      */
     it("should reject a proposal signed for a stale nonce", async function () {
@@ -334,10 +337,18 @@ describe("Integration Tests", function () {
         { name: "NatLangChainOracle", version: "1", chainId, verifyingContract: oracle.target },
         { Proposal: [
           { name: "disputeId", type: "uint256" },
+          { name: "round", type: "uint256" },
+          { name: "evidenceHash", type: "bytes32" },
           { name: "proposalHash", type: "bytes32" },
           { name: "nonce", type: "uint256" }
         ] },
-        { disputeId: 0, proposalHash: ethers.keccak256(ethers.toUtf8Bytes(proposal)), nonce: 0 }
+        {
+          disputeId: 0,
+          round: 0,
+          evidenceHash: ethers.ZeroHash,
+          proposalHash: ethers.keccak256(ethers.toUtf8Bytes(proposal)),
+          nonce: 0
+        }
       );
       await oracle.connect(oracleOperator).submitProposal(0, proposal, signature);
 

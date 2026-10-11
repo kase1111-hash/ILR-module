@@ -61,11 +61,11 @@ ILRM is a non-adjudicative dispute resolution protocol for IP licensing. Parties
 ```
 Initiator -> ILRM.initiateBreachDispute() [stakes tokens]
 Counterparty -> ILRM.depositStake() [matches stake]
-  ILRM -> Oracle.requestProposal() [triggers LLM]
-Oracle -> ILRM.submitLLMProposal() [with EIP-712 signature]
+  (off-chain LLM run; ILRM does not call Oracle.requestProposal)
+Oracle -> ILRM.submitLLMProposal() [EIP-712 signature over (disputeId, round, evidenceHash, proposalHash, nonce); one per round]
 Both parties -> ILRM.acceptProposal() [if both accept, dispute resolves]
   or
-Party -> ILRM.counterPropose() [burns ETH fee, resets oracle]
+Party -> ILRM.counterPropose() [burns ETH fee, opens a new oracle proposal round]
   or
 Anyone -> ILRM.enforceTimeout() [50% burn + fallback license]
 

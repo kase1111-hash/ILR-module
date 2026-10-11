@@ -34,9 +34,13 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
     /// @notice FIX M-05: Store original chain ID to detect forks
     uint256 private immutable _CACHED_CHAIN_ID;
 
-    /// @notice EIP-712 typehash for proposals
+    /**
+     * @notice EIP-712 typehash for proposals
+     * @dev round = ILRM Dispute.counterCount and evidenceHash = ILRM Dispute.evidenceHash at signing time,
+     *      so a counter-proposal or a reset (which bumps the nonce) changes the digest.
+     */
     bytes32 public constant PROPOSAL_TYPEHASH =
-        keccak256("Proposal(uint256 disputeId,bytes32 proposalHash,uint256 nonce)");
+        keccak256("Proposal(uint256 disputeId,uint256 round,bytes32 evidenceHash,bytes32 proposalHash,uint256 nonce)");
 
     // ============ State Variables ============
 
@@ -55,8 +59,12 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
     /// @notice Pending proposal requests
     mapping(uint256 => bool) public pendingRequests;
 
-    /// @notice Processed proposals
-    mapping(uint256 => bytes32) public processedProposals;
+    /**
+     * @notice Proposal admitted per negotiation round: disputeId => round => proposal hash
+     * @dev round is the dispute's ILRM counterCount. Zero means the round is still open. Each round admits
+     *      exactly one proposal; only the owner's resetProposal re-opens a filled slot of the current round.
+     */
+    mapping(uint256 => mapping(uint256 => bytes32)) public roundProposals;
 
     // ============ Events ============
 
@@ -66,16 +74,24 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
     /// @notice Emitted when proposal is submitted to ILRM
     event ProposalSubmittedToILRM(uint256 indexed disputeId, bytes32 proposalHash, address indexed oracle);
 
+    /// @notice Emitted when a round's proposal slot is filled; nonce is the one the signature consumed
+    event ProposalRoundFilled(uint256 indexed disputeId, uint256 indexed round, bytes32 proposalHash, uint256 nonce);
+
+    /// @notice Emitted when the owner voids a round's live proposal and re-opens the slot for one replacement
+    event ProposalRoundReopened(uint256 indexed disputeId, uint256 indexed round, bytes32 voidedProposalHash);
+
     // ============ Errors ============
 
     error NotILRM(address caller);
     error NotOracle(address caller);
     error InvalidSignature();
-    error ProposalAlreadyProcessed(uint256 disputeId);
+    error ProposalAlreadyProcessed(uint256 disputeId, uint256 round);
     error NoRequestPending(uint256 disputeId);
     error InvalidAddress();
     error NoProposalToReset(uint256 disputeId);
     error NoPendingRequest(uint256 disputeId);
+    error DisputeAlreadyResolved(uint256 disputeId);
+    error ILRMNotSet();
 
     // ============ Constructor ============
 
@@ -147,15 +163,19 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
 
     /**
      * @inheritdoc IOracle
-     * @dev Called by oracle operator after LLM processing
+     * @dev Called by oracle operator after LLM processing. Admits at most one proposal per round
+     *      (ILRM counterCount); every round opened by counterPropose accepts a new proposal without admin action.
      */
     function submitProposal(uint256 disputeId, string calldata proposal, bytes calldata signature)
         external
         override
         onlyOracle
     {
-        if (processedProposals[disputeId] != bytes32(0)) {
-            revert ProposalAlreadyProcessed(disputeId);
+        if (ilrmContract == address(0)) revert ILRMNotSet();
+
+        (uint256 round, bytes32 evidenceHash) = _roundContext(disputeId);
+        if (roundProposals[disputeId][round] != bytes32(0)) {
+            revert ProposalAlreadyProcessed(disputeId, round);
         }
 
         bytes32 proposalHash = keccak256(bytes(proposal));
@@ -165,29 +185,32 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
         if (signature.length == 0) {
             revert InvalidSignature();
         }
-        if (!verifySignature(disputeId, proposalHash, signature)) {
+        uint256 nonce = proposalNonces[disputeId];
+        if (!_isOracle[_digest(disputeId, round, evidenceHash, proposalHash, nonce).recover(signature)]) {
             revert InvalidSignature();
         }
 
-        // Mark as processed (also blocks re-entrant submission for this dispute)
-        processedProposals[disputeId] = proposalHash;
+        // Fill this round's slot before the external call; any ILRM revert rolls it back
+        roundProposals[disputeId][round] = proposalHash;
         pendingRequests[disputeId] = false;
 
-        // Submit to ILRM
+        // No re-entry: ILRM calls back only verifySignature (view, STATICCALL); submitProposal is onlyOracle;
+        // this round's slot is already filled; ILRM.submitLLMProposal is nonReentrant.
         IILRM(ilrmContract).submitLLMProposal(disputeId, proposal, signature);
 
         // Consume the nonce only after ILRM has re-verified the signature via verifySignature(),
         // which hashes the current nonce; bumping it earlier makes that check always fail.
-        // ILRM is trusted and re-entry for this dispute is blocked by processedProposals above.
         // slither-disable-next-line reentrancy-no-eth
-        proposalNonces[disputeId]++;
+        proposalNonces[disputeId] = nonce + 1;
 
         emit ProposalSubmittedToILRM(disputeId, proposalHash, msg.sender);
-        emit DisputeProcessed(disputeId, bytes32(0), proposalHash);
+        emit ProposalRoundFilled(disputeId, round, proposalHash, nonce);
+        emit DisputeProcessed(disputeId, evidenceHash, proposalHash);
     }
 
     /**
      * @inheritdoc IOracle
+     * @dev Verifies against the dispute's current round, evidence and nonce. Returns false while no ILRM is set.
      */
     function verifySignature(uint256 disputeId, bytes32 proposalHash, bytes calldata signature)
         public
@@ -195,17 +218,13 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
         override
         returns (bool valid)
     {
-        bytes32 structHash =
-            keccak256(abi.encode(PROPOSAL_TYPEHASH, disputeId, proposalHash, proposalNonces[disputeId]));
-
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), structHash));
-
-        address signer = digest.recover(signature);
-        return _isOracle[signer];
+        if (ilrmContract == address(0)) return false;
+        return _isOracle[proposalDigest(disputeId, proposalHash).recover(signature)];
     }
 
     /**
      * @notice Verify signature with explicit signer check
+     * @dev Verifies against the dispute's current round, evidence and nonce. Returns false while no ILRM is set.
      * @param disputeId The dispute ID
      * @param proposalHash Hash of the proposal
      * @param signature Signature to verify
@@ -218,15 +237,8 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
         bytes calldata signature,
         address expectedSigner
     ) external view returns (bool valid) {
-        if (!_isOracle[expectedSigner]) return false;
-
-        bytes32 structHash =
-            keccak256(abi.encode(PROPOSAL_TYPEHASH, disputeId, proposalHash, proposalNonces[disputeId]));
-
-        bytes32 digest = keccak256(abi.encodePacked("\x19\x01", DOMAIN_SEPARATOR(), structHash));
-
-        address signer = digest.recover(signature);
-        return signer == expectedSigner;
+        if (!_isOracle[expectedSigner] || ilrmContract == address(0)) return false;
+        return proposalDigest(disputeId, proposalHash).recover(signature) == expectedSigner;
     }
 
     // ============ View Functions ============
@@ -256,10 +268,56 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
         return proposalNonces[disputeId];
     }
 
+    /**
+     * @notice The EIP-712 digest an operator must sign right now to propose `proposalHash` for a dispute
+     * @dev Uses the live context: ILRM counterCount (round), ILRM evidenceHash and the current nonce
+     * @param disputeId The dispute ID
+     * @param proposalHash keccak256 of the proposal text
+     * @return The EIP-712 digest
+     */
+    function proposalDigest(uint256 disputeId, bytes32 proposalHash) public view returns (bytes32) {
+        if (ilrmContract == address(0)) revert ILRMNotSet();
+        (uint256 round, bytes32 evidenceHash) = _roundContext(disputeId);
+        return _digest(disputeId, round, evidenceHash, proposalHash, proposalNonces[disputeId]);
+    }
+
+    /**
+     * @notice The signing context of a dispute's current round
+     * @param disputeId The dispute ID
+     * @return round The dispute's ILRM counterCount
+     * @return evidenceHash The dispute's current ILRM evidenceHash
+     * @return nonce The nonce the next signature must use
+     * @return open True if the current round has no proposal yet
+     */
+    function proposalContext(uint256 disputeId)
+        external
+        view
+        returns (uint256 round, bytes32 evidenceHash, uint256 nonce, bool open)
+    {
+        if (ilrmContract == address(0)) revert ILRMNotSet();
+        (round, evidenceHash) = _roundContext(disputeId);
+        nonce = proposalNonces[disputeId];
+        open = roundProposals[disputeId][round] == bytes32(0);
+    }
+
+    /**
+     * @notice The proposal admitted in the dispute's current round (zero if none)
+     * @dev Kept for ABI compatibility; returns zero while no ILRM is set
+     * @param disputeId The dispute ID
+     * @return The current round's proposal hash
+     */
+    function processedProposals(uint256 disputeId) external view returns (bytes32) {
+        if (ilrmContract == address(0)) return bytes32(0);
+        (uint256 round,) = _roundContext(disputeId);
+        return roundProposals[disputeId][round];
+    }
+
     // ============ Admin Functions ============
 
     /**
      * @notice Set the ILRM contract address
+     * @dev Re-pointing to a different ILRM whose dispute IDs overlap is unsupported (round slots and nonces are
+     *      keyed by disputeId only); use resetProposal to clear a stale slot.
      * @param _ilrm New ILRM address
      */
     function setILRM(address _ilrm) external onlyOwner {
@@ -294,26 +352,37 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
     event ProposalReset(uint256 indexed disputeId, bytes32 oldProposalHash, string reason);
 
     /**
-     * @notice Reset a processed proposal to allow re-submission
-     * @dev FIX HIGH: Provides recovery mechanism for malicious/incorrect proposals
-     *      Only owner can reset, and it emits an audit event
+     * @notice Owner recovery: void the live proposal of the dispute's CURRENT round and allow exactly one
+     *         replacement
+     * @dev FIX HIGH: Provides recovery mechanism for malicious/incorrect proposals.
+     *      Bumps the nonce, so every signature made before the reset is dead. The voided text stays in ILRM, and
+     *      stays acceptable, until the replacement lands. ILRM then supersedes it and clears both acceptances.
+     *      Not needed between rounds: counterPropose opens a new round.
+     *      Revoke a compromised operator BEFORE resetting.
      * @param disputeId The dispute ID to reset
      * @param reason Human-readable reason for the reset
      */
     function resetProposal(uint256 disputeId, string calldata reason) external onlyOwner {
-        bytes32 oldHash = processedProposals[disputeId];
+        if (ilrmContract == address(0)) revert ILRMNotSet();
+
+        IILRM.Dispute memory d = IILRM(ilrmContract).disputes(disputeId);
+        if (d.resolved) revert DisputeAlreadyResolved(disputeId);
+
+        // Only the current round's live proposal can be voided; earlier rounds were already cleared by
+        // counterPropose, and an empty round has nothing to reset
+        uint256 round = d.counterCount;
+        bytes32 oldHash = roundProposals[disputeId][round];
         if (oldHash == bytes32(0)) revert NoProposalToReset(disputeId);
 
-        // Clear the processed proposal
-        processedProposals[disputeId] = bytes32(0);
-
-        // Re-enable the pending request so a new proposal can be submitted
+        // Re-open this round's slot for one replacement
+        roundProposals[disputeId][round] = bytes32(0);
         pendingRequests[disputeId] = true;
 
         // Increment nonce to invalidate any old signatures
         proposalNonces[disputeId]++;
 
         emit ProposalReset(disputeId, oldHash, reason);
+        emit ProposalRoundReopened(disputeId, round, oldHash);
     }
 
     /**
@@ -336,5 +405,31 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
         if (!_isOracle[oracle]) revert NotOracle(oracle);
         oraclePublicKeyHash[oracle] = publicKeyHash;
         emit OracleRegistered(oracle, publicKeyHash);
+    }
+
+    // ============ Internal Functions ============
+
+    /**
+     * @dev The dispute's current round (ILRM counterCount) and evidence hash, read through the IILRM.disputes view
+     *      (STATICCALL). Fields are accessed by name only.
+     */
+    function _roundContext(uint256 disputeId) internal view returns (uint256 round, bytes32 evidenceHash) {
+        IILRM.Dispute memory d = IILRM(ilrmContract).disputes(disputeId);
+        return (d.counterCount, d.evidenceHash);
+    }
+
+    /// @dev EIP-712 digest of a Proposal(disputeId, round, evidenceHash, proposalHash, nonce)
+    function _digest(uint256 disputeId, uint256 round, bytes32 evidenceHash, bytes32 proposalHash, uint256 nonce)
+        internal
+        view
+        returns (bytes32)
+    {
+        return keccak256(
+            abi.encodePacked(
+                "\x19\x01",
+                DOMAIN_SEPARATOR(),
+                keccak256(abi.encode(PROPOSAL_TYPEHASH, disputeId, round, evidenceHash, proposalHash, nonce))
+            )
+        );
     }
 }
