@@ -21,10 +21,17 @@ import "./interfaces/IILRM.sol";
  * - Pausable for emergency stops
  * - Two-step ownership transfer via Ownable2Step
  *
+ * Defensive subsidies are escrowed co-stakes, never wallet payouts: the counterparty opts in through
+ * ILRM.depositStakeWithSubsidy, ILRM calls fundStakeSubsidy (ILRM-only), and ILRM pulls the granted
+ * amount straight into dispute escrow. On resolution ILRM repays this treasury its pro-rata share of the
+ * counterparty payout with a plain ERC20 transfer (in full on mutual acceptance, net of its share of the
+ * burn on timeout). Repayments are not counted in totalInflows (index ILRM.SubsidyReturned), and the
+ * per-participant rolling allowance is charged gross and is not restored on repayment.
+ *
  * DID integration, tiered subsidies, and dynamic caps are available as
  * separate composable extensions (see contracts/modules/).
  */
-contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
+contract NatLangChainTreasury is ISubsidyTreasury, ReentrancyGuard, Pausable, Ownable2Step {
     using SafeERC20 for IERC20;
 
     // ============ State Variables ============
@@ -99,7 +106,7 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
     error NotCounterparty(address caller, address expected);
     error InvalidAddress();
     error DisputeAlreadyResolved(uint256 disputeId);
-    error CounterpartyAlreadyStaked(uint256 disputeId);
+    error SubsidyNotEscrowed(uint256 disputeId);
     error ScoreDeltaOutOfBounds(int256 delta);
     error ETHTransferFailed();
 
@@ -169,49 +176,47 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
     // ============ Subsidy Functions ============
 
     /**
-     * @notice Request defensive subsidy for a dispute
-     * @dev Only counterparty (defender) can request subsidy
+     * @notice Fund part (or all) of a counterparty's defensive stake in an ILRM dispute
+     * @dev Only callable by ILRM, from inside ILRM.depositStakeWithSubsidy: ILRM has already checked
+     *      that the caller is the counterparty, that the stake window is open and the dispute unresolved,
+     *      and has committed the matching stake. The subsidy is an escrowed co-stake, never a wallet
+     *      payout: this function only approves ILRM for exactly the granted amount, which ILRM pulls into
+     *      escrow in the same transaction (any revert there rolls this bookkeeping back too).
+     *      ILRM repays this treasury its pro-rata share of the counterparty payout on resolution with a
+     *      plain ERC20 transfer; the rolling allowance is charged gross and not restored on repayment.
      * @param disputeId The dispute ID in ILRM
-     * @param stakeNeeded Amount of stake required
-     * @param participant The participant requesting subsidy (must be counterparty)
+     * @param participant The counterparty (defender) being subsidized
+     * @param maxAmount Maximum subsidy requested (ILRM caps it at the dispute's stake)
+     * @return subsidyAmount Amount granted, after all caps; ILRM is approved for exactly this amount
      */
-    function requestSubsidy(uint256 disputeId, uint256 stakeNeeded, address participant)
+    function fundStakeSubsidy(uint256 disputeId, address participant, uint256 maxAmount)
         external
+        override
+        onlyILRM
         nonReentrant
         whenNotPaused
         returns (uint256 subsidyAmount)
     {
-        // Only the participant themselves can request their subsidy
-        if (msg.sender != participant) {
-            revert NotCounterparty(msg.sender, participant);
-        }
-
         // Validate request
         if (disputeSubsidized[disputeId]) {
             revert DisputeAlreadySubsidized(disputeId);
         }
-        if (stakeNeeded == 0) revert ZeroAmount();
+        if (maxAmount == 0) revert ZeroAmount();
 
-        // ILRM MUST be set before subsidies can be requested
-        if (ilrm == address(0)) {
-            revert InvalidAddress();
-        }
-
-        // Verify participant is the counterparty (defender, not initiator)
-        IILRM.Dispute memory d = IILRM(ilrm).disputes(disputeId);
+        // Verify participant is the counterparty (defender, not initiator); msg.sender == ilrm
+        IILRM.Dispute memory d = IILRM(msg.sender).disputes(disputeId);
 
         // Dispute must be active (not resolved)
         if (d.resolved) revert DisputeAlreadyResolved(disputeId);
 
-        // Counterparty must not have staked yet (subsidy is to HELP them stake)
-        if (d.counterpartyStake != 0) revert CounterpartyAlreadyStaked(disputeId);
-
-        if (participant != d.counterparty) {
+        // Initiators cannot receive subsidies (they're the attackers)
+        if (participant != d.counterparty || participant == d.initiator) {
             revert NotCounterparty(participant, d.counterparty);
         }
-        // Initiators cannot receive subsidies (they're the attackers)
-        if (participant == d.initiator) {
-            revert NotCounterparty(participant, d.counterparty);
+
+        // Defence in depth: ILRM must have committed the matching (symmetric) stake before calling
+        if (d.counterpartyStake == 0 || d.counterpartyStake != d.initiatorStake) {
+            revert SubsidyNotEscrowed(disputeId);
         }
 
         // Check harassment score (threshold-based, no tiers)
@@ -226,7 +231,12 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
         }
 
         // Calculate available subsidy
-        subsidyAmount = stakeNeeded;
+        subsidyAmount = maxAmount;
+
+        // Never more than the stake actually owed in the dispute
+        if (subsidyAmount > d.initiatorStake) {
+            subsidyAmount = d.initiatorStake;
+        }
 
         // Cap by per-dispute limit
         if (subsidyAmount > maxPerDispute) {
@@ -258,16 +268,18 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
         participantSubsidyUsed[participant] += subsidyAmount;
         totalSubsidiesDistributed += subsidyAmount;
 
-        // Transfer subsidy
-        token.safeTransfer(participant, subsidyAmount);
+        // ILRM pulls exactly this amount into dispute escrow; never pay a wallet
+        token.forceApprove(msg.sender, subsidyAmount);
 
         emit SubsidyFunded(participant, disputeId, subsidyAmount);
     }
 
     /**
      * @notice Calculate potential subsidy without executing
+     * @dev Preview only: it does not cap by the dispute's stake, so callers should pass the dispute's
+     *      initiatorStake (or less) as stakeNeeded to match what fundStakeSubsidy would grant.
      * @param disputeId The dispute ID
-     * @param stakeNeeded Amount of stake required
+     * @param stakeNeeded Amount of stake required (pass ILRM.disputes(disputeId).initiatorStake)
      * @param participant The participant to check
      * @return subsidyAmount Potential subsidy amount
      * @return eligible Whether participant is eligible

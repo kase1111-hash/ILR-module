@@ -164,4 +164,56 @@ interface IILRM {
      * @return Total number of disputes created
      */
     function getDisputeCount() external view returns (uint256);
+
+    // ============ Treasury Stake Subsidies ============
+
+    /// @notice Treasury-funded portion of a counterparty stake, escrowed in ILRM
+    struct StakeSubsidy {
+        address funder; // Treasury that funded the subsidy (repaid on resolution)
+        uint256 amount; // Subsidized portion of the counterparty stake
+    }
+
+    /// @notice Emitted when the owner changes the treasury allowed to fund stake subsidies
+    event SubsidyTreasuryUpdated(address indexed previousTreasury, address indexed newTreasury);
+
+    /// @notice Emitted when part (or all) of a counterparty stake is funded by a treasury
+    event StakeSubsidized(
+        uint256 indexed disputeId, address indexed counterparty, address indexed funder, uint256 amount
+    );
+
+    /// @notice Emitted when the funder's pro-rata share of the counterparty payout is repaid on resolution
+    event SubsidyReturned(uint256 indexed disputeId, address indexed funder, uint256 amount);
+
+    /**
+     * @notice Counterparty deposits the matching stake with part of it funded by the subsidy treasury
+     * @dev Counterparty-only, same checks as depositStake. Stakes exactly initiatorStake (stakes stay
+     *      symmetric): the treasury funds min(maxSubsidy, initiatorStake, treasury caps) straight into
+     *      ILRM escrow and the caller pays the rest. The caller needs an ERC20 allowance to ILRM for the
+     *      top-up, which also bounds what it can be charged. Atomic: if the treasury grants nothing or
+     *      the top-up cannot be pulled, the whole call reverts and nothing is reserved.
+     *      The subsidy is never paid to the caller's wallet; on resolution the funder is repaid its
+     *      pro-rata share of the counterparty payout.
+     * @param disputeId The dispute to stake into
+     * @param maxSubsidy Maximum amount the caller asks the treasury to fund
+     */
+    function depositStakeWithSubsidy(uint256 disputeId, uint256 maxSubsidy) external;
+
+    /**
+     * @notice Get the treasury subsidy recorded for a dispute's counterparty stake
+     * @param disputeId The dispute to query
+     * @return funder Treasury that funded the subsidy (address(0) if none)
+     * @return amount Subsidized portion of the counterparty stake (0 if none)
+     */
+    function stakeSubsidy(uint256 disputeId) external view returns (address funder, uint256 amount);
+}
+
+/**
+ * @title ISubsidyTreasury - Funder of defensive stake subsidies
+ * @notice Implemented by the treasury that ILRM.depositStakeWithSubsidy draws on
+ */
+interface ISubsidyTreasury {
+    /// @notice Called only by ILRM while staking. Grants up to maxAmount, approves ILRM for exactly the returned amount.
+    function fundStakeSubsidy(uint256 disputeId, address participant, uint256 maxAmount)
+        external
+        returns (uint256 subsidyAmount);
 }

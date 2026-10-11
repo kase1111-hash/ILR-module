@@ -17,7 +17,7 @@
  *   accept-proposal    -- Accept current proposal
  *   counter-propose    -- Submit counter-proposal
  *   enforce-timeout    -- Trigger timeout resolution
- *   request-subsidy    -- Request defensive subsidy
+ *   request-subsidy    -- Counterparty stakes with a Treasury-funded subsidy (escrowed, never paid out)
  *   status             -- View dispute state
  *   treasury-status    -- View treasury state
  *
@@ -193,16 +193,40 @@ async function enforceTimeout(contracts, signer) {
 
 async function requestSubsidy(contracts, signer) {
   const disputeId = process.env.DISPUTE_ID;
-  const stakeNeeded = process.env.STAKE || "1";
   if (!disputeId) throw new Error("DISPUTE_ID env var required");
 
-  const amount = ethers.parseEther(stakeNeeded);
-  console.log(`Requesting subsidy for dispute #${disputeId} (${stakeNeeded} tokens)...`);
-  const tx = await contracts.treasury.connect(signer).requestSubsidy(
-    disputeId, amount, signer.address
+  // The subsidy funds part (or all) of the counterparty's stake in ILRM escrow; it is never paid
+  // to the wallet. The signer (counterparty) pays the rest of the stake as a top-up.
+  const d = await contracts.ilrm.disputes(disputeId);
+  const stake = d.initiatorStake;
+  const maxSubsidy = process.env.MAX_SUBSIDY ? ethers.parseEther(process.env.MAX_SUBSIDY) : ethers.MaxUint256;
+  const requested = stake < maxSubsidy ? stake : maxSubsidy;
+
+  const [preview, eligible] = await contracts.treasury.calculateSubsidy(disputeId, requested, signer.address);
+  if (!eligible) throw new Error(`No subsidy available for ${signer.address} on dispute #${disputeId}`);
+
+  // Approve ILRM for exactly the top-up (the allowance also bounds what the call can charge)
+  const ilrmAddress = await contracts.ilrm.getAddress();
+  const topUp = stake - preview;
+  if (topUp > 0n) {
+    const allowance = await contracts.token.allowance(signer.address, ilrmAddress);
+    if (allowance < topUp) {
+      console.log(`Approving ILRM for the ${ethers.formatEther(topUp)}-token top-up...`);
+      const approveTx = await contracts.token.connect(signer).approve(ilrmAddress, topUp);
+      await approveTx.wait();
+    }
+  }
+
+  console.log(
+    `Staking ${ethers.formatEther(stake)} tokens on dispute #${disputeId} ` +
+    `with a subsidy of up to ${ethers.formatEther(preview)} tokens...`
   );
+  const tx = await contracts.ilrm.connect(signer).depositStakeWithSubsidy(disputeId, maxSubsidy);
   const receipt = await tx.wait();
-  console.log(`Subsidy granted (tx: ${receipt.hash})`);
+  const [funder, amount] = await contracts.ilrm.stakeSubsidy(disputeId);
+  console.log(`Subsidized stake deposited (tx: ${receipt.hash})`);
+  console.log(`  Subsidy:    ${ethers.formatEther(amount)} tokens from ${funder}`);
+  console.log(`  Top-up paid: ${ethers.formatEther(stake - amount)} tokens`);
   console.log(`  Gas used: ${receipt.gasUsed.toString()}`);
 }
 
@@ -228,6 +252,10 @@ async function showStatus(contracts) {
   console.log(`  Resolved:           ${d[9]}`);
   console.log(`  Outcome:            ${outcomeNames[Number(d[10])]}`);
   console.log(`  Counter Count:      ${d[12]}`);
+  const [subsidyFunder, subsidyAmount] = await contracts.ilrm.stakeSubsidy(disputeId);
+  if (subsidyAmount > 0n) {
+    console.log(`  Subsidized Portion: ${ethers.formatEther(subsidyAmount)} tokens (funded by ${subsidyFunder})`);
+  }
   console.log("─".repeat(50));
 }
 
@@ -299,7 +327,7 @@ async function main() {
       console.log("  accept-proposal    DISPUTE_ID=<id>");
       console.log("  counter-propose    DISPUTE_ID=<id> COUNTER_FEE=<eth>");
       console.log("  enforce-timeout    DISPUTE_ID=<id>");
-      console.log("  request-subsidy    DISPUTE_ID=<id> STAKE=<amount>");
+      console.log("  request-subsidy    DISPUTE_ID=<id> [MAX_SUBSIDY=<amount>]");
       console.log("  status             DISPUTE_ID=<id>");
       console.log("  treasury-status");
       console.log("\nExample:");

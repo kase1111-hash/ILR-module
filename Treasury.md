@@ -44,7 +44,7 @@ The NatLangChain Treasury serves three core functions:
 | Feature | Status | Location |
 |---------|--------|----------|
 | Deposit Burns/Fees | Implemented | `Treasury.sol:151-171` |
-| Defensive Subsidies | Implemented | `Treasury.sol:189-273` |
+| Defensive Subsidies (escrowed co-stakes) | Implemented | `Treasury.fundStakeSubsidy()` via `ILRM.depositStakeWithSubsidy()` |
 | Per-Dispute Caps | Implemented | `Treasury.sol:242-244` |
 | Per-Participant Rolling Caps | Implemented | `Treasury.sol:247-250` |
 | Harassment Score Checks | Implemented | `Treasury.sol:228-230` |
@@ -73,7 +73,7 @@ The NatLangChain Treasury serves three core functions:
 A participant qualifies for subsidy if:
 
 1. **Target of Dispute**: Must be counterparty, not initiator
-2. **Opt-In Request**: Must explicitly call `requestSubsidy()`
+2. **Opt-In Request**: The counterparty opts in by staking via `ILRM.depositStakeWithSubsidy()` (inside the stake window, on an unresolved dispute)
 3. **Good History**: Harassment score below threshold (50)
 4. **Available Allowance**: Within per-participant rolling window cap
 5. **Dispute Not Subsidized**: No prior subsidy for this dispute
@@ -82,19 +82,51 @@ A participant qualifies for subsidy if:
 ### Subsidy Calculation
 
 ```
-baseSubsidy = min(stakeNeeded, maxPerDispute)
-availableAllowance = getEffectiveMaxPerParticipant() - participantSubsidyUsed[participant]
-subsidyWithCap = min(baseSubsidy, availableAllowance)
-subsidyMultiplier = getSubsidyMultiplier(participant)  // Based on harassment tier
-finalSubsidy = subsidyWithCap * subsidyMultiplier / 10000
+subsidy = min(
+    maxSubsidy,                                       // chosen by the counterparty in depositStakeWithSubsidy
+    initiatorStake,                                   // never more than the (escalated) stake owed
+    maxPerDispute,
+    maxPerParticipant - participantSubsidyUsed[participant],   // remaining rolling allowance
+    balance - minReserve
+)
+// subsidy == 0 reverts NoSubsidyAvailable; the counterparty pays initiatorStake - subsidy as a top-up
 ```
+
+`calculateSubsidy(disputeId, stakeNeeded, participant)` previews this; pass the dispute's
+`initiatorStake` (or `min(initiatorStake, maxSubsidy)`) as `stakeNeeded`.
 
 ### Payout & Safety
 
-- Funds transferred directly from treasury to participant for staking in ILRM
-- Max per-dispute limit enforced
+- **Escrowed co-stake, never paid to the wallet.** The counterparty calls `ILRM.depositStakeWithSubsidy(disputeId, maxSubsidy)`.
+  ILRM runs the same checks as `depositStake`, commits the symmetric stake, and calls the ILRM-only
+  `Treasury.fundStakeSubsidy()`, which applies every cap and approves ILRM for exactly the granted amount.
+  ILRM then pulls the subsidy plus the counterparty's top-up into dispute escrow, all in one atomic transaction.
+- Max per-dispute limit enforced; the grant is also capped at the dispute's stake
 - Max per-participant rolling window enforced
-- Treasury balance check ensures sustainability
+- Treasury balance check (`balance - minReserve`) ensures sustainability
+- On resolution ILRM splits the counterparty-side payout pro rata between the defender and the funding Treasury:
+
+| Resolution path | Counterparty-side payout | Treasury receives |
+|-----------------|--------------------------|-------------------|
+| Mutual acceptance | Full counterparty stake | The full subsidy (refunded in full) |
+| Timeout with burn | `floor(stake / 2)` | Pro-rata share of it; the Treasury absorbs partial burns (its share of the 50% burn) |
+| Non-participation | None (counterparty never staked) | Not applicable - no subsidy can exist |
+
+- The defender's share rounds down and the Treasury receives the remainder, so colluding parties can never
+  extract Treasury funds at a profit on any path.
+- Repayments are plain ERC20 transfers from ILRM (resolution never calls Treasury code, so it keeps working
+  while the Treasury is paused). They are not counted in `totalInflows`; index `ILRM.SubsidyReturned` instead.
+- The rolling allowance is charged gross and is **not** restored when a subsidy is repaid.
+
+### Deployment Wiring
+
+```solidity
+treasury.setILRM(address(ilrm));          // fundStakeSubsidy only accepts calls from this ILRM
+ilrm.setSubsidyTreasury(address(treasury)); // owner-only; address(0) disables subsidies
+```
+
+Rotating `ilrm.setSubsidyTreasury` only affects future subsidized stakes: each dispute repays the funder recorded
+when it was staked.
 
 ---
 
@@ -257,18 +289,22 @@ function depositETH() external payable;
 ### Subsidies
 
 ```solidity
-// Request subsidy for a dispute
-function requestSubsidy(
+// Counterparty entry point (on ILRM): stake with part of it funded by the subsidy treasury
+function depositStakeWithSubsidy(uint256 disputeId, uint256 maxSubsidy) external;
+
+// ILRM-only (onlyILRM): grant up to maxAmount and approve ILRM for exactly the returned amount
+function fundStakeSubsidy(
+    uint256 disputeId,
+    address participant,
+    uint256 maxAmount
+) external returns (uint256 subsidyAmount);
+
+// Preview subsidy without executing (pass the dispute's initiatorStake as stakeNeeded)
+function calculateSubsidy(
     uint256 disputeId,
     uint256 stakeNeeded,
     address participant
-) external returns (uint256 subsidyAmount);
-
-// Preview subsidy without executing
-function calculateSubsidy(
-    uint256 stakeNeeded,
-    address participant
-) external view returns (uint256);
+) external view returns (uint256 subsidyAmount, bool eligible);
 
 // Get remaining allowance for participant
 function getRemainingAllowance(
@@ -318,7 +354,9 @@ function emergencyWithdrawToken(address to, uint256 amount) external;
 | Event | Description |
 |-------|-------------|
 | `TreasuryReceived(uint256 amount)` | Funds deposited |
-| `SubsidyFunded(address participant, uint256 disputeId, uint256 amount)` | Subsidy granted |
+| `SubsidyFunded(address participant, uint256 disputeId, uint256 amount)` | Subsidy granted (escrowed in ILRM) |
+| `ILRM.StakeSubsidized(uint256 disputeId, address counterparty, address funder, uint256 amount)` | Subsidized stake deposited |
+| `ILRM.SubsidyReturned(uint256 disputeId, address funder, uint256 amount)` | Funder's pro-rata share repaid on resolution |
 | `HarassmentScoreUpdated(address participant, uint256 oldScore, uint256 newScore)` | Score changed |
 | `DynamicCapConfigUpdated(bool enabled, uint256 percentageBps, uint256 floor)` | Dynamic cap config changed |
 | `TieredSubsidyConfigUpdated(...)` | Tier config changed |
@@ -331,7 +369,7 @@ function emergencyWithdrawToken(address to, uint256 amount) external;
 |---------|------------|
 | Reentrancy | `ReentrancyGuard` on all external calls |
 | Sybil Attacks | Single subsidy per dispute, DID verification, harassment scores |
-| Treasury Drain | Per-dispute and per-participant caps, dynamic scaling |
+| Treasury Drain | Subsidies are escrowed co-stakes (never wallet payouts) repaid pro rata on resolution; grant capped at the dispute's stake; per-dispute and per-participant caps |
 | Unauthorized Access | `Ownable2Step` for admin functions |
 | Emergency Situations | `Pausable` for emergency stops |
 
