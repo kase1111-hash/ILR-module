@@ -48,6 +48,7 @@ describe("END-TO-END SECURITY TESTS", function () {
 
     // Configure treasury
     await treasury.setILRM(ilrm.target);
+    await ilrm.setSubsidyTreasury(treasury.target);
 
     // Fund accounts
     await token.mint(initiator.address, ethers.parseEther("10000"));
@@ -80,47 +81,45 @@ describe("END-TO-END SECURITY TESTS", function () {
      * TEST 1: Cannot claim subsidy for resolved dispute
      */
     it("TEST 1: Subsidy blocked for resolved disputes", async function () {
-      const { ilrm, treasury, token, oracle, initiator, counterparty, STAKE, EVIDENCE_HASH, fallback } = await loadFixture(deployFullSystem);
+      const { ilrm, initiator, counterparty, STAKE, EVIDENCE_HASH, fallback } = await loadFixture(deployFullSystem);
 
-      // Create and resolve dispute
+      // Create a dispute and let it default (counterparty never stakes)
       await ilrm.connect(initiator).initiateBreachDispute(counterparty.address, STAKE, EVIDENCE_HASH, fallback);
-      await ilrm.connect(counterparty).depositStake(0);
-      await ilrm.connect(oracle).submitLLMProposal(0, '{"proposal":"test"}', "0x");
-      await ilrm.connect(initiator).acceptProposal(0);
-      await ilrm.connect(counterparty).acceptProposal(0);
+      await time.increase(STAKE_WINDOW + 1);
+      await ilrm.enforceTimeout(0);
 
       // Dispute is now resolved - try to claim subsidy
       await expect(
-        treasury.connect(counterparty).requestSubsidy(0, STAKE, counterparty.address)
-      ).to.be.revertedWithCustomError(treasury, "DisputeAlreadyResolved");
+        ilrm.connect(counterparty).depositStakeWithSubsidy(0, STAKE)
+      ).to.be.revertedWith("Dispute resolved");
     });
 
     /**
      * TEST 2: Cannot claim subsidy if already staked
      */
     it("TEST 2: Subsidy blocked if counterparty already staked", async function () {
-      const { ilrm, treasury, initiator, counterparty, STAKE, EVIDENCE_HASH, fallback } = await loadFixture(deployFullSystem);
+      const { ilrm, initiator, counterparty, STAKE, EVIDENCE_HASH, fallback } = await loadFixture(deployFullSystem);
 
       await ilrm.connect(initiator).initiateBreachDispute(counterparty.address, STAKE, EVIDENCE_HASH, fallback);
       await ilrm.connect(counterparty).depositStake(0);
 
       // Already staked - try to claim subsidy
       await expect(
-        treasury.connect(counterparty).requestSubsidy(0, STAKE, counterparty.address)
-      ).to.be.revertedWithCustomError(treasury, "CounterpartyAlreadyStaked");
+        ilrm.connect(counterparty).depositStakeWithSubsidy(0, STAKE)
+      ).to.be.revertedWith("Already staked");
     });
 
     /**
      * TEST 3: Initiator cannot claim subsidy
      */
     it("TEST 3: Initiator cannot claim counterparty subsidy", async function () {
-      const { ilrm, treasury, initiator, counterparty, STAKE, EVIDENCE_HASH, fallback } = await loadFixture(deployFullSystem);
+      const { ilrm, initiator, counterparty, STAKE, EVIDENCE_HASH, fallback } = await loadFixture(deployFullSystem);
 
       await ilrm.connect(initiator).initiateBreachDispute(counterparty.address, STAKE, EVIDENCE_HASH, fallback);
 
       await expect(
-        treasury.connect(initiator).requestSubsidy(0, STAKE, initiator.address)
-      ).to.be.reverted; // NotCounterparty
+        ilrm.connect(initiator).depositStakeWithSubsidy(0, STAKE)
+      ).to.be.revertedWith("Not counterparty");
     });
 
     /**
@@ -131,10 +130,13 @@ describe("END-TO-END SECURITY TESTS", function () {
 
       await ilrm.connect(initiator).initiateBreachDispute(counterparty.address, STAKE, EVIDENCE_HASH, fallback);
 
-      // Attacker tries to claim for counterparty
+      // Attacker tries to claim for counterparty, through ILRM or straight at the treasury
       await expect(
-        treasury.connect(attacker).requestSubsidy(0, STAKE, counterparty.address)
-      ).to.be.reverted; // msg.sender != participant
+        ilrm.connect(attacker).depositStakeWithSubsidy(0, STAKE)
+      ).to.be.revertedWith("Not counterparty");
+      await expect(
+        treasury.connect(attacker).fundStakeSubsidy(0, counterparty.address, STAKE)
+      ).to.be.revertedWithCustomError(treasury, "NotILRM");
     });
 
     /**
@@ -149,8 +151,8 @@ describe("END-TO-END SECURITY TESTS", function () {
       await treasury.connect(owner).setHarassmentScore(counterparty.address, 60);
 
       await expect(
-        treasury.connect(counterparty).requestSubsidy(0, STAKE, counterparty.address)
-      ).to.be.reverted; // ParticipantFlaggedForAbuse
+        ilrm.connect(counterparty).depositStakeWithSubsidy(0, STAKE)
+      ).to.be.revertedWithCustomError(treasury, "ParticipantFlaggedForAbuse");
     });
   });
 
@@ -334,10 +336,10 @@ describe("END-TO-END SECURITY TESTS", function () {
         30 * 24 * 60 * 60
       );
 
-      // ILRM not set - requestSubsidy should fail
+      // ILRM not set - fundStakeSubsidy should fail
       await expect(
-        treasury.connect(counterparty).requestSubsidy(0, ethers.parseEther("10"), counterparty.address)
-      ).to.be.reverted; // InvalidAddress
+        treasury.connect(counterparty).fundStakeSubsidy(0, counterparty.address, ethers.parseEther("10"))
+      ).to.be.revertedWithCustomError(treasury, "NotILRM");
     });
 
     /**

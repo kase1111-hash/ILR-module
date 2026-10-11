@@ -69,8 +69,9 @@ Party -> ILRM.counterPropose() [burns ETH fee, resets oracle]
   or
 Anyone -> ILRM.enforceTimeout() [50% burn + fallback license]
 
-Counterparty -> Treasury.requestSubsidy() [if under-resourced]
-  Treasury -> IILRM.disputes() [verifies dispute state]
+Counterparty -> ILRM.depositStakeWithSubsidy() -> Treasury.fundStakeSubsidy() [onlyILRM, approves ILRM] -> ILRM pulls subsidy + counterparty top-up
+  Treasury -> IILRM.disputes() [verifies dispute state and the committed symmetric stake]
+  ILRM -> funding Treasury [pro-rata repayment of the counterparty payout on resolution, plain ERC20 transfer]
 ```
 
 ---
@@ -82,6 +83,7 @@ Counterparty -> Treasury.requestSubsidy() [if under-resourced]
 1. **Reentrancy in stake/withdrawal flows** (ILRM.sol)
    - `initiateBreachDispute` -> token transfer
    - `depositStake` -> token transfer
+   - `depositStakeWithSubsidy` -> `Treasury.fundStakeSubsidy` call, then subsidy + top-up pulls
    - `_resolveByAcceptance` -> token refunds
    - `_resolveByTimeout` -> token burns + refunds
 
@@ -98,7 +100,10 @@ Counterparty -> Treasury.requestSubsidy() [if under-resourced]
 4. **Treasury drain vectors** (Treasury.sol)
    - Double-subsidy per dispute (one-time flag)
    - Rolling window cap evasion
-   - `requestSubsidy` caller spoofing (msg.sender == participant check)
+   - `fundStakeSubsidy` caller restriction (`onlyILRM`; only reachable from `ILRM.depositStakeWithSubsidy`)
+   - Subsidy never exceeds the dispute's stake (`subsidy <= initiatorStake`) and is escrowed, never paid to a wallet
+   - Pro-rata repayment to the recorded funder on acceptance/timeout (`_payCounterpartySide` rounding) and
+     resolution liveness (no Treasury call during resolution; works with the Treasury paused or the pointer rotated)
    - Harassment score manipulation
 
 5. **Timeout/cooldown enforcement accuracy** (ILRM.sol)
@@ -123,7 +128,8 @@ Counterparty -> Treasury.requestSubsidy() [if under-resourced]
 8. **Front-running risks**
    - Can an attacker front-run `acceptProposal` to manipulate resolution?
    - Can an attacker front-run `depositStake` to deny counterparty participation?
-   - Can an attacker front-run `requestSubsidy` to claim another party's subsidy?
+   - Can anyone but the counterparty reach the subsidy? (`depositStakeWithSubsidy` is counterparty-only; `fundStakeSubsidy` is `onlyILRM`)
+   - Is `subsidy <= stake` always enforced, and is the pro-rata repayment correct and live on every resolution path?
 
 ### Medium Priority
 

@@ -355,16 +355,20 @@ describe("Integration Tests", function () {
      */
     it("should allow treasury to subsidize defender", async function () {
       const {
-        token, ilrm, treasury,
-        initiator, counterparty, STAKE
+        token, oracle, ilrm, treasury,
+        oracleOperator, initiator, counterparty, STAKE
       } = await loadFixture(deployFullSystem);
+      const SUBSIDY = ethers.parseEther("5"); // maxPerDispute
 
-      console.log("\n  📋 Step 1: Counterparty has no tokens");
-      // Simulate low-resource defender
+      // Let ILRM draw defensive stake subsidies from the treasury
+      await ilrm.setSubsidyTreasury(treasury.target);
+
+      console.log("\n  📋 Step 1: Counterparty only has half the stake");
+      // Simulate low-resource defender: keeps 5 of the 10 tokens needed
       const cpBalance = await token.balanceOf(counterparty.address);
-      await token.connect(counterparty).transfer(initiator.address, cpBalance);
-      expect(await token.balanceOf(counterparty.address)).to.equal(0);
-      console.log("     ✓ Counterparty balance: 0");
+      await token.connect(counterparty).transfer(initiator.address, cpBalance - (STAKE - SUBSIDY));
+      expect(await token.balanceOf(counterparty.address)).to.equal(STAKE - SUBSIDY);
+      console.log("     ✓ Counterparty balance: 5");
 
       console.log("\n  📋 Step 2: Initiator starts dispute");
       await ilrm.connect(initiator).initiateBreachDispute(
@@ -374,16 +378,27 @@ describe("Integration Tests", function () {
       );
       console.log("     ✓ Dispute initiated against low-resource party");
 
-      console.log("\n  📋 Step 3: Counterparty requests subsidy");
-      await treasury.connect(counterparty).requestSubsidy(0, STAKE, counterparty.address);
+      console.log("\n  📋 Step 3: Counterparty stakes with a treasury subsidy");
+      const treasuryBefore = await token.balanceOf(treasury.target);
+      await ilrm.connect(counterparty).depositStakeWithSubsidy(0, ethers.MaxUint256);
 
-      const subsidizedBalance = await token.balanceOf(counterparty.address);
-      expect(subsidizedBalance).to.equal(ethers.parseEther("5")); // maxPerDispute
-      console.log("     💰 Treasury subsidized 5 ETH");
+      const dispute = await ilrm.disputes(0);
+      expect(dispute.initiatorStake).to.equal(STAKE);
+      expect(dispute.counterpartyStake).to.equal(STAKE);
+      const [, subsidy] = await ilrm.stakeSubsidy(0);
+      expect(subsidy).to.equal(SUBSIDY);
+      expect(await token.balanceOf(counterparty.address)).to.equal(0); // paid only the 5-token top-up
+      expect(treasuryBefore - await token.balanceOf(treasury.target)).to.equal(SUBSIDY);
+      console.log("     💰 Treasury escrowed 5 of the 10-token stake");
 
-      console.log("\n  📋 Step 4: Counterparty can now participate");
-      // In real scenario, counterparty would now stake
-      // (would need additional tokens for full stake in this case)
+      console.log("\n  📋 Step 4: Proposal accepted by both parties");
+      await submitSignedProposal(oracle, oracleOperator, 0, '{"proposal":"cross-license"}');
+      await ilrm.connect(initiator).acceptProposal(0);
+      await ilrm.connect(counterparty).acceptProposal(0);
+
+      expect(await token.balanceOf(counterparty.address)).to.equal(STAKE - SUBSIDY);
+      expect(await token.balanceOf(treasury.target)).to.equal(treasuryBefore);
+      console.log("     ✓ Defender got its 5 back, treasury made whole");
 
       console.log("\n  🎉 Treasury protected low-resource defender!\n");
     });

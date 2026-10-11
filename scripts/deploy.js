@@ -86,6 +86,10 @@ async function main() {
   await treasury.setILRM(ilrmAddress);
   console.log("   Treasury: Set ILRM address");
 
+  // Let ILRM draw defensive stake subsidies from the Treasury (escrowed co-stakes)
+  await (await ilrm.setSubsidyTreasury(treasuryAddress)).wait();
+  console.log("   ILRM: Set subsidy treasury");
+
   // Register deployer as oracle operator (for testnet)
   if (network.name !== "mainnet") {
     const oracleKeyHash = ethers.keccak256(ethers.toUtf8Bytes("testnet-oracle-key"));

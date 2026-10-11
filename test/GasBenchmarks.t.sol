@@ -234,18 +234,19 @@ contract MockOracleBench is IOracle {
             treasury.deposit(1 ether, "benchmark_deposit");
         }
 
-        /// @notice Benchmark: Request subsidy
-        function testGas_Treasury_requestSubsidy() public {
-            // Fund treasury
+        /// @notice Benchmark: Counterparty stakes with a full Treasury subsidy
+        function testGas_ILRM_depositStakeWithSubsidy() public {
+            // Wire the subsidy treasury and fund it
+            ilrm.setSubsidyTreasury(address(treasury));
             token.mint(address(treasury), 100 ether);
 
-            // Create a dispute so counterparty can request subsidy
+            // Create a dispute the counterparty can stake into
             vm.prank(initiator);
             uint256 disputeId = ilrm.initiateBreachDispute(counterparty, STAKE_AMOUNT, EVIDENCE_HASH, fallbackLicense);
 
-            // Benchmark: Counterparty requests subsidy
+            // Benchmark: Counterparty stakes, fully funded by the treasury (maxPerDispute == STAKE_AMOUNT)
             vm.prank(counterparty);
-            treasury.requestSubsidy(disputeId, STAKE_AMOUNT, counterparty);
+            ilrm.depositStakeWithSubsidy(disputeId, STAKE_AMOUNT);
         }
 
         // =========================================================================

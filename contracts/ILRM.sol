@@ -6,6 +6,7 @@ import "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol";
 import "@openzeppelin/contracts/utils/ReentrancyGuard.sol";
 import "@openzeppelin/contracts/utils/Pausable.sol";
 import "@openzeppelin/contracts/access/Ownable2Step.sol";
+import "@openzeppelin/contracts/utils/math/Math.sol";
 import "./interfaces/IILRM.sol";
 import "./interfaces/IOracle.sol";
 import "./interfaces/IAssetRegistry.sol";
@@ -22,6 +23,9 @@ import "./interfaces/IAssetRegistry.sol";
  * - Analytics-ready: Events for every state transition
  * - Pausable for emergency stops
  * - Two-step ownership transfer via Ownable2Step
+ * - Optional Treasury-backed defensive stake subsidies (depositStakeWithSubsidy): the subsidy is
+ *   escrowed here as part of the counterparty stake, never paid to a wallet, and the funder is repaid
+ *   its pro-rata share of the counterparty payout on resolution
  *
  * Identity/privacy modules (ZK, FIDO, DID, viewing keys) are available as
  * separate composable contracts in contracts/modules/.
@@ -90,6 +94,12 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
 
     /// @notice Token reserves for initiator incentives
     uint256 public tokenReserves;
+
+    /// @notice Treasury allowed to fund defensive stake subsidies (address(0) = subsidies disabled)
+    address public subsidyTreasury;
+
+    /// @dev disputeId => who funded part of the counterparty stake and how much
+    mapping(uint256 => StakeSubsidy) private _stakeSubsidies;
 
     // ============ Constructor ============
 
@@ -182,7 +192,9 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
 
     /**
      * @inheritdoc IILRM
-     * @dev Implements Invariant 8 (Economic Symmetry by Default) - matched stakes
+     * @dev Implements Invariant 8 (Economic Symmetry by Default) - matched stakes.
+     *      A low-resource counterparty can instead opt in to depositStakeWithSubsidy, which stakes the
+     *      same amount with part of it funded by the subsidy treasury.
      */
     function depositStake(uint256 _disputeId) external override nonReentrant whenNotPaused {
         Dispute storage d = _disputes[_disputeId];
@@ -321,6 +333,58 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         }
     }
 
+    /**
+     * @inheritdoc IILRM
+     * @dev Invariant 8 (Economic Symmetry by Default): a Treasury-backed defensive subsidy is an opt-in
+     *      exception for the counterparty only, and stakes stay symmetric (counterpartyStake ==
+     *      initiatorStake). The subsidy is escrowed here as part of that stake - it never reaches the
+     *      counterparty's wallet - and _payCounterpartySide repays the recorded funder its pro-rata share
+     *      of whatever the counterparty side receives on resolution.
+     */
+    function depositStakeWithSubsidy(uint256 _disputeId, uint256 _maxSubsidy)
+        external
+        override
+        nonReentrant
+        whenNotPaused
+    {
+        Dispute storage d = _disputes[_disputeId];
+        require(msg.sender == d.counterparty, "Not counterparty");
+        require(d.counterpartyStake == 0, "Already staked");
+        require(!d.resolved, "Dispute resolved");
+        require(block.timestamp <= d.startTime + STAKE_WINDOW, "Stake window closed");
+
+        address funder = subsidyTreasury;
+        require(funder != address(0), "Subsidies disabled");
+        require(_maxSubsidy > 0, "Zero subsidy");
+
+        uint256 stake = d.initiatorStake;
+        uint256 requested = _maxSubsidy < stake ? _maxSubsidy : stake;
+
+        // Effect before any external call: the treasury verifies the matching stake is committed
+        d.counterpartyStake = stake;
+
+        uint256 subsidy = ISubsidyTreasury(funder).fundStakeSubsidy(_disputeId, msg.sender, requested);
+        require(subsidy > 0 && subsidy <= requested, "Invalid subsidy");
+
+        // Recorded after the treasury call because the granted amount is only known now. Safe against
+        // reentrancy: this function is nonReentrant, and every reader of the record (acceptProposal and
+        // enforceTimeout, via _payCounterpartySide) is nonReentrant too.
+        _stakeSubsidies[_disputeId] = StakeSubsidy({funder: funder, amount: subsidy});
+
+        // Pull exactly the granted subsidy; the funder approved exactly this amount in fundStakeSubsidy.
+        // A treasury that did not pay makes this revert, so escrow can never be under-collateralised.
+        // slither-disable-next-line arbitrary-send-erc20
+        token.safeTransferFrom(funder, address(this), subsidy);
+
+        // The counterparty pays the rest; its ERC20 allowance to ILRM bounds the top-up
+        if (stake > subsidy) {
+            token.safeTransferFrom(msg.sender, address(this), stake - subsidy);
+        }
+
+        emit StakeSubsidized(_disputeId, msg.sender, funder, subsidy);
+        emit StakeDeposited(_disputeId, msg.sender, stake);
+    }
+
     // ============ View Functions ============
 
     /// @inheritdoc IILRM
@@ -336,6 +400,16 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
     /// @inheritdoc IILRM
     function getDisputeCount() external view override returns (uint256) {
         return _disputeCounter;
+    }
+
+    /**
+     * @inheritdoc IILRM
+     * @dev Records are kept after resolution as history; double repayment is impossible because every
+     *      resolve function sets `resolved` before paying out.
+     */
+    function stakeSubsidy(uint256 _disputeId) external view override returns (address funder, uint256 amount) {
+        StakeSubsidy memory s = _stakeSubsidies[_disputeId];
+        return (s.funder, s.amount);
     }
 
     // ============ Internal Functions ============
@@ -371,7 +445,7 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
 
         // Return full stakes to both parties
         token.safeTransfer(d.initiator, d.initiatorStake);
-        token.safeTransfer(d.counterparty, d.counterpartyStake);
+        _payCounterpartySide(_disputeId, d, d.counterpartyStake);
 
         // Unfreeze assets with proposal outcome
         assetRegistry.unfreezeAssets(_disputeId, bytes(d.llmProposal));
@@ -427,7 +501,7 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         // Return remaining stake symmetrically
         uint256 returnPerParty = remainder / 2;
         token.safeTransfer(d.initiator, returnPerParty);
-        token.safeTransfer(d.counterparty, returnPerParty);
+        _payCounterpartySide(_disputeId, d, returnPerParty);
 
         // Handle dust (any odd wei from division) - burn any remainder
         uint256 dust = remainder % 2;
@@ -443,7 +517,51 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         emit DisputeResolved(_disputeId, DisputeOutcome.TimeoutWithBurn);
     }
 
+    /**
+     * @dev Pay the counterparty side of a resolution. Without a subsidy this is the plain transfer to the
+     *      counterparty. With one, the payout is split pro rata between the counterparty (own share of
+     *      the stake, rounded down) and the recorded funder (the remainder): on mutual acceptance the
+     *      funder gets its full subsidy back, on timeout it bears its share of the burn.
+     *      Repayment is a plain ERC20 transfer, so resolution never runs treasury code.
+     *      Invariants: s.amount <= counterpartyStake (enforced in depositStakeWithSubsidy), and
+     *      counterpartyStake > 0 whenever s.amount > 0, so there is no division by zero.
+     * @param _disputeId Dispute ID
+     * @param d Dispute storage reference
+     * @param _amount Total amount owed to the counterparty side
+     */
+    function _payCounterpartySide(uint256 _disputeId, Dispute storage d, uint256 _amount) internal {
+        StakeSubsidy memory s = _stakeSubsidies[_disputeId];
+        if (s.amount == 0) {
+            token.safeTransfer(d.counterparty, _amount);
+            return;
+        }
+
+        uint256 own = Math.mulDiv(_amount, d.counterpartyStake - s.amount, d.counterpartyStake);
+        uint256 toFunder = _amount - own;
+
+        if (own > 0) {
+            token.safeTransfer(d.counterparty, own);
+        }
+        if (toFunder > 0) {
+            token.safeTransfer(s.funder, toFunder);
+            emit SubsidyReturned(_disputeId, s.funder, toFunder);
+        }
+    }
+
     // ============ Admin Functions ============
+
+    /**
+     * @notice Set the treasury allowed to fund defensive stake subsidies
+     * @dev Only owner. address(0) disables depositStakeWithSubsidy. Rotation only affects future
+     *      subsidized stakes: existing disputes repay the funder recorded when they were staked.
+     * @param _treasury Treasury implementing ISubsidyTreasury, or address(0) to disable subsidies
+     */
+    function setSubsidyTreasury(address _treasury) external onlyOwner {
+        emit SubsidyTreasuryUpdated(subsidyTreasury, _treasury);
+        // address(0) is a valid value: it disables depositStakeWithSubsidy
+        // slither-disable-next-line missing-zero-check
+        subsidyTreasury = _treasury;
+    }
 
     /**
      * @notice Deposit tokens into reserves for initiator incentives
