@@ -1637,7 +1637,9 @@ contract GovTimelockHandler is Test {
 
         if (stale) {
             staleRejections++;
+            // OZ still reports it ready; the governance views report it stale
             assertTrue(timelock.isOperationReady(id));
+            assertTrue(timelock.isOperationStale(id));
         } else {
             _executedIds.push(id);
             if (c.unpause) assertFalse(target.paused());
@@ -1690,6 +1692,15 @@ contract GovTimelockHandler is Test {
         else timelock.revokeRole(role, executor);
     }
 
+    /// @dev The timelock's own EXECUTOR_ROLE is never a live executor: granting it must not let the
+    ///      other actions remove the last live holder, and removing it never reverts
+    function setTimelockExecutor(bool grant) external {
+        bytes32 role = timelock.EXECUTOR_ROLE();
+        vm.prank(admin);
+        if (grant) timelock.grantRole(role, address(timelock));
+        else timelock.revokeRole(role, address(timelock));
+    }
+
     function warp(uint256 dt) external {
         vm.warp(block.timestamp + _bound(dt, 0, 5 days));
     }
@@ -1737,7 +1748,7 @@ contract GovernanceTimelockInvariantTest is GovernanceTimelockFixture {
         timelock.registerProtocolContract("ilrm", address(target));
 
         // Fuzz the actions only (the handler's getters revert on out-of-range indexes)
-        bytes4[] memory selectors = new bytes4[](16);
+        bytes4[] memory selectors = new bytes4[](17);
         selectors[0] = GovTimelockHandler.scheduleStandard.selector;
         selectors[1] = GovTimelockHandler.scheduleCritical.selector;
         selectors[2] = GovTimelockHandler.scheduleRaw.selector;
@@ -1754,6 +1765,7 @@ contract GovernanceTimelockInvariantTest is GovernanceTimelockFixture {
         selectors[13] = GovTimelockHandler.setExplicitExecutor.selector;
         selectors[14] = GovTimelockHandler.warp.selector;
         selectors[15] = GovTimelockHandler.warp.selector; // weight time
+        selectors[16] = GovTimelockHandler.setTimelockExecutor.selector;
         targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
@@ -1785,7 +1797,8 @@ contract GovernanceTimelockInvariantTest is GovernanceTimelockFixture {
     }
 
     /// @dev Pending list: OZ-pending, metadata in sync, and no duplicate entries (the property the
-    ///      removed _storeOperation dedupe guard was meant to protect)
+    ///      removed _storeOperation dedupe guard was meant to protect). Stale unpauses are listed
+    ///      separately, never as pending.
     /// forge-config: default.invariant.runs = 64
     /// forge-config: default.invariant.depth = 64
     /// forge-config: default.invariant.fail-on-revert = true
@@ -1797,6 +1810,7 @@ contract GovernanceTimelockInvariantTest is GovernanceTimelockFixture {
         assertEq(pending.length, timelock.getPendingOperationsCount());
         for (uint256 i = 0; i < pending.length; ++i) {
             assertTrue(timelock.isOperationPending(pending[i]));
+            assertFalse(timelock.isOperationStale(pending[i]), "stale op listed as pending");
             IGovernanceTimelock.GovernanceOperation memory op = timelock.getOperation(pending[i]);
             assertEq(op.id, pending[i]);
             assertEq(op.readyAt, timelock.getTimestamp(pending[i]));
@@ -1808,10 +1822,26 @@ contract GovernanceTimelockInvariantTest is GovernanceTimelockFixture {
                 assertTrue(pending[j] != pending[i], "duplicate pending entry");
             }
         }
+
+        bytes32[] memory stale = timelock.getStaleOperations();
+        for (uint256 i = 0; i < stale.length; ++i) {
+            assertTrue(timelock.isOperationPending(stale[i]));
+            assertTrue(timelock.isOperationStale(stale[i]));
+            IGovernanceTimelock.GovernanceOperation memory op = timelock.getOperation(stale[i]);
+            assertEq(op.id, stale[i]);
+            assertEq(uint256(op.status), uint256(IGovernanceTimelock.OperationStatus.Stale));
+            for (uint256 j = 0; j < pending.length; ++j) {
+                assertTrue(pending[j] != stale[i], "op listed as pending and stale");
+            }
+            for (uint256 j = 0; j < i; ++j) {
+                assertTrue(stale[j] != stale[i], "duplicate stale entry");
+            }
+        }
     }
 
     /// @dev getOperation never contradicts OZ: raw schedules (including raw re-schedules of a
-    ///      previously tracked id) carry no metadata, tracked ones mirror the OZ state
+    ///      previously tracked id) carry no metadata, tracked ones mirror the OZ state, except that a
+    ///      pending unpause from an earlier pause epoch reports Stale (and is not counted as pending)
     /// forge-config: default.invariant.runs = 64
     /// forge-config: default.invariant.depth = 64
     /// forge-config: default.invariant.fail-on-revert = true
@@ -1820,11 +1850,15 @@ contract GovernanceTimelockInvariantTest is GovernanceTimelockFixture {
     /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_MetadataMatchesOz() public view {
         uint256 trackedPending;
+        uint256 trackedStale;
+        uint256 epoch = timelock.pauseEpoch();
         uint256 n = handler.callCount();
         for (uint256 i = 0; i < n; ++i) {
             GovTimelockHandler.Call memory c = handler.callAt(i);
             bytes32 id = handler.idOf(i);
             IGovernanceTimelock.GovernanceOperation memory op = timelock.getOperation(id);
+            bool stale = c.unpause && c.epoch != epoch && timelock.isOperationPending(id);
+            assertEq(timelock.isOperationStale(id), stale, "isOperationStale");
 
             if (c.raw) {
                 assertEq(uint256(op.status), uint256(IGovernanceTimelock.OperationStatus.None), "raw op has metadata");
@@ -1832,15 +1866,19 @@ contract GovernanceTimelockInvariantTest is GovernanceTimelockFixture {
                 continue;
             }
 
-            assertEq(uint256(op.status), uint256(_expectedStatus(timelock.getOperationState(id))), "status vs OZ");
+            IGovernanceTimelock.OperationStatus expected =
+                stale ? IGovernanceTimelock.OperationStatus.Stale : _expectedStatus(timelock.getOperationState(id));
+            assertEq(uint256(op.status), uint256(expected), "status vs OZ");
             assertEq(op.id, id);
             assertEq(op.salt, c.salt);
             if (timelock.isOperationPending(id)) {
                 assertEq(op.readyAt, timelock.getTimestamp(id));
-                trackedPending++;
+                if (stale) trackedStale++;
+                else trackedPending++;
             }
         }
         assertEq(timelock.getPendingOperationsCount(), trackedPending);
+        assertEq(timelock.getStaleOperations().length, trackedStale);
     }
 
     /// forge-config: default.invariant.runs = 64
@@ -1866,6 +1904,7 @@ contract GovernanceTimelockInvariantTest is GovernanceTimelockFixture {
     /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_ExecutionNeverBricked() public view {
         bytes32 role = timelock.EXECUTOR_ROLE();
+        // The timelock's own role (setTimelockExecutor) never counts: it cannot initiate an execution
         uint256 holders =
             (timelock.hasRole(role, address(0)) ? 1 : 0) + (timelock.hasRole(role, handler.executor()) ? 1 : 0);
         assertGe(holders, 1);

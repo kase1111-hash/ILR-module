@@ -114,17 +114,32 @@ change is a timelock self-call and therefore needs the long delay.
 |-------|----------|----------|
 | LongDelay | Oracle | `setILRM(address)` |
 | LongDelay | Treasury | `setILRM(address)`, `emergencyWithdraw(address,uint256)`, `emergencyWithdrawETH(address,uint256)` |
-| LongDelay | ILRM | `withdrawTreasury(address,uint256)`, `setSubsidyTreasury(address)` |
+| LongDelay | ILRM | `withdrawTreasury(address,uint256)`, `setSubsidyTreasury(address)`, `setInitiatorIncentiveCaps(uint256,uint256,uint256)` |
 | LongDelay | AssetRegistry | `authorizeILRM(address)` |
-| LongDelay | ComplianceCouncil (if deployed) | `setGovernanceTimelock(address)`, `setComplianceEscrow(address)` |
-| LongDelay | MultiPartyILRM / DummyTransactionGenerator (if deployed) | `withdrawTreasury(address,uint256)` |
+| LongDelay | ComplianceCouncil (if deployed) | `setGovernanceTimelock(address)`, `setComplianceEscrow(address)`, `setAuthorizedRequester(address,bool)`, `removeMember(address)` |
+| LongDelay | MultiPartyILRM (if deployed) | `withdrawTreasury(address,uint256)` |
+| LongDelay | DummyTransactionGenerator (if deployed) | `withdrawTreasury(address,uint256)`, `setTargetContracts(address,address)` |
 | LongDelay | BatchQueue (if deployed) | `emergencyWithdraw(address,uint256,bool)` |
-| Emergency | Oracle | `revokeOracle(address)`, `cancelPendingRequest(uint256)` |
+| Emergency | Oracle | `revokeOracle(address)`, `cancelPendingRequest(uint256)`, `resetProposalExact(uint256,uint256,bytes32,string)` |
 | Emergency | AssetRegistry | `revokeILRM(address)` |
 
 Everything else stays Standard (minDelay), including parameter setters, `pause()`/`unpause()` and
 `Oracle.registerOracle`/`updateOracleKey`/`resetProposal`. `Treasury.fundStakeSubsidy` is
 `onlyILRM` and never called by the timelock, so it needs no class.
+
+Module wiring and module access control get the long delay, like the wiring of the core contracts:
+
+- **Wiring:** `ComplianceCouncil.setGovernanceTimelock`/`setComplianceEscrow`, and
+  `DummyTransactionGenerator.setTargetContracts(address,address)`, which repoints the ILRM and
+  BatchQueue the generator sends its dummy transactions to.
+- **Access control:** `ComplianceCouncil.setAuthorizedRequester(address,bool)` decides who may request
+  compliance warrants, and `ComplianceCouncil.removeMember(address)` evicts a council member (and voids
+  the partial signatures it already submitted), changing who can reach the signing threshold.
+
+These module entries are **optional**: a module is classified only when its address is configured
+(`COMPLIANCE_COUNCIL_ADDRESS`, `DUMMY_GENERATOR_ADDRESS`, ...), and an entry that no longer resolves
+in the build prints a warning instead of aborting the deployment. Classify a module deployed after
+the timelock through a (long-delay) `setCallClass` self-operation.
 
 Entries name contracts by fully qualified artifact name (`contracts/ILRM.sol:ILRM`), so a second
 contract with the same name cannot make a lookup ambiguous. If a required (core LongDelay) selector
@@ -141,7 +156,7 @@ GOVERNANCE_POLICY_CHECK=1 npx hardhat run scripts/deploy-governance.ts
 | Role | Address | Purpose |
 |------|---------|---------|
 | PROPOSER_ROLE | Multi-sig | Can schedule operations |
-| EXECUTOR_ROLE | Open (anyone) | Can execute after delay. Never left without a holder: closing open execution (`setOpenExecutor(false)`), `revokeRole` and `renounceRole` revert with `LastExecutor` if no other holder would remain |
+| EXECUTOR_ROLE | Open (anyone) | Can execute after delay. Never left without a live holder: closing open execution (`setOpenExecutor(false)`), `revokeRole` and `renounceRole` revert with `LastExecutor` if no other holder would remain. The timelock's own EXECUTOR_ROLE does not count (it cannot initiate an execution), so granting it never lets the last live executor go |
 | CANCELLER_ROLE | Multi-sig | Can cancel pending ops, including everything `EMERGENCY_ROLE` queues |
 | EMERGENCY_ROLE | Multi-sig (explicit grant; the deployer does not receive it) | `emergencyPauseAll` (instant); `emergencyUnpauseAll` (only queues the unpause, at minDelay); queue Emergency-classified calls via `executeEmergency` (not a proposer) |
 | DEFAULT_ADMIN_ROLE | Renounced | No admin after setup (afterwards only long-delay timelock self-operations) |
@@ -150,6 +165,12 @@ GOVERNANCE_POLICY_CHECK=1 npx hardhat run scripts/deploy-governance.ts
 
 ## Registered Protocol Contracts
 
+> ⚠️ **The L3 contracts (L3Bridge, L3StateVerifier, L3DisputeBatcher) are not production-ready and
+> must not be deployed** (see [SPEC.md 4.3](../SPEC.md#43-l3app-specific-rollups-natlangchain-roadmapmd)
+> and the contract table in the [README](../README.md)). No deploy script deploys them,
+> `scripts/deploy-governance.ts` neither registers nor classifies them, and they must never be
+> registered with the timelock or handed to it.
+
 | Contract | Address | Owned by Timelock |
 |----------|---------|-------------------|
 | ILRM | ⬜ | ⬜ |
@@ -157,9 +178,9 @@ GOVERNANCE_POLICY_CHECK=1 npx hardhat run scripts/deploy-governance.ts
 | Treasury | ⬜ | ⬜ |
 | Oracle | ⬜ | ⬜ |
 | AssetRegistry | ⬜ | ⬜ |
-| L3Bridge | ⬜ | ⬜ |
-| L3StateVerifier | ⬜ | ⬜ |
-| L3DisputeBatcher | ⬜ | ⬜ |
+| L3Bridge | Must not be deployed | - |
+| L3StateVerifier | Must not be deployed | - |
+| L3DisputeBatcher | Must not be deployed | - |
 | DIDRegistry | ⬜ | ⬜ |
 | IdentityVerifier | ⬜ | ⬜ |
 | FIDOVerifier | ⬜ | ⬜ |
@@ -193,6 +214,12 @@ ILRM_ADDRESS=0x...
 TREASURY_ADDRESS=0x...
 ORACLE_ADDRESS=0x...
 ASSET_REGISTRY_ADDRESS=0x...
+
+# Optional modules (registered and classified only when set)
+MULTI_PARTY_ILRM_ADDRESS=0x...
+COMPLIANCE_COUNCIL_ADDRESS=0x...
+BATCH_QUEUE_ADDRESS=0x...
+DUMMY_GENERATOR_ADDRESS=0x...
 ```
 
 ### Step 3: Deploy GovernanceTimelock
@@ -296,6 +323,12 @@ Every operation that unpauses (`unpause()` on any target, or `emergencyUnpauseAl
 whether a guardian or a proposer queued it) is bound to the pause epoch it was scheduled in. A later
 `emergencyPauseAll` makes it unexecutable (`StaleUnpause`), so an unpause queued before a pause can
 never undo it. Queue a new one once the new incident is resolved, and cancel the stale one to clean up.
+
+OpenZeppelin's own views (`isOperationReady`, `getOperationState`) keep reporting a stale unpause
+pending, and ready once its delay passed, until it is cancelled. The governance views report it:
+`isOperationStale(id)` is true (for raw `schedule` operations too), `getOperation(id).status` is
+`Stale` (5), and `getPendingOperations`/`getPendingOperationsCount` leave it out.
+`getStaleOperations()` lists the stale operations that carry metadata, which are the ones to cancel.
 
 Governance can also unpause through ordinary proposals: `unpause()` on a contract (Standard,
 minDelay) or `emergencyUnpauseAll()` on the timelock (self-call, longDelay).
@@ -454,9 +487,12 @@ The call policy and the emergency path have limits that configuration and operat
   Raw OZ `schedule`/`scheduleBatch` operations return an empty record (status None), also when the id
   was tracked by an earlier, cancelled scheduling; use `getOperationState` for them. A batch record
   shows only its first call.
-- `EXECUTOR_ROLE` always keeps at least one holder, but the timelock cannot tell whether an explicit
-  executor can still act (a lost key, a dead contract). With closed execution, keep at least two live
-  executors.
+- A stale unpause stays in OpenZeppelin's queue (pending, then ready) until a canceller cancels it;
+  only the governance views (`isOperationStale`, status `Stale`, `getStaleOperations`) mark it. Raw
+  `schedule` operations carry no metadata, so only `isOperationStale(id)` reports them.
+- `EXECUTOR_ROLE` always keeps at least one holder other than the timelock itself, but the timelock
+  cannot tell whether an explicit executor can still act (a lost key, a dead contract). With closed
+  execution, keep at least two live executors.
 
 ---
 
