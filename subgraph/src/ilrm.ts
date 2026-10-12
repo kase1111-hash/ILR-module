@@ -1,514 +1,642 @@
 // =============================================================================
 // ILRM Event Handlers - TheGraph Subgraph
 // =============================================================================
-// Handles all events from the ILRM core dispute resolution contract
+// Handles every event of contracts/ILRM.sol (core dispute resolution).
+// Event order inside one transaction matters and mirrors the contract:
+//   depositStakeWithSubsidy: StakeSubsidized, StakeDeposited
+//   submitLLMProposal:       [ProposalSuperseded], ProposalSubmitted
+//   acceptProposal:          AcceptanceSignaled, [SubsidyReturned], DisputeResolved
+//   enforceTimeout:          [SubsidyReturned], StakesBurned | DefaultLicenseApplied, DisputeResolved
 // =============================================================================
 
-import { BigInt, Bytes, Address } from "@graphprotocol/graph-ts";
+import { Address, BigInt, Bytes, ethereum } from "@graphprotocol/graph-ts";
 import {
-  DisputeInitiated,
-  StakeDeposited,
-  ProposalSubmitted,
+  ILRM,
   AcceptanceSignaled,
   CounterProposed,
-  StakesBurned,
   DefaultLicenseApplied,
+  DisputeInitiated,
   DisputeResolved,
   HarassmentScoreUpdated,
-  ZKIdentityRegistered,
-  FIDOAcceptance,
-  DIDAssociatedWithDispute
+  OwnershipTransferStarted,
+  OwnershipTransferred,
+  Paused,
+  ProposalSubmitted,
+  ProposalSuperseded,
+  StakeDeposited,
+  StakeSubsidized,
+  StakesBurned,
+  SubsidyReturned,
+  SubsidyTreasuryUpdated,
+  TokenReservesDeposited,
+  TreasuryWithdrawn,
+  Unpaused
 } from "../generated/ILRM/ILRM";
 import {
+  Burn,
+  Counter,
   Dispute,
+  HarassmentScore,
   Party,
   Proposal,
-  Counter,
-  HarassmentScore,
-  DailyMetric,
-  ProtocolMetric
+  StakeSubsidy,
+  SubsidyReturn,
+  VoluntaryRequest
 } from "../generated/schema";
+import {
+  KIND_ILRM,
+  ONE,
+  ZERO,
+  directCallArgs,
+  eventId,
+  getOrCreateContract,
+  getOrCreateDailyMetric,
+  getOrCreateProtocolMetric,
+  isZeroAddress,
+  keccakUtf8,
+  newAdminEvent,
+  recordOwnershipTransferStarted,
+  recordOwnershipTransferred,
+  recordPause,
+  touchParty
+} from "./common";
 
 // =============================================================================
-// Helper Functions
+// Constants (mirroring ILRM.sol)
 // =============================================================================
 
-function getOrCreateParty(address: Address, timestamp: BigInt): Party {
-  let id = address.toHexString();
-  let party = Party.load(id);
+/** initiateVoluntaryRequest emits DisputeInitiated with this id and creates no dispute */
+const VOLUNTARY_REQUEST_ID = BigInt.fromUnsignedBytes(
+  Bytes.fromHexString("0xffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffffff")
+);
 
-  if (party == null) {
-    party = new Party(id);
-    party.totalDisputes = 0;
-    party.disputesResolved = 0;
-    party.disputesTimedOut = 0;
-    party.totalStaked = BigInt.fromI32(0);
-    party.totalBurned = BigInt.fromI32(0);
-    party.harassmentScore = BigInt.fromI32(0);
-    party.totalSubsidiesReceived = BigInt.fromI32(0);
-    party.firstSeen = timestamp;
-    party.lastActive = timestamp;
-  }
+/** ILRM.COUNTER_FEE_BASE (0.01 ether); counter n burns COUNTER_FEE_BASE * 2^(n-1) */
+const COUNTER_FEE_BASE = BigInt.fromString("10000000000000000");
 
-  party.lastActive = timestamp;
+// IILRM.DisputeOutcome
+const OUTCOME_ACCEPTED_PROPOSAL = 1;
+const OUTCOME_TIMEOUT_WITH_BURN = 2;
+const OUTCOME_DEFAULT_LICENSE_APPLIED = 3;
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+function outcomeName(value: i32): string {
+  if (value == OUTCOME_ACCEPTED_PROPOSAL) return "ACCEPTED_PROPOSAL";
+  if (value == OUTCOME_TIMEOUT_WITH_BURN) return "TIMEOUT_WITH_BURN";
+  if (value == OUTCOME_DEFAULT_LICENSE_APPLIED) return "DEFAULT_LICENSE_APPLIED";
+  return "PENDING";
+}
+
+/** Count a party's first dispute towards the participant metrics */
+function joinDispute(party: Party, event: ethereum.Event): void {
+  party.totalDisputes = party.totalDisputes + 1;
   party.save();
-
-  return party;
+  if (party.totalDisputes == 1) {
+    const daily = getOrCreateDailyMetric(event.block.timestamp);
+    daily.newParticipants = daily.newParticipants + 1;
+    daily.save();
+    const protocol = getOrCreateProtocolMetric(event.block);
+    protocol.uniqueParticipants = protocol.uniqueParticipants.plus(ONE);
+    protocol.save();
+  }
 }
 
-function getOrCreateDailyMetric(timestamp: BigInt): DailyMetric {
-  // Convert to day (86400 seconds)
-  let dayTimestamp = timestamp.div(BigInt.fromI32(86400)).times(BigInt.fromI32(86400));
-  let id = dayTimestamp.toString();
-  let metric = DailyMetric.load(id);
-
-  if (metric == null) {
-    metric = new DailyMetric(id);
-    metric.date = dayTimestamp;
-    metric.disputesInitiated = 0;
-    metric.disputesResolved = 0;
-    metric.disputesTimedOut = 0;
-    metric.totalStaked = BigInt.fromI32(0);
-    metric.totalBurned = BigInt.fromI32(0);
-    metric.totalSubsidies = BigInt.fromI32(0);
-    metric.uniqueParticipants = 0;
-    metric.counterProposals = 0;
-    metric.proposals = 0;
-    metric.l3Batches = 0;
-  }
-
-  return metric;
+/** Book a stake deposit into the daily and protocol totals */
+function recordStake(amount: BigInt, event: ethereum.Event): void {
+  const daily = getOrCreateDailyMetric(event.block.timestamp);
+  daily.totalStaked = daily.totalStaked.plus(amount);
+  daily.save();
+  const protocol = getOrCreateProtocolMetric(event.block);
+  protocol.totalValueStaked = protocol.totalValueStaked.plus(amount);
+  protocol.save();
 }
 
-function getOrCreateProtocolMetric(): ProtocolMetric {
-  let id = "protocol";
-  let metric = ProtocolMetric.load(id);
+function subsidyAmount(dispute: Dispute): BigInt {
+  const id = dispute.stakeSubsidy;
+  if (id === null) return ZERO;
+  const subsidy = StakeSubsidy.load(id);
+  return subsidy == null ? ZERO : subsidy.amount;
+}
 
-  if (metric == null) {
-    metric = new ProtocolMetric(id);
-    metric.totalDisputes = BigInt.fromI32(0);
-    metric.activeDisputes = BigInt.fromI32(0);
-    metric.resolvedDisputes = BigInt.fromI32(0);
-    metric.timedOutDisputes = BigInt.fromI32(0);
-    metric.totalValueStaked = BigInt.fromI32(0);
-    metric.totalValueBurned = BigInt.fromI32(0);
-    metric.totalSubsidiesDistributed = BigInt.fromI32(0);
-    metric.uniqueParticipants = BigInt.fromI32(0);
-    metric.totalCounterProposals = BigInt.fromI32(0);
-    metric.totalL3Batches = BigInt.fromI32(0);
-    metric.avgResolutionBlocks = BigInt.fromI32(0);
-    metric.lastUpdatedBlock = BigInt.fromI32(0);
-  }
-
-  return metric;
+function setProposalStatus(id: string | null, status: string): void {
+  if (id === null) return;
+  const proposal = Proposal.load(id);
+  if (proposal == null) return;
+  proposal.status = status;
+  proposal.save();
 }
 
 // =============================================================================
-// Event Handlers
+// Dispute lifecycle
 // =============================================================================
 
 export function handleDisputeInitiated(event: DisputeInitiated): void {
-  let disputeId = event.params.disputeId.toString();
-  let timestamp = event.block.timestamp;
+  const timestamp = event.block.timestamp;
+  const initiator = touchParty(event.params.initiator, timestamp);
+  const counterparty = touchParty(event.params.counterparty, timestamp);
 
-  // Create or get parties
-  let initiator = getOrCreateParty(event.params.initiator, timestamp);
-  initiator.totalDisputes = initiator.totalDisputes + 1;
-  initiator.save();
+  if (event.params.disputeId.equals(VOLUNTARY_REQUEST_ID)) {
+    handleVoluntaryRequest(event, initiator, counterparty);
+    return;
+  }
 
-  let counterparty = getOrCreateParty(event.params.counterparty, timestamp);
-  counterparty.totalDisputes = counterparty.totalDisputes + 1;
-  counterparty.save();
+  joinDispute(initiator, event);
+  joinDispute(counterparty, event);
 
-  // Create dispute
-  let dispute = new Dispute(disputeId);
+  const dispute = new Dispute(event.params.disputeId.toString());
   dispute.initiator = initiator.id;
   dispute.counterparty = counterparty.id;
-  dispute.initiatorStake = BigInt.fromI32(0); // Will be set by StakeDeposited
-  dispute.counterpartyStake = BigInt.fromI32(0);
+  dispute.initiatorStake = ZERO;
+  dispute.counterpartyStake = ZERO;
   dispute.startTime = timestamp;
   dispute.startBlock = event.block.number;
+  dispute.initialEvidenceHash = event.params.evidenceHash;
   dispute.evidenceHash = event.params.evidenceHash;
   dispute.state = "INITIATED";
+  dispute.outcome = "PENDING";
   dispute.initiatorAccepted = false;
   dispute.counterpartyAccepted = false;
   dispute.counterCount = 0;
-  dispute.zkModeEnabled = false;
-  dispute.fidoUsed = false;
+  dispute.proposalCount = 0;
+  dispute.counterFeesBurned = ZERO;
   dispute.createdAt = timestamp;
   dispute.updatedAt = timestamp;
+
+  // The event carries neither the (possibly escalated) initiator stake nor the fallback
+  // terms; both are fixed at initiation, so reading them back is exact.
+  const call = ILRM.bind(event.address).try_disputes(event.params.disputeId);
+  if (!call.reverted) {
+    const stored = call.value;
+    dispute.initiatorStake = stored.initiatorStake;
+    dispute.fallbackTermsHash = stored.fallbackLicense.termsHash;
+    dispute.fallbackDuration = stored.fallbackLicense.termDuration;
+    dispute.fallbackRoyaltyCap = stored.fallbackLicense.royaltyCapBps;
+  }
   dispute.save();
 
-  // Update daily metrics
-  let daily = getOrCreateDailyMetric(timestamp);
+  if (dispute.initiatorStake.gt(ZERO)) {
+    initiator.totalStaked = initiator.totalStaked.plus(dispute.initiatorStake);
+    initiator.save();
+    recordStake(dispute.initiatorStake, event);
+  }
+
+  const daily = getOrCreateDailyMetric(timestamp);
   daily.disputesInitiated = daily.disputesInitiated + 1;
   daily.save();
 
-  // Update protocol metrics
-  let protocol = getOrCreateProtocolMetric();
-  protocol.totalDisputes = protocol.totalDisputes.plus(BigInt.fromI32(1));
-  protocol.activeDisputes = protocol.activeDisputes.plus(BigInt.fromI32(1));
-  protocol.lastUpdatedBlock = event.block.number;
+  const protocol = getOrCreateProtocolMetric(event.block);
+  protocol.totalDisputes = protocol.totalDisputes.plus(ONE);
+  protocol.activeDisputes = protocol.activeDisputes.plus(ONE);
+  protocol.save();
+}
+
+function handleVoluntaryRequest(event: DisputeInitiated, initiator: Party, counterparty: Party): void {
+  initiator.voluntaryRequestsSent = initiator.voluntaryRequestsSent + 1;
+  initiator.save();
+
+  const request = new VoluntaryRequest(eventId(event));
+  request.initiator = initiator.id;
+  request.counterparty = counterparty.id;
+  request.evidenceHash = event.params.evidenceHash;
+  // The whole msg.value is burned; it equals the transaction value only for a direct call
+  if (directCallArgs(event, "initiateVoluntaryRequest(address,bytes32)") !== null) {
+    request.feeBurned = event.transaction.value;
+  }
+  request.timestamp = event.block.timestamp;
+  request.blockNumber = event.block.number;
+  request.txHash = event.transaction.hash;
+  request.save();
+
+  const daily = getOrCreateDailyMetric(event.block.timestamp);
+  daily.voluntaryRequests = daily.voluntaryRequests + 1;
+  daily.save();
+
+  const protocol = getOrCreateProtocolMetric(event.block);
+  protocol.totalVoluntaryRequests = protocol.totalVoluntaryRequests.plus(ONE);
+  protocol.save();
+}
+
+export function handleStakeSubsidized(event: StakeSubsidized): void {
+  const dispute = Dispute.load(event.params.disputeId.toString());
+  if (dispute == null) return;
+
+  const amount = event.params.amount;
+  const counterparty = touchParty(event.params.counterparty, event.block.timestamp);
+  counterparty.totalSubsidiesReceived = counterparty.totalSubsidiesReceived.plus(amount);
+  counterparty.save();
+
+  const subsidy = new StakeSubsidy(dispute.id);
+  subsidy.dispute = dispute.id;
+  subsidy.counterparty = counterparty.id;
+  subsidy.funder = event.params.funder;
+  subsidy.amount = amount;
+  subsidy.amountReturned = ZERO;
+  subsidy.timestamp = event.block.timestamp;
+  subsidy.txHash = event.transaction.hash;
+  subsidy.save();
+
+  dispute.stakeSubsidy = subsidy.id;
+  dispute.updatedAt = event.block.timestamp;
+  dispute.save();
+
+  const daily = getOrCreateDailyMetric(event.block.timestamp);
+  daily.totalSubsidies = daily.totalSubsidies.plus(amount);
+  daily.save();
+
+  const protocol = getOrCreateProtocolMetric(event.block);
+  protocol.totalSubsidiesDistributed = protocol.totalSubsidiesDistributed.plus(amount);
   protocol.save();
 }
 
 export function handleStakeDeposited(event: StakeDeposited): void {
-  let disputeId = event.params.disputeId.toString();
-  let dispute = Dispute.load(disputeId);
+  const dispute = Dispute.load(event.params.disputeId.toString());
+  if (dispute == null) return;
 
-  if (dispute == null) {
-    return;
-  }
+  const amount = event.params.amount;
+  const timestamp = event.block.timestamp;
+  const depositor = touchParty(event.params.depositor, timestamp);
 
-  let depositorId = event.params.depositor.toHexString();
-  let amount = event.params.amount;
-  let timestamp = event.block.timestamp;
-
-  // Update stake based on who deposited
-  if (depositorId == dispute.initiator) {
-    dispute.initiatorStake = amount;
-  } else if (depositorId == dispute.counterparty) {
+  if (depositor.id == dispute.counterparty) {
     dispute.counterpartyStake = amount;
-    dispute.state = "ACTIVE"; // Counterparty staked, dispute is now active
+    dispute.state = "ACTIVE";
+
+    // Stakes are symmetric: backfill the initiator stake if the initiation call failed
+    if (dispute.initiatorStake.equals(ZERO)) {
+      dispute.initiatorStake = amount;
+      const initiator = Party.load(dispute.initiator);
+      if (initiator != null) {
+        initiator.totalStaked = initiator.totalStaked.plus(amount);
+        initiator.save();
+      }
+      recordStake(amount, event);
+    }
+
+    // Own funds only: a subsidy (StakeSubsidized, emitted just before) was paid by the treasury
+    depositor.totalStaked = depositor.totalStaked.plus(amount.minus(subsidyAmount(dispute)));
+  } else if (depositor.id == dispute.initiator) {
+    dispute.initiatorStake = amount;
+    depositor.totalStaked = depositor.totalStaked.plus(amount);
   }
+  depositor.save();
 
   dispute.updatedAt = timestamp;
   dispute.save();
 
-  // Update party stats
-  let party = Party.load(depositorId);
-  if (party != null) {
-    party.totalStaked = party.totalStaked.plus(amount);
-    party.lastActive = timestamp;
-    party.save();
-  }
+  recordStake(amount, event);
+}
 
-  // Update metrics
-  let daily = getOrCreateDailyMetric(timestamp);
-  daily.totalStaked = daily.totalStaked.plus(amount);
-  daily.save();
+// =============================================================================
+// Proposals and negotiation
+// =============================================================================
 
-  let protocol = getOrCreateProtocolMetric();
-  protocol.totalValueStaked = protocol.totalValueStaked.plus(amount);
-  protocol.lastUpdatedBlock = event.block.number;
-  protocol.save();
+export function handleProposalSuperseded(event: ProposalSuperseded): void {
+  const dispute = Dispute.load(event.params.disputeId.toString());
+  if (dispute == null) return;
+
+  // The live proposal is replaced in the same round; ProposalSubmitted (next) links its successor
+  setProposalStatus(dispute.currentProposal, "SUPERSEDED");
+  dispute.updatedAt = event.block.timestamp;
+  dispute.save();
 }
 
 export function handleProposalSubmitted(event: ProposalSubmitted): void {
-  let disputeId = event.params.disputeId.toString();
-  let dispute = Dispute.load(disputeId);
+  const dispute = Dispute.load(event.params.disputeId.toString());
+  if (dispute == null) return;
 
-  if (dispute == null) {
-    return;
+  const timestamp = event.block.timestamp;
+  const index = dispute.proposalCount;
+  const proposal = new Proposal(dispute.id + "-" + index.toString());
+
+  const previousId = dispute.currentProposal;
+  if (previousId !== null) {
+    const previous = Proposal.load(previousId);
+    if (previous != null) {
+      previous.status = "SUPERSEDED";
+      previous.supersededBy = proposal.id;
+      previous.save();
+    }
   }
 
-  let timestamp = event.block.timestamp;
-
-  // Count existing proposals for this dispute
-  let proposalIndex = 0;
-  let proposalId = disputeId + "-" + proposalIndex.toString();
-  while (Proposal.load(proposalId) != null) {
-    proposalIndex++;
-    proposalId = disputeId + "-" + proposalIndex.toString();
-  }
-
-  // Create proposal
-  let proposal = new Proposal(proposalId);
-  proposal.dispute = disputeId;
+  proposal.dispute = dispute.id;
+  proposal.index = index;
+  proposal.round = dispute.counterCount;
   proposal.content = event.params.proposal;
+  proposal.proposalHash = keccakUtf8(event.params.proposal);
+  proposal.status = "LIVE";
+  proposal.initiatorAccepted = false;
+  proposal.counterpartyAccepted = false;
   proposal.submitter = event.transaction.from;
   proposal.timestamp = timestamp;
+  proposal.blockNumber = event.block.number;
   proposal.txHash = event.transaction.hash;
-  proposal.index = proposalIndex;
   proposal.save();
 
-  // Reset acceptances on new proposal
+  // Storing any proposal voids both acceptances
+  dispute.currentProposal = proposal.id;
+  dispute.proposalCount = index + 1;
   dispute.initiatorAccepted = false;
   dispute.counterpartyAccepted = false;
   dispute.updatedAt = timestamp;
   dispute.save();
 
-  // Update metrics
-  let daily = getOrCreateDailyMetric(timestamp);
+  const daily = getOrCreateDailyMetric(timestamp);
   daily.proposals = daily.proposals + 1;
   daily.save();
+
+  const protocol = getOrCreateProtocolMetric(event.block);
+  protocol.totalProposals = protocol.totalProposals.plus(ONE);
+  protocol.save();
 }
 
 export function handleAcceptanceSignaled(event: AcceptanceSignaled): void {
-  let disputeId = event.params.disputeId.toString();
-  let dispute = Dispute.load(disputeId);
+  const dispute = Dispute.load(event.params.disputeId.toString());
+  if (dispute == null) return;
 
-  if (dispute == null) {
-    return;
+  const party = touchParty(event.params.party, event.block.timestamp);
+  const isInitiator = party.id == dispute.initiator;
+  const isCounterparty = party.id == dispute.counterparty;
+  if (isInitiator) dispute.initiatorAccepted = true;
+  if (isCounterparty) dispute.counterpartyAccepted = true;
+
+  const proposalId = dispute.currentProposal;
+  if (proposalId !== null) {
+    const proposal = Proposal.load(proposalId);
+    if (proposal != null) {
+      if (isInitiator) proposal.initiatorAccepted = true;
+      if (isCounterparty) proposal.counterpartyAccepted = true;
+      proposal.save();
+    }
   }
 
-  let partyId = event.params.party.toHexString();
-  let timestamp = event.block.timestamp;
-
-  if (partyId == dispute.initiator) {
-    dispute.initiatorAccepted = true;
-  } else if (partyId == dispute.counterparty) {
-    dispute.counterpartyAccepted = true;
-  }
-
-  dispute.updatedAt = timestamp;
+  dispute.updatedAt = event.block.timestamp;
   dispute.save();
-
-  // Update party last active
-  let party = Party.load(partyId);
-  if (party != null) {
-    party.lastActive = timestamp;
-    party.save();
-  }
 }
 
 export function handleCounterProposed(event: CounterProposed): void {
-  let disputeId = event.params.disputeId.toString();
-  let dispute = Dispute.load(disputeId);
+  const dispute = Dispute.load(event.params.disputeId.toString());
+  if (dispute == null) return;
 
-  if (dispute == null) {
-    return;
+  const timestamp = event.block.timestamp;
+  const counterNumber = event.params.counterNumber.toI32();
+  const party = touchParty(event.params.party, timestamp);
+
+  let fee = ZERO;
+  if (counterNumber >= 1) {
+    fee = COUNTER_FEE_BASE.times(BigInt.fromI32(2).pow(u8(counterNumber - 1)));
   }
 
-  let timestamp = event.block.timestamp;
-  let counterNumber = event.params.counterNumber.toI32();
-  let partyId = event.params.party.toHexString();
-
-  // Create counter record
-  let counterId = disputeId + "-" + counterNumber.toString();
-  let counter = new Counter(counterId);
-  counter.dispute = disputeId;
-  counter.party = partyId;
-  counter.evidenceHash = Bytes.empty(); // Would need additional event data
+  const counter = new Counter(dispute.id + "-" + counterNumber.toString());
+  counter.dispute = dispute.id;
+  counter.party = party.id;
   counter.counterNumber = counterNumber;
-  counter.feePaid = BigInt.fromI32(0); // Would need additional event data
+  counter.feeBurned = fee;
   counter.timestamp = timestamp;
+  counter.blockNumber = event.block.number;
   counter.txHash = event.transaction.hash;
+
+  // The new evidence hash is not in the event; recover it from calldata of a direct call
+  const args = directCallArgs(event, "counterPropose(uint256,bytes32)");
+  if (args !== null) {
+    const decoded = ethereum.decode("(uint256,bytes32)", args);
+    if (decoded !== null) {
+      const tuple = decoded.toTuple();
+      if (tuple[0].toBigInt().equals(event.params.disputeId)) {
+        counter.evidenceHash = tuple[1].toBytes();
+        dispute.evidenceHash = tuple[1].toBytes();
+      }
+    }
+  }
   counter.save();
 
-  // Update dispute
+  // counterPropose clears the live proposal and both acceptances and opens a new round
+  setProposalStatus(dispute.currentProposal, "VOIDED_BY_COUNTER");
+  dispute.currentProposal = null;
   dispute.counterCount = counterNumber;
   dispute.initiatorAccepted = false;
   dispute.counterpartyAccepted = false;
+  dispute.counterFeesBurned = dispute.counterFeesBurned.plus(fee);
   dispute.updatedAt = timestamp;
   dispute.save();
 
-  // Update metrics
-  let daily = getOrCreateDailyMetric(timestamp);
+  const daily = getOrCreateDailyMetric(timestamp);
   daily.counterProposals = daily.counterProposals + 1;
   daily.save();
 
-  let protocol = getOrCreateProtocolMetric();
-  protocol.totalCounterProposals = protocol.totalCounterProposals.plus(BigInt.fromI32(1));
-  protocol.lastUpdatedBlock = event.block.number;
+  const protocol = getOrCreateProtocolMetric(event.block);
+  protocol.totalCounterProposals = protocol.totalCounterProposals.plus(ONE);
+  protocol.totalCounterFeesBurned = protocol.totalCounterFeesBurned.plus(fee);
+  protocol.save();
+}
+
+// =============================================================================
+// Resolution
+// =============================================================================
+
+export function handleSubsidyReturned(event: SubsidyReturned): void {
+  // Indexing from the ILRM deployment block always sees StakeSubsidized first
+  const subsidy = StakeSubsidy.load(event.params.disputeId.toString());
+  if (subsidy == null) return;
+
+  const amount = event.params.amount;
+  subsidy.amountReturned = subsidy.amountReturned.plus(amount);
+  subsidy.save();
+
+  const entry = new SubsidyReturn(eventId(event));
+  entry.subsidy = subsidy.id;
+  entry.dispute = subsidy.dispute;
+  entry.funder = event.params.funder;
+  entry.amount = amount;
+  entry.timestamp = event.block.timestamp;
+  entry.txHash = event.transaction.hash;
+  entry.save();
+
+  const daily = getOrCreateDailyMetric(event.block.timestamp);
+  daily.totalSubsidiesReturned = daily.totalSubsidiesReturned.plus(amount);
+  daily.save();
+
+  const protocol = getOrCreateProtocolMetric(event.block);
+  protocol.totalSubsidiesReturned = protocol.totalSubsidiesReturned.plus(amount);
   protocol.save();
 }
 
 export function handleStakesBurned(event: StakesBurned): void {
-  let disputeId = event.params.disputeId.toString();
-  let dispute = Dispute.load(disputeId);
+  const dispute = Dispute.load(event.params.disputeId.toString());
+  if (dispute == null) return;
 
-  if (dispute == null) {
-    return;
-  }
-
-  let burnAmount = event.params.burnAmount;
-  let timestamp = event.block.timestamp;
+  const burnAmount = event.params.burnAmount;
+  const timestamp = event.block.timestamp;
 
   dispute.burnAmount = burnAmount;
   dispute.updatedAt = timestamp;
   dispute.save();
 
-  // Update party burn totals (split evenly)
-  let halfBurn = burnAmount.div(BigInt.fromI32(2));
+  const burn = new Burn(eventId(event));
+  burn.dispute = dispute.id;
+  burn.amount = burnAmount;
+  burn.timestamp = timestamp;
+  burn.txHash = event.transaction.hash;
+  burn.save();
 
-  let initiator = Party.load(dispute.initiator);
+  // Stakes are symmetric, so each side bears half of the burn. On the counterparty side a
+  // subsidy funder bears its pro-rata share (ILRM._payCounterpartySide).
+  const half = burnAmount.div(BigInt.fromI32(2));
+  const initiator = Party.load(dispute.initiator);
   if (initiator != null) {
-    initiator.totalBurned = initiator.totalBurned.plus(halfBurn);
+    initiator.totalBurned = initiator.totalBurned.plus(half);
     initiator.save();
   }
-
-  let counterparty = Party.load(dispute.counterparty);
+  const counterparty = Party.load(dispute.counterparty);
   if (counterparty != null) {
-    counterparty.totalBurned = counterparty.totalBurned.plus(halfBurn);
+    let ownShare = half;
+    const subsidy = subsidyAmount(dispute);
+    if (subsidy.gt(ZERO) && dispute.counterpartyStake.gt(ZERO)) {
+      ownShare = half.times(dispute.counterpartyStake.minus(subsidy)).div(dispute.counterpartyStake);
+    }
+    counterparty.totalBurned = counterparty.totalBurned.plus(ownShare);
     counterparty.save();
   }
 
-  // Update metrics
-  let daily = getOrCreateDailyMetric(timestamp);
+  const daily = getOrCreateDailyMetric(timestamp);
   daily.totalBurned = daily.totalBurned.plus(burnAmount);
   daily.save();
 
-  let protocol = getOrCreateProtocolMetric();
+  const protocol = getOrCreateProtocolMetric(event.block);
   protocol.totalValueBurned = protocol.totalValueBurned.plus(burnAmount);
-  protocol.lastUpdatedBlock = event.block.number;
   protocol.save();
 }
 
 export function handleDefaultLicenseApplied(event: DefaultLicenseApplied): void {
-  let disputeId = event.params.disputeId.toString();
-  let dispute = Dispute.load(disputeId);
-
-  if (dispute == null) {
-    return;
-  }
-
-  let timestamp = event.block.timestamp;
+  const dispute = Dispute.load(event.params.disputeId.toString());
+  if (dispute == null) return;
 
   dispute.outcome = "DEFAULT_LICENSE_APPLIED";
-  dispute.updatedAt = timestamp;
+  dispute.updatedAt = event.block.timestamp;
   dispute.save();
 }
 
 export function handleDisputeResolved(event: DisputeResolved): void {
-  let disputeId = event.params.disputeId.toString();
-  let dispute = Dispute.load(disputeId);
+  const dispute = Dispute.load(event.params.disputeId.toString());
+  if (dispute == null) return;
 
-  if (dispute == null) {
-    return;
-  }
-
-  let timestamp = event.block.timestamp;
-  let outcomeValue = event.params.outcome;
+  const timestamp = event.block.timestamp;
+  const outcome = outcomeName(event.params.outcome);
 
   dispute.state = "RESOLVED";
-  dispute.resolvedAt = event.block.number;
+  dispute.outcome = outcome;
+  dispute.resolvedAt = timestamp;
+  dispute.resolvedBlock = event.block.number;
   dispute.resolvedTx = event.transaction.hash;
   dispute.updatedAt = timestamp;
-
-  // Map outcome enum
-  if (outcomeValue == 1) {
-    dispute.outcome = "ACCEPTED_PROPOSAL";
-  } else if (outcomeValue == 2) {
-    dispute.outcome = "TIMEOUT_WITH_BURN";
-  } else if (outcomeValue == 3) {
-    dispute.outcome = "DEFAULT_LICENSE_APPLIED";
-  } else {
-    dispute.outcome = "PENDING";
-  }
-
   dispute.save();
 
-  // Update party stats
-  let initiator = Party.load(dispute.initiator);
-  if (initiator != null) {
-    if (dispute.outcome == "ACCEPTED_PROPOSAL") {
-      initiator.disputesResolved = initiator.disputesResolved + 1;
-    } else if (dispute.outcome == "TIMEOUT_WITH_BURN") {
-      initiator.disputesTimedOut = initiator.disputesTimedOut + 1;
+  // Settle the live proposal
+  const proposalId = dispute.currentProposal;
+  if (proposalId !== null) {
+    const proposal = Proposal.load(proposalId);
+    if (proposal != null && proposal.status == "LIVE") {
+      proposal.status = outcome == "ACCEPTED_PROPOSAL" ? "ACCEPTED" : "EXPIRED";
+      proposal.save();
     }
-    initiator.save();
   }
 
-  let counterparty = Party.load(dispute.counterparty);
-  if (counterparty != null) {
-    if (dispute.outcome == "ACCEPTED_PROPOSAL") {
-      counterparty.disputesResolved = counterparty.disputesResolved + 1;
-    } else if (dispute.outcome == "TIMEOUT_WITH_BURN") {
-      counterparty.disputesTimedOut = counterparty.disputesTimedOut + 1;
-    }
-    counterparty.save();
+  const parties: string[] = [dispute.initiator, dispute.counterparty];
+  for (let i = 0; i < parties.length; i++) {
+    const party = Party.load(parties[i]);
+    if (party == null) continue;
+    if (outcome == "ACCEPTED_PROPOSAL") party.disputesResolved = party.disputesResolved + 1;
+    else if (outcome == "TIMEOUT_WITH_BURN") party.disputesTimedOut = party.disputesTimedOut + 1;
+    else if (outcome == "DEFAULT_LICENSE_APPLIED") party.disputesDefaulted = party.disputesDefaulted + 1;
+    party.lastActive = timestamp;
+    party.save();
   }
 
-  // Update metrics
-  let daily = getOrCreateDailyMetric(timestamp);
+  const daily = getOrCreateDailyMetric(timestamp);
   daily.disputesResolved = daily.disputesResolved + 1;
-  if (dispute.outcome == "TIMEOUT_WITH_BURN") {
-    daily.disputesTimedOut = daily.disputesTimedOut + 1;
-  }
+  if (outcome == "TIMEOUT_WITH_BURN") daily.disputesTimedOut = daily.disputesTimedOut + 1;
+  if (outcome == "DEFAULT_LICENSE_APPLIED") daily.disputesDefaulted = daily.disputesDefaulted + 1;
   daily.save();
 
-  let protocol = getOrCreateProtocolMetric();
-  protocol.activeDisputes = protocol.activeDisputes.minus(BigInt.fromI32(1));
-  protocol.resolvedDisputes = protocol.resolvedDisputes.plus(BigInt.fromI32(1));
-  if (dispute.outcome == "TIMEOUT_WITH_BURN") {
-    protocol.timedOutDisputes = protocol.timedOutDisputes.plus(BigInt.fromI32(1));
+  const protocol = getOrCreateProtocolMetric(event.block);
+  if (protocol.activeDisputes.gt(ZERO)) {
+    protocol.activeDisputes = protocol.activeDisputes.minus(ONE);
   }
-  protocol.lastUpdatedBlock = event.block.number;
+  protocol.resolvedDisputes = protocol.resolvedDisputes.plus(ONE);
+  if (outcome == "TIMEOUT_WITH_BURN") protocol.timedOutDisputes = protocol.timedOutDisputes.plus(ONE);
+  if (outcome == "DEFAULT_LICENSE_APPLIED") protocol.defaultedDisputes = protocol.defaultedDisputes.plus(ONE);
+  // Running mean over resolved disputes
+  const blocks = event.block.number.minus(dispute.startBlock);
+  const n = protocol.resolvedDisputes;
+  protocol.avgResolutionBlocks = protocol.avgResolutionBlocks.times(n.minus(ONE)).plus(blocks).div(n);
   protocol.save();
 }
 
+// =============================================================================
+// Scores, configuration and funds
+// =============================================================================
+
 export function handleHarassmentScoreUpdated(event: HarassmentScoreUpdated): void {
-  let partyId = event.params.participant.toHexString();
-  let party = Party.load(partyId);
+  const party = touchParty(event.params.participant, event.block.timestamp);
+  party.harassmentScore = event.params.newScore;
+  party.save();
 
-  if (party == null) {
-    return;
-  }
-
-  let timestamp = event.block.timestamp;
-  let oldScore = event.params.oldScore;
-  let newScore = event.params.newScore;
-
-  // Create harassment score record
-  let recordId = partyId + "-" + event.block.number.toString();
-  let record = new HarassmentScore(recordId);
-  record.party = partyId;
-  record.oldScore = oldScore;
-  record.newScore = newScore;
-  record.timestamp = timestamp;
+  const record = new HarassmentScore(eventId(event));
+  record.party = party.id;
+  record.source = "ILRM";
+  record.oldScore = event.params.oldScore;
+  record.newScore = event.params.newScore;
+  record.timestamp = event.block.timestamp;
   record.txHash = event.transaction.hash;
   record.save();
-
-  // Update party
-  party.harassmentScore = newScore;
-  party.lastActive = timestamp;
-  party.save();
 }
 
-export function handleZKIdentityRegistered(event: ZKIdentityRegistered): void {
-  let disputeId = event.params.disputeId.toString();
-  let dispute = Dispute.load(disputeId);
-
-  if (dispute == null) {
-    return;
-  }
-
-  let identityHash = event.params.identityHash;
-  let isInitiator = event.params.isInitiator;
-  let timestamp = event.block.timestamp;
-
-  dispute.zkModeEnabled = true;
-  if (isInitiator) {
-    dispute.initiatorZKIdentity = identityHash;
+export function handleSubsidyTreasuryUpdated(event: SubsidyTreasuryUpdated): void {
+  const contract = getOrCreateContract(event, KIND_ILRM);
+  const treasury: Address = event.params.newTreasury;
+  if (isZeroAddress(treasury)) {
+    contract.subsidyTreasury = null; // subsidies disabled
   } else {
-    dispute.counterpartyZKIdentity = identityHash;
+    contract.subsidyTreasury = treasury;
   }
-  dispute.updatedAt = timestamp;
-  dispute.save();
+  contract.save();
+
+  const entry = newAdminEvent(event, KIND_ILRM, "SubsidyTreasuryUpdated");
+  entry.account = event.params.newTreasury;
+  entry.previousAccount = event.params.previousTreasury;
+  entry.save();
 }
 
-export function handleFIDOAcceptance(event: FIDOAcceptance): void {
-  let disputeId = event.params.disputeId.toString();
-  let dispute = Dispute.load(disputeId);
-
-  if (dispute == null) {
-    return;
-  }
-
-  let timestamp = event.block.timestamp;
-  dispute.fidoUsed = true;
-  dispute.updatedAt = timestamp;
-  dispute.save();
+export function handleTokenReservesDeposited(event: TokenReservesDeposited): void {
+  const entry = newAdminEvent(event, KIND_ILRM, "TokenReservesDeposited");
+  entry.account = event.params.depositor;
+  entry.amount = event.params.amount;
+  entry.save();
 }
 
-export function handleDIDAssociatedWithDispute(event: DIDAssociatedWithDispute): void {
-  let disputeId = event.params.disputeId.toString();
-  let dispute = Dispute.load(disputeId);
+export function handleTreasuryWithdrawn(event: TreasuryWithdrawn): void {
+  const entry = newAdminEvent(event, KIND_ILRM, "TreasuryWithdrawn");
+  entry.account = event.params.recipient;
+  entry.amount = event.params.amount;
+  entry.save();
+}
 
-  if (dispute == null) {
-    return;
-  }
+// =============================================================================
+// Ownable2Step / Pausable
+// =============================================================================
 
-  let did = event.params.did;
-  let isInitiator = event.params.isInitiator;
-  let timestamp = event.block.timestamp;
+export function handleOwnershipTransferStarted(event: OwnershipTransferStarted): void {
+  recordOwnershipTransferStarted(event, KIND_ILRM, event.params.previousOwner, event.params.newOwner);
+}
 
-  if (isInitiator) {
-    dispute.initiatorDID = did;
-  } else {
-    dispute.counterpartyDID = did;
-  }
-  dispute.updatedAt = timestamp;
-  dispute.save();
+export function handleOwnershipTransferred(event: OwnershipTransferred): void {
+  recordOwnershipTransferred(event, KIND_ILRM, event.params.previousOwner, event.params.newOwner);
+}
+
+export function handlePaused(event: Paused): void {
+  recordPause(event, KIND_ILRM, event.params.account, true);
+}
+
+export function handleUnpaused(event: Unpaused): void {
+  recordPause(event, KIND_ILRM, event.params.account, false);
 }

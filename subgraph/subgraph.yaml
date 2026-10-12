@@ -1,8 +1,25 @@
-specVersion: 0.0.5
+# =============================================================================
+# NatLangChain ILRM - Subgraph manifest
+# =============================================================================
+# Event signatures must match the compiled contracts exactly. ABIs in ./abis are
+# generated from the compiler artifacts: run `npm run sync-abis` after changing
+# a contract and `npm run check-abis` to detect drift (see README.md).
+# The repository's Hardhat suite (test/Subgraph.manifest.test.js) also fails if a
+# handler below names an event the compiled contract does not emit.
+#
+# Replace the zero addresses and startBlock values with the deployment's before
+# deploying. startBlock must be at or before each contract's deployment block so
+# the constructor's OwnershipTransferred event is indexed.
+# =============================================================================
+specVersion: 1.3.0
+description: NatLangChain ILRM - IP and licensing dispute resolution
+repository: https://github.com/kase1111-hash/ILR-module
 schema:
   file: ./schema.graphql
 dataSources:
-  # ILRM - Core Dispute Resolution
+  # ---------------------------------------------------------------------------
+  # ILRM - Core dispute resolution (contracts/ILRM.sol)
+  # ---------------------------------------------------------------------------
   - kind: ethereum/contract
     name: ILRM
     network: optimism
@@ -12,14 +29,22 @@ dataSources:
       startBlock: 0 # Replace with deployment block
     mapping:
       kind: ethereum/events
-      apiVersion: 0.0.7
+      apiVersion: 0.0.9
       language: wasm/assemblyscript
       entities:
         - Dispute
+        - VoluntaryRequest
         - Party
         - Proposal
         - Counter
+        - Burn
         - HarassmentScore
+        - StakeSubsidy
+        - SubsidyReturn
+        - ProtocolContract
+        - AdminEvent
+        - DailyMetric
+        - ProtocolMetric
       abis:
         - name: ILRM
           file: ./abis/ILRM.json
@@ -28,8 +53,12 @@ dataSources:
           handler: handleDisputeInitiated
         - event: StakeDeposited(indexed uint256,indexed address,uint256)
           handler: handleStakeDeposited
+        - event: StakeSubsidized(indexed uint256,indexed address,indexed address,uint256)
+          handler: handleStakeSubsidized
         - event: ProposalSubmitted(indexed uint256,string)
           handler: handleProposalSubmitted
+        - event: ProposalSuperseded(indexed uint256,indexed uint256,bytes32,bytes32)
+          handler: handleProposalSuperseded
         - event: AcceptanceSignaled(indexed uint256,indexed address)
           handler: handleAcceptanceSignaled
         - event: CounterProposed(indexed uint256,indexed address,uint256)
@@ -40,17 +69,29 @@ dataSources:
           handler: handleDefaultLicenseApplied
         - event: DisputeResolved(indexed uint256,uint8)
           handler: handleDisputeResolved
+        - event: SubsidyReturned(indexed uint256,indexed address,uint256)
+          handler: handleSubsidyReturned
         - event: HarassmentScoreUpdated(indexed address,uint256,uint256)
           handler: handleHarassmentScoreUpdated
-        - event: ZKIdentityRegistered(indexed uint256,indexed bytes32,bool)
-          handler: handleZKIdentityRegistered
-        - event: FIDOAcceptance(indexed uint256,indexed address,bytes32)
-          handler: handleFIDOAcceptance
-        - event: DIDAssociatedWithDispute(indexed uint256,indexed bytes32,bool)
-          handler: handleDIDAssociatedWithDispute
+        - event: SubsidyTreasuryUpdated(indexed address,indexed address)
+          handler: handleSubsidyTreasuryUpdated
+        - event: TokenReservesDeposited(indexed address,uint256)
+          handler: handleTokenReservesDeposited
+        - event: TreasuryWithdrawn(indexed address,uint256)
+          handler: handleTreasuryWithdrawn
+        - event: OwnershipTransferStarted(indexed address,indexed address)
+          handler: handleOwnershipTransferStarted
+        - event: OwnershipTransferred(indexed address,indexed address)
+          handler: handleOwnershipTransferred
+        - event: Paused(address)
+          handler: handlePaused
+        - event: Unpaused(address)
+          handler: handleUnpaused
       file: ./src/ilrm.ts
 
-  # Treasury - Fund Management
+  # ---------------------------------------------------------------------------
+  # Treasury - Fund management and stake subsidies (contracts/Treasury.sol)
+  # ---------------------------------------------------------------------------
   - kind: ethereum/contract
     name: Treasury
     network: optimism
@@ -60,27 +101,43 @@ dataSources:
       startBlock: 0 # Replace with deployment block
     mapping:
       kind: ethereum/events
-      apiVersion: 0.0.7
+      apiVersion: 0.0.9
       language: wasm/assemblyscript
       entities:
+        - TreasurySubsidy
+        - TreasuryDeposit
         - TreasuryMetric
-        - Subsidy
-        - Burn
+        - Party
+        - HarassmentScore
+        - ProtocolContract
+        - AdminEvent
       abis:
         - name: Treasury
           file: ./abis/Treasury.json
       eventHandlers:
-        - event: SubsidyFunded(indexed address,indexed address,uint256,string)
+        - event: SubsidyFunded(indexed address,indexed uint256,uint256)
           handler: handleSubsidyFunded
         - event: TreasuryReceived(indexed address,uint256,string)
           handler: handleTreasuryReceived
         - event: HarassmentScoreUpdated(indexed address,uint256,uint256)
-          handler: handleTreasuryHarassmentUpdate
-        - event: CapsUpdated(uint256,uint256)
+          handler: handleHarassmentScoreUpdated
+        - event: ILRMUpdated(indexed address,indexed address)
+          handler: handleILRMUpdated
+        - event: CapsUpdated(uint256,uint256,uint256)
           handler: handleCapsUpdated
+        - event: OwnershipTransferStarted(indexed address,indexed address)
+          handler: handleOwnershipTransferStarted
+        - event: OwnershipTransferred(indexed address,indexed address)
+          handler: handleOwnershipTransferred
+        - event: Paused(address)
+          handler: handlePaused
+        - event: Unpaused(address)
+          handler: handleUnpaused
       file: ./src/treasury.ts
 
-  # Oracle - LLM Proposals
+  # ---------------------------------------------------------------------------
+  # Oracle - LLM proposal bridge (contracts/Oracle.sol)
+  # ---------------------------------------------------------------------------
   - kind: ethereum/contract
     name: Oracle
     network: optimism
@@ -90,24 +147,45 @@ dataSources:
       startBlock: 0 # Replace with deployment block
     mapping:
       kind: ethereum/events
-      apiVersion: 0.0.7
+      apiVersion: 0.0.9
       language: wasm/assemblyscript
       entities:
-        - OracleProposal
+        - OracleDispute
+        - OracleRound
+        - OracleSubmission
+        - OracleReset
         - OracleMetric
+        - RoleMember
+        - ProtocolContract
+        - AdminEvent
       abis:
         - name: Oracle
           file: ./abis/Oracle.json
       eventHandlers:
-        - event: ProposalRequested(indexed uint256,indexed address,bytes32,uint256)
+        - event: ProposalRequested(indexed uint256,bytes32,uint256)
           handler: handleProposalRequested
-        - event: ProposalSubmittedToILRM(indexed uint256,string,address)
+        - event: ProposalSubmittedToILRM(indexed uint256,bytes32,indexed address)
           handler: handleProposalSubmittedToILRM
+        - event: ProposalRoundFilled(indexed uint256,indexed uint256,bytes32,uint256)
+          handler: handleProposalRoundFilled
+        - event: DisputeProcessed(indexed uint256,bytes32,bytes32)
+          handler: handleDisputeProcessed
         - event: ProposalReset(indexed uint256,bytes32,string)
           handler: handleProposalReset
+        - event: ProposalRoundReopened(indexed uint256,indexed uint256,bytes32)
+          handler: handleProposalRoundReopened
+        - event: OracleRegistered(indexed address,bytes32)
+          handler: handleOracleRegistered
+        - event: OwnershipTransferStarted(indexed address,indexed address)
+          handler: handleOwnershipTransferStarted
+        - event: OwnershipTransferred(indexed address,indexed address)
+          handler: handleOwnershipTransferred
       file: ./src/oracle.ts
 
-  # L3Bridge - Layer 3 Scaling
+  # ---------------------------------------------------------------------------
+  # L3Bridge - Layer 3 state commitments, fraud proofs and dispute bridging
+  # (contracts/scaling/L3Bridge.sol)
+  # ---------------------------------------------------------------------------
   - kind: ethereum/contract
     name: L3Bridge
     network: optimism
@@ -117,27 +195,73 @@ dataSources:
       startBlock: 0 # Replace with deployment block
     mapping:
       kind: ethereum/events
-      apiVersion: 0.0.7
+      apiVersion: 0.0.9
       language: wasm/assemblyscript
       entities:
-        - L3Batch
-        - L3Metric
+        - L3Chain
+        - L3ChainSlot
+        - L3StateCommitment
+        - FraudProofCommitment
         - FraudProofChallenge
+        - L3BridgedDispute
+        - L3Metric
+        - DailyMetric
+        - ProtocolMetric
+        - RoleMember
+        - ProtocolContract
+        - AdminEvent
       abis:
         - name: L3Bridge
           file: ./abis/L3Bridge.json
       eventHandlers:
-        - event: BatchSubmitted(indexed uint256,bytes32,uint256,address)
-          handler: handleBatchSubmitted
-        - event: BatchFinalized(indexed uint256)
-          handler: handleBatchFinalized
-        - event: ChallengeInitiated(indexed uint256,indexed address)
-          handler: handleChallengeInitiated
-        - event: ChallengeResolved(indexed uint256,bool)
-          handler: handleChallengeResolved
+        - event: StateCommitmentSubmitted(indexed bytes32,indexed uint256,uint256,address)
+          handler: handleStateCommitmentSubmitted
+        - event: StateCommitmentFinalized(indexed bytes32,indexed uint256)
+          handler: handleStateCommitmentFinalized
+        - event: FraudProofCommitted(indexed bytes32,indexed bytes32,indexed address,uint256)
+          handler: handleFraudProofCommitted
+        - event: FraudProofRevealed(indexed bytes32,indexed bytes32,indexed address)
+          handler: handleFraudProofRevealed
+        - event: FraudProofForfeited(indexed bytes32,indexed bytes32,indexed address,uint256)
+          handler: handleFraudProofForfeited
+        - event: FraudProofRefunded(indexed bytes32,indexed bytes32,indexed address,uint256)
+          handler: handleFraudProofRefunded
+        - event: CommittedChainRolledBack(indexed bytes32,indexed bytes32,uint256)
+          handler: handleCommittedChainRolledBack
+        - event: FraudProofSubmitted(indexed bytes32,indexed uint256,address)
+          handler: handleFraudProofSubmitted
+        - event: FraudProofValidated(indexed bytes32,indexed address,uint256)
+          handler: handleFraudProofValidated
+        - event: DisputeBridgedToL3(indexed uint256,indexed uint256,indexed address,uint256)
+          handler: handleDisputeBridgedToL3
+        - event: DisputeBridgeSkipped(indexed uint256,uint256)
+          handler: handleDisputeBridgeSkipped
+        - event: DisputeSettledFromL3(indexed uint256,indexed uint256,uint8,uint256,uint256)
+          handler: handleDisputeSettledFromL3
+        - event: SequencerUpdated(indexed address,indexed address)
+          handler: handleSequencerUpdated
+        - event: BridgeStatusChanged(uint8,uint8)
+          handler: handleBridgeStatusChanged
+        - event: DisputeBridgerUpdated(indexed address,bool)
+          handler: handleDisputeBridgerUpdated
+        - event: SettlementRelayerUpdated(indexed address,bool)
+          handler: handleSettlementRelayerUpdated
+        - event: FeesWithdrawn(indexed address,uint256)
+          handler: handleFeesWithdrawn
+        - event: OwnershipTransferStarted(indexed address,indexed address)
+          handler: handleOwnershipTransferStarted
+        - event: OwnershipTransferred(indexed address,indexed address)
+          handler: handleOwnershipTransferred
+        - event: Paused(address)
+          handler: handlePaused
+        - event: Unpaused(address)
+          handler: handleUnpaused
       file: ./src/l3bridge.ts
 
-  # AssetRegistry - IP Management
+  # ---------------------------------------------------------------------------
+  # AssetRegistry - IP assets, licenses and dispute freezes
+  # (contracts/AssetRegistry.sol)
+  # ---------------------------------------------------------------------------
   - kind: ethereum/contract
     name: AssetRegistry
     network: optimism
@@ -147,22 +271,36 @@ dataSources:
       startBlock: 0 # Replace with deployment block
     mapping:
       kind: ethereum/events
-      apiVersion: 0.0.7
+      apiVersion: 0.0.9
       language: wasm/assemblyscript
       entities:
         - Asset
         - License
         - AssetFreeze
+        - DisputeAssetSet
+        - FallbackLicenseApplication
+        - Party
+        - RoleMember
+        - ProtocolContract
+        - AdminEvent
       abis:
         - name: AssetRegistry
           file: ./abis/AssetRegistry.json
       eventHandlers:
-        - event: AssetRegistered(indexed uint256,indexed address,bytes32)
+        - event: AssetRegistered(indexed bytes32,indexed address,bytes32)
           handler: handleAssetRegistered
-        - event: AssetFrozen(indexed uint256,indexed uint256)
-          handler: handleAssetFrozen
-        - event: AssetUnfrozen(indexed uint256)
-          handler: handleAssetUnfrozen
-        - event: FallbackLicenseApplied(indexed uint256,bytes32)
-          handler: handleFallbackLicenseAppliedToAsset
+        - event: AssetsFrozen(indexed uint256,indexed address,bytes32[])
+          handler: handleAssetsFrozen
+        - event: AssetsUnfrozen(indexed uint256,bytes)
+          handler: handleAssetsUnfrozen
+        - event: FallbackLicenseApplied(indexed uint256,bytes32,bytes32[])
+          handler: handleFallbackLicenseApplied
+        - event: LicenseModified(indexed bytes32,indexed address,bytes32,bytes32)
+          handler: handleLicenseModified
+        - event: ILRMAuthorizationChanged(indexed address,bool)
+          handler: handleILRMAuthorizationChanged
+        - event: OwnershipTransferStarted(indexed address,indexed address)
+          handler: handleOwnershipTransferStarted
+        - event: OwnershipTransferred(indexed address,indexed address)
+          handler: handleOwnershipTransferred
       file: ./src/assetregistry.ts

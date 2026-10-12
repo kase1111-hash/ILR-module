@@ -1,158 +1,232 @@
 // =============================================================================
 // AssetRegistry Event Handlers - TheGraph Subgraph
 // =============================================================================
-// Handles all events from the AssetRegistry IP management contract
+// Handles every event of contracts/AssetRegistry.sol (NatLangChainAssetRegistry).
+// Asset ids are bytes32. Inside an ILRM transaction the registry events come
+// first: AssetsFrozen precedes ILRM.DisputeInitiated, and FallbackLicenseApplied /
+// AssetsUnfrozen precede ILRM.DisputeResolved.
+// transferAsset emits no event, so Asset.owner is the registering owner.
 // =============================================================================
 
-import { BigInt, Address } from "@graphprotocol/graph-ts";
+import { Bytes } from "@graphprotocol/graph-ts";
 import {
+  AssetRegistry,
+  AssetRegistry__getLicenseResultValue0Struct,
   AssetRegistered,
-  AssetFrozen,
-  AssetUnfrozen,
-  FallbackLicenseApplied
+  AssetsFrozen,
+  AssetsUnfrozen,
+  FallbackLicenseApplied,
+  ILRMAuthorizationChanged,
+  LicenseModified,
+  OwnershipTransferStarted,
+  OwnershipTransferred
 } from "../generated/AssetRegistry/AssetRegistry";
-import { Asset, License, AssetFreeze, Party } from "../generated/schema";
+import { Asset, AssetFreeze, DisputeAssetSet, FallbackLicenseApplication, License } from "../generated/schema";
+import {
+  KIND_ASSET_REGISTRY,
+  eventId,
+  isZeroBytes,
+  newAdminEvent,
+  recordOwnershipTransferStarted,
+  recordOwnershipTransferred,
+  setRole,
+  touchParty
+} from "./common";
 
-// =============================================================================
-// Helper Functions
-// =============================================================================
-
-function getOrCreateParty(address: Address, timestamp: BigInt): Party {
-  let id = address.toHexString();
-  let party = Party.load(id);
-
-  if (party == null) {
-    party = new Party(id);
-    party.totalDisputes = 0;
-    party.disputesResolved = 0;
-    party.disputesTimedOut = 0;
-    party.totalStaked = BigInt.fromI32(0);
-    party.totalBurned = BigInt.fromI32(0);
-    party.harassmentScore = BigInt.fromI32(0);
-    party.totalSubsidiesReceived = BigInt.fromI32(0);
-    party.firstSeen = timestamp;
-    party.lastActive = timestamp;
-    party.save();
-  }
-
-  return party;
+function idsOf(assetIds: Bytes[]): string[] {
+  const ids: string[] = [];
+  for (let i = 0; i < assetIds.length; i++) ids.push(assetIds[i].toHexString());
+  return ids;
 }
 
 // =============================================================================
-// Event Handlers
+// Assets
 // =============================================================================
 
 export function handleAssetRegistered(event: AssetRegistered): void {
-  let assetId = event.params.assetId.toString();
-  let timestamp = event.block.timestamp;
+  const owner = touchParty(event.params.owner, event.block.timestamp);
 
-  // Get or create owner
-  let owner = getOrCreateParty(event.params.owner, timestamp);
-  owner.lastActive = timestamp;
-  owner.save();
-
-  // Create asset
-  let asset = new Asset(assetId);
+  const asset = new Asset(event.params.assetId.toHexString());
   asset.owner = owner.id;
-  asset.contentHash = event.params.contentHash;
-  asset.registeredAt = timestamp;
+  asset.licenseTermsHash = event.params.licenseTermsHash;
+  asset.registeredAt = event.block.timestamp;
   asset.frozen = false;
+  asset.fallbackLicenseCount = 0;
   asset.save();
 }
 
-export function handleAssetFrozen(event: AssetFrozen): void {
-  let assetId = event.params.assetId.toString();
-  let timestamp = event.block.timestamp;
+// =============================================================================
+// Dispute freezes
+// =============================================================================
 
-  let asset = Asset.load(assetId);
-  if (asset == null) {
-    return;
+export function handleAssetsFrozen(event: AssetsFrozen): void {
+  const disputeId = event.params.disputeId;
+  const key = disputeId.toString();
+  // The event lists every asset frozen for this dispute so far (the registry's storage array)
+  const ids = idsOf(event.params.assetIds);
+
+  let set = DisputeAssetSet.load(key);
+  if (set == null) set = new DisputeAssetSet(key);
+  set.assets = ids;
+  set.unfrozenAt = null;
+  set.unfreezeOutcome = null;
+  set.save();
+
+  for (let i = 0; i < ids.length; i++) {
+    const asset = Asset.load(ids[i]);
+    if (asset == null) continue;
+    const freezeId = ids[i] + "-" + key;
+    if (AssetFreeze.load(freezeId) != null) continue; // frozen by an earlier call for this dispute
+
+    asset.frozen = true;
+    asset.frozenByDispute = disputeId;
+    asset.save();
+
+    const freeze = new AssetFreeze(freezeId);
+    freeze.asset = asset.id;
+    freeze.disputeId = disputeId;
+    freeze.dispute = key;
+    freeze.party = event.params.party;
+    freeze.frozenAt = event.block.timestamp;
+    freeze.txHash = event.transaction.hash;
+    freeze.save();
   }
-
-  asset.frozen = true;
-  asset.frozenByDispute = event.params.disputeId;
-  asset.save();
-
-  // Create freeze record
-  // Count existing freezes for this asset
-  let freezeIndex = 0;
-  let freezeId = assetId + "-" + freezeIndex.toString();
-  while (AssetFreeze.load(freezeId) != null) {
-    freezeIndex++;
-    freezeId = assetId + "-" + freezeIndex.toString();
-  }
-
-  let freeze = new AssetFreeze(freezeId);
-  freeze.asset = assetId;
-  freeze.disputeId = event.params.disputeId;
-  freeze.frozenAt = timestamp;
-  freeze.txHash = event.transaction.hash;
-  freeze.save();
 }
 
-export function handleAssetUnfrozen(event: AssetUnfrozen): void {
-  let assetId = event.params.assetId.toString();
-  let timestamp = event.block.timestamp;
+export function handleAssetsUnfrozen(event: AssetsUnfrozen): void {
+  const disputeId = event.params.disputeId;
+  const key = disputeId.toString();
+  // Emitted on every resolution, also when nothing was frozen
+  const set = DisputeAssetSet.load(key);
+  if (set == null) return;
 
-  let asset = Asset.load(assetId);
-  if (asset == null) {
-    return;
-  }
+  const ids = set.assets;
+  for (let i = 0; i < ids.length; i++) {
+    const asset = Asset.load(ids[i]);
+    if (asset == null) continue;
+    // Mirrors the registry: only assets still frozen by this dispute are released
+    const frozenBy = asset.frozenByDispute;
+    if (frozenBy === null || !frozenBy.equals(disputeId)) continue;
+    asset.frozen = false;
+    asset.frozenByDispute = null;
+    asset.save();
 
-  asset.frozen = false;
-  asset.frozenByDispute = null;
-  asset.save();
-
-  // Find and update the most recent freeze record
-  let freezeIndex = 0;
-  let lastFreeze: AssetFreeze | null = null;
-  let freezeId = assetId + "-" + freezeIndex.toString();
-
-  while (true) {
-    let freeze = AssetFreeze.load(freezeId);
-    if (freeze == null) {
-      break;
+    const freeze = AssetFreeze.load(ids[i] + "-" + key);
+    if (freeze != null) {
+      freeze.unfrozenAt = event.block.timestamp;
+      freeze.save();
     }
-    if (freeze.unfrozenAt == null) {
-      lastFreeze = freeze;
-    }
-    freezeIndex++;
-    freezeId = assetId + "-" + freezeIndex.toString();
   }
 
-  if (lastFreeze != null) {
-    lastFreeze.unfrozenAt = timestamp;
-    lastFreeze.save();
+  set.unfreezeOutcome = event.params.outcome;
+  set.unfrozenAt = event.block.timestamp;
+  set.save();
+}
+
+export function handleFallbackLicenseApplied(event: FallbackLicenseApplied): void {
+  const ids = idsOf(event.params.affectedAssets);
+  const key = event.params.disputeId.toString();
+
+  const application = new FallbackLicenseApplication(eventId(event));
+  application.disputeId = event.params.disputeId;
+  application.dispute = key;
+  application.termsHash = event.params.termsHash;
+  application.assets = ids;
+  application.timestamp = event.block.timestamp;
+  application.txHash = event.transaction.hash;
+  application.save();
+
+  for (let i = 0; i < ids.length; i++) {
+    const asset = Asset.load(ids[i]);
+    if (asset == null) continue;
+    asset.licenseTermsHash = event.params.termsHash;
+    asset.fallbackLicenseCount = asset.fallbackLicenseCount + 1;
+    asset.save();
   }
 }
 
-export function handleFallbackLicenseAppliedToAsset(event: FallbackLicenseApplied): void {
-  let assetId = event.params.assetId.toString();
-  let timestamp = event.block.timestamp;
+// =============================================================================
+// Licenses
+// =============================================================================
 
-  let asset = Asset.load(assetId);
-  if (asset == null) {
-    return;
+export function handleLicenseModified(event: LicenseModified): void {
+  // grantLicense emits (0, terms) - also when re-granting an active license; revokeLicense emits (terms, 0).
+  // A grant with zero terms and a revocation of it both emit (0, 0). Those are told apart by the
+  // registry's own `active` flag, never by the subgraph's stored state: a zero-terms re-grant of an
+  // active license is not a revoke, and the revoke that follows it is not a grant.
+  const assetKey = event.params.assetId.toHexString();
+  const id = assetKey + "-" + event.params.licensee.toHexString();
+  const oldTerms = event.params.oldTermsHash;
+  const newTerms = event.params.newTermsHash;
+  const ambiguous = isZeroBytes(oldTerms) && isZeroBytes(newTerms);
+
+  let license = License.load(id);
+  let isRevoke = !ambiguous && isZeroBytes(newTerms);
+
+  // The stored grant as of the end of this block: duration, royalty and exclusivity are not in the
+  // event, and its `active` flag classifies (0, 0). Every (0, 0) event of a block sees the same
+  // final state, so the License ends the block in the registry's state even when a zero-terms grant
+  // and its revoke share a block.
+  let grant: AssetRegistry__getLicenseResultValue0Struct | null = null;
+  if (!isRevoke) {
+    const call = AssetRegistry.bind(event.address).try_getLicense(event.params.assetId, event.params.licensee);
+    if (!call.reverted) grant = call.value;
+  }
+  if (ambiguous) {
+    // getLicense is a plain storage read; the fallback only covers a registry without it
+    isRevoke = grant != null ? !grant.active : license != null && license.active;
   }
 
-  // Create license record
-  // Count existing licenses for this asset
-  let licenseIndex = 0;
-  let licenseId = assetId + "-" + licenseIndex.toString();
-  while (License.load(licenseId) != null) {
-    licenseIndex++;
-    licenseId = assetId + "-" + licenseIndex.toString();
+  if (license == null) {
+    // A revoke needs an earlier grant. With (T, 0) the grant predates startBlock: nothing to update.
+    // A (0, 0) revoke is a zero-terms grant revoked later in this same block: record it as revoked.
+    if (isRevoke && !ambiguous) return;
+    const licensee = touchParty(event.params.licensee, event.block.timestamp);
+    license = new License(id);
+    license.asset = assetKey;
+    license.licensee = licensee.id;
+    license.termsHash = newTerms;
+    license.grantCount = isRevoke ? 1 : 0;
   }
 
-  let license = new License(licenseId);
-  license.asset = assetId;
-  license.termsHash = event.params.termsHash;
-  license.licenseType = "FALLBACK";
-  license.grantedAt = timestamp;
-  license.isFallback = true;
-  // Would need additional event data for these:
-  // license.fromDispute = disputeId;
-  // license.expiresAt = expiry;
-  // license.royaltyBps = royalty;
+  if (grant != null && grant.termsHash.equals(newTerms)) {
+    license.grantedAt = grant.grantedAt;
+    license.expiresAt = grant.expiresAt;
+    license.royaltyBps = grant.royaltyBps;
+    license.nonExclusive = grant.nonExclusive;
+  }
+  license.updatedTx = event.transaction.hash;
+
+  if (isRevoke) {
+    license.active = false;
+    license.revokedAt = event.block.timestamp;
+    license.expiresAt = event.block.timestamp; // revokeLicense sets expiresAt = block.timestamp
+  } else {
+    license.termsHash = newTerms;
+    license.active = true;
+    license.revokedAt = null;
+    if (isZeroBytes(oldTerms)) license.grantCount = license.grantCount + 1;
+  }
   license.save();
+}
+
+// =============================================================================
+// Roles and ownership
+// =============================================================================
+
+export function handleILRMAuthorizationChanged(event: ILRMAuthorizationChanged): void {
+  setRole(event, KIND_ASSET_REGISTRY, "AUTHORIZED_ILRM", event.params.ilrm, event.params.authorized);
+
+  const entry = newAdminEvent(event, KIND_ASSET_REGISTRY, "ILRMAuthorizationChanged");
+  entry.account = event.params.ilrm;
+  entry.flag = event.params.authorized;
+  entry.save();
+}
+
+export function handleOwnershipTransferStarted(event: OwnershipTransferStarted): void {
+  recordOwnershipTransferStarted(event, KIND_ASSET_REGISTRY, event.params.previousOwner, event.params.newOwner);
+}
+
+export function handleOwnershipTransferred(event: OwnershipTransferred): void {
+  recordOwnershipTransferred(event, KIND_ASSET_REGISTRY, event.params.previousOwner, event.params.newOwner);
 }

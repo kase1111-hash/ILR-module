@@ -1,0 +1,10 @@
+# graph codegen / graph build output
+generated/
+build/
+
+# matchstick (graph test) output
+tests/.bin/
+tests/.latest.json
+tests/.docker/
+
+node_modules/
