@@ -85,13 +85,15 @@ contract ComplianceEscrow is IComplianceEscrow, ReentrancyGuard, Pausable, Ownab
 
     // ============ Modifiers ============
 
+    /// @dev Escrow ids are assigned sequentially from 0, so exactly the ids below the counter exist
     modifier escrowExists(uint256 escrowId) {
-        if (_escrows[escrowId].createdAt == 0) revert EscrowNotFound(escrowId);
+        if (escrowId >= _escrowCounter) revert EscrowNotFound(escrowId);
         _;
     }
 
+    /// @dev Request ids are assigned sequentially from 0, so exactly the ids below the counter exist
     modifier requestExists(uint256 requestId) {
-        if (_revealRequests[requestId].requestedAt == 0) revert RequestNotFound(requestId);
+        if (requestId >= _requestCounter) revert RequestNotFound(requestId);
         _;
     }
 

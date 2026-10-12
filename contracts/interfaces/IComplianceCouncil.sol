@@ -23,6 +23,24 @@ pragma solidity ^0.8.20;
  * - Individual (partial) signatures verify against each member's key share
  * - The threshold signature verifies against the DKG group public key set by the admin
  * - The signed message is getSigningMessage(warrantId), bound to the chain id and the council address
+ * - Member keys are Shamir shares: keyIndex is the share's evaluation point x_i, publicKey = g1^f(x_i), and the
+ *   group key is g1^f(0). Key indices and keys are unique among active members and no member key equals the
+ *   group key.
+ * - A partial signature counts toward the threshold only while its signer still holds the key registration
+ *   it was verified under: removing the member or rotating its key voids it
+ *
+ * The reconstructed key (decryptedKeyHash):
+ * - BLS signatures are unique, so the group signature sigma = f(0) * H(m) on a warrant's message m is one
+ *   well-defined G2 point, whichever t members sign. It is the warrant's threshold-extracted decryption key
+ *   in the BLS identity-based-encryption sense (sigma is the private key of identity m under the group key).
+ * - decryptedKeyHash = keccak256(256-byte EIP-2537 encoding of sigma). In STRICT_ONCHAIN executeReconstruction
+ *   computes sigma on chain by Lagrange interpolation of threshold current partials and verifies it against
+ *   the group key; in HYBRID_ATTESTED the operator attests the same hash after verifying off chain.
+ *   The SDK's computeDecryptedKeyHash gives the same value from an off-chain aggregate.
+ * - The partials are public (getSignatures), so anyone can derive sigma once the threshold is met:
+ *   decryptedKeyHash is a public commitment, and data protected by a key derived from sigma alone is readable
+ *   by everyone holding its ciphertext. Releasing data to the requester alone requires the ciphertext to be
+ *   access-controlled or additionally encrypted to the requester.
  *
  * Legal Compliance Flow:
  * 1. Authority submits warrant request with legal documentation
@@ -103,17 +121,18 @@ interface IComplianceCouncil {
         address memberAddress;
         MemberRole role;
         BLSPublicKey publicKey;
-        uint256 keyIndex; // Index in threshold scheme (1-based)
+        uint256 keyIndex; // Shamir evaluation point of the key share, 1 <= keyIndex < r
         bool isActive;
         uint256 joinedAt;
         uint256 votesParticipated;
         uint256 signaturesProvided;
+        uint256 keyId; // Registration id of publicKey, fresh on every add and rotation; 0 once removed
     }
 
     /// @notice Council configuration
     struct CouncilConfig {
         uint256 threshold; // Minimum signatures required (m)
-        uint256 totalMembers; // Total council size (n)
+        uint256 totalMembers; // Active council size (n), maintained by addMember / removeMember
         uint256 votingPeriod; // Duration for voting (seconds)
         uint256 executionDelay; // Delay after approval before execution
         uint256 appealWindow; // Time to file appeal
@@ -135,7 +154,7 @@ interface IComplianceCouncil {
         WarrantStatus status;
         uint256 approvalsCount;
         uint256 rejectionsCount;
-        bytes32 decryptedKeyHash; // Set after successful execution
+        bytes32 decryptedKeyHash; // keccak256 of the group signature on the warrant, set on execution
     }
 
     /// @notice Vote record
@@ -146,12 +165,17 @@ interface IComplianceCouncil {
         string reason;
     }
 
-    /// @notice Signature submission
+    /**
+     * @notice Signature submission
+     * @dev The submission counts toward the threshold while getMember(signer).keyId == keyId
+     */
     struct SignatureSubmission {
-        uint256 memberIndex;
+        uint256 memberIndex; // Signer's key index
         BLSSignature signature;
         uint256 timestamp;
         bool verified;
+        address signer; // Member that submitted
+        uint256 keyId; // Signer's key registration id at submission
     }
 
     // ============ Events ============
@@ -161,6 +185,9 @@ interface IComplianceCouncil {
 
     /// @notice Emitted when a council member is removed
     event MemberRemoved(address indexed memberAddress, MemberRole role);
+
+    /// @notice Emitted when a member's BLS key is rotated; keyId is the new registration id
+    event MemberKeyRotated(address indexed memberAddress, uint256 keyId);
 
     /// @notice Emitted when a warrant request is submitted
     event WarrantRequested(
@@ -181,7 +208,7 @@ interface IComplianceCouncil {
         uint256 indexed warrantId, WarrantStatus status, uint256 approvalsCount, uint256 rejectionsCount
     );
 
-    /// @notice Emitted when a signature is submitted
+    /// @notice Emitted when a signature is submitted; totalSignatures counts the submissions that currently count
     event SignatureSubmitted(
         uint256 indexed warrantId, address indexed signer, uint256 memberIndex, uint256 totalSignatures
     );
@@ -206,22 +233,28 @@ interface IComplianceCouncil {
     /**
      * @notice Add a new council member
      * @dev The key must be a valid G1 point (curve and subgroup checked when the precompiles are available,
-     *      encoding checked otherwise). At most one active member may hold a given key index.
+     *      encoding checked otherwise), not held by another active member and not equal to the group key.
+     *      At most one active member may hold a given key index.
      * @param member Member address
      * @param role Member's role
      * @param publicKey BLS public key share (G1)
-     * @param keyIndex Index in threshold scheme (1-based, the share's DKG index)
+     * @param keyIndex The share's DKG evaluation point: 1 <= keyIndex < r, the BLS12-381 group order (any
+     *        distinct nonzero field elements support Lagrange interpolation, so the council size is not bounded
+     *        by the threshold)
      */
     function addMember(address member, MemberRole role, BLSPublicKey calldata publicKey, uint256 keyIndex) external;
 
     /**
      * @notice Remove a council member
+     * @dev Frees the member's key index and key and voids the partial signatures it submitted
      * @param member Member address to remove
      */
     function removeMember(address member) external;
 
     /**
      * @notice Update member's BLS public key (key rotation)
+     * @dev Same key checks as addMember (the current key counts as in use). Voids the partial signatures made
+     *      under the old key; the member may sign those warrants again with the new key.
      * @param member Member address
      * @param newPublicKey New BLS public key
      */
@@ -266,6 +299,8 @@ interface IComplianceCouncil {
 
     /**
      * @notice Cast vote on a warrant request
+     * @dev Caller must be an active member (added through addMember and not removed); MEMBER_ROLE alone is not
+     *      enough
      * @param warrantId Warrant to vote on
      * @param approve True to approve, false to reject
      * @param reason Reason for vote
@@ -305,7 +340,9 @@ interface IComplianceCouncil {
     /**
      * @notice Submit a partial signature for key reconstruction
      * @dev Signs getSigningMessage(warrantId). When the precompiles are available the signature must verify
-     *      against the caller's registered key share.
+     *      against the caller's registered key share. Caller must be an active member (MEMBER_ROLE alone is not
+     *      enough). One submission per member and key registration: after a key rotation the member may submit
+     *      again.
      * @param warrantId Approved warrant ID
      * @param signature BLS signature (G2)
      */
@@ -327,8 +364,9 @@ interface IComplianceCouncil {
 
     /**
      * @notice Aggregate multiple BLS signatures as a plain G2 sum
-     * @dev Requires the BLS precompiles. This is plain (non-threshold) aggregation; threshold (Lagrange)
-     *      aggregation of partial signatures is done off-chain by the SDK.
+     * @dev Requires the BLS precompiles. Reverts unless every element (also a single one) is a canonical,
+     *      non-infinity G2 point on the curve and in the prime-order subgroup. This is plain (non-threshold)
+     *      aggregation; threshold (Lagrange) aggregation is done by the SDK and by executeReconstruction.
      * @param signatures Array of signatures to aggregate
      * @return aggregated The aggregated signature
      */
@@ -342,8 +380,9 @@ interface IComplianceCouncil {
      * @dev The signer indices must be strictly increasing key indices of active members and their number must
      *      equal signatureCount (>= threshold). For shares of one DKG any valid t-subset yields the same
      *      signature, so a valid result proves that t shares signed, not which members did. Informational only:
-     *      it never gates execution. Returns false without the precompiles, for an unknown warrant or while the
-     *      group key is unset.
+     *      it never gates execution (in STRICT_ONCHAIN executeReconstruction runs the same check on the signature
+     *      it interpolates from the submitted partials). Returns false without the precompiles, for an unknown
+     *      warrant or while the group key is unset.
      * @param warrantId Warrant ID
      * @param thresholdSig Aggregated signature with signer info
      * @return valid True if threshold signature is valid
@@ -355,8 +394,13 @@ interface IComplianceCouncil {
 
     /**
      * @notice Execute key reconstruction after threshold is met
+     * @dev Needs threshold partial signatures that still count (signer not removed, key not rotated since).
+     *      STRICT_ONCHAIN: Lagrange-combines the first threshold of them into the group signature, which must
+     *      verify against the group key ("Invalid threshold signature" otherwise, e.g. while the group key is
+     *      unset). HYBRID_ATTESTED: requires the operator attestation. See the contract header for the meaning
+     *      of decryptedKeyHash.
      * @param warrantId Warrant with sufficient signatures
-     * @return decryptedKeyHash Hash of reconstructed key
+     * @return decryptedKeyHash keccak256 of the 256-byte EIP-2537 encoding of the warrant's group signature
      */
     function executeReconstruction(uint256 warrantId) external returns (bytes32 decryptedKeyHash);
 
@@ -412,10 +456,11 @@ interface IComplianceCouncil {
     function hasVoted(uint256 warrantId, address member) external view returns (bool hasVoted);
 
     /**
-     * @notice Check if member has submitted signature
+     * @notice Check if member has a submitted signature that currently counts
+     * @dev False again once the member is removed or rotates its key
      * @param warrantId Warrant ID
      * @param member Member address
-     * @return hasSubmitted True if signature submitted
+     * @return hasSubmitted True if the member's submission under its current key exists
      */
     function hasSubmittedSignature(uint256 warrantId, address member) external view returns (bool hasSubmitted);
 
@@ -423,13 +468,16 @@ interface IComplianceCouncil {
 
     /**
      * @notice Update council configuration
+     * @dev config.totalMembers is ignored: the member count is maintained by addMember / removeMember.
+     *      The threshold may not exceed the current member count (any threshold while there are no members).
      * @param config New configuration
      */
     function updateConfig(CouncilConfig calldata config) external;
 
     /**
      * @notice Set the threshold group public key
-     * @dev The DKG group key g1^f(0) (the SDK's DKGOutput.aggregatedPublicKey). Must be a valid G1 point.
+     * @dev The DKG group key g1^f(0) (the SDK's DKGOutput.aggregatedPublicKey). Must be a valid G1 point that
+     *      no active member holds as its key share.
      * @param groupKey Group public key (G1)
      */
     function setAggregatedPublicKey(BLSPublicKey calldata groupKey) external;

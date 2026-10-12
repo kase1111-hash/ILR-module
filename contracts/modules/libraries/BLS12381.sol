@@ -16,7 +16,8 @@ pragma solidity ^0.8.20;
  *      - G2 point: x || y (256 bytes), in the order x.c0, x.c1, y.c0, y.c1;
  *      - the all-zero encoding is the point at infinity.
  *
- *      Precompiles used: MODEXP 0x05, G1ADD 0x0b, G1MSM 0x0c, G2ADD 0x0d, PAIRING_CHECK 0x0f, MAP_FP2_TO_G2 0x11.
+ *      Precompiles used: MODEXP 0x05, G1ADD 0x0b, G1MSM 0x0c, G2ADD 0x0d, G2MSM 0x0e, PAIRING_CHECK 0x0f,
+ *      MAP_FP2_TO_G2 0x11. Of these only the MSM and pairing precompiles check subgroup membership.
  *
  *      Failure model: apart from expandMessageXmd (which reverts on an invalid DST) no function reverts.
  *      Every precompile call must succeed AND return exactly the expected number of bytes, otherwise the
@@ -29,8 +30,12 @@ library BLS12381 {
     address internal constant G1_ADD = address(0x0b);
     address internal constant G1_MSM = address(0x0c);
     address internal constant G2_ADD = address(0x0d);
+    address internal constant G2_MSM = address(0x0e);
     address internal constant PAIRING_CHECK = address(0x0f);
     address internal constant MAP_FP2_TO_G2 = address(0x11);
+
+    /// @notice Order r of the G1 / G2 subgroups, i.e. of the scalar field over which key shares are defined
+    uint256 internal constant R = 0x73eda753299d7d483339d80809a1d80553bda402fffe5bfeffffffff00000001;
 
     /// @dev Base field modulus p, split into the two 32-byte words of its 64-byte EIP-2537 encoding
     bytes32 private constant P_HI = 0x000000000000000000000000000000001a0111ea397fe69a4b1ba7b6434bacd7;
@@ -62,9 +67,15 @@ library BLS12381 {
      *      that the point is on the curve or in the subgroup; use isValidG1 for that.
      */
     function isCanonicalG1(bytes memory pt) internal pure returns (bool) {
-        if (pt.length != 128 || isZero(pt)) return false;
-        (bytes32 xHi, bytes32 xLo, bytes32 yHi, bytes32 yLo) = abi.decode(pt, (bytes32, bytes32, bytes32, bytes32));
-        return _isCanonicalFp(xHi, xLo) && _isCanonicalFp(yHi, yLo);
+        return pt.length == 128 && _isCanonicalPoint(pt);
+    }
+
+    /**
+     * @notice Structural check of a G2 point encoding: 256 bytes, not infinity, all four Fp limbs canonical
+     * @dev Same rules as isCanonicalG1. Curve and subgroup membership are checked by G2MSM and PAIRING_CHECK.
+     */
+    function isCanonicalG2(bytes memory pt) internal pure returns (bool) {
+        return pt.length == 256 && _isCanonicalPoint(pt);
     }
 
     /**
@@ -136,15 +147,89 @@ library BLS12381 {
         ok = ok && sum.length == 256;
     }
 
+    /**
+     * @notice G2 multi-scalar multiplication: sum_i s_i * P_i for `pairs` = P_0 || s_0 || P_1 || s_1 || ...
+     * @dev Each P_i is a 256-byte G2 point and each s_i a 32-byte scalar. Unlike G2ADD, G2MSM rejects
+     *      non-canonical, off-curve AND out-of-subgroup points. ok only if a 256-byte point is returned.
+     */
+    function g2Msm(bytes memory pairs) internal view returns (bool ok, bytes memory sum) {
+        (ok, sum) = G2_MSM.staticcall(pairs);
+        ok = ok && sum.length == 256;
+    }
+
+    /**
+     * @notice Lagrange interpolation at zero in the exponent: sum_i l_i(0) * P_i
+     * @dev For Shamir shares sk_i = f(x_i) of sk = f(0) over the scalar field F_r, this combines t partial
+     *      signatures sk_i * H(m) into the group signature sk * H(m), with l_i(0) = prod_{j != i} x_j / (x_j - x_i).
+     *      The evaluation points must be in [1, r) and pairwise distinct, which makes every denominator invertible.
+     * @param pairs G2MSM input P_0 || s_0 || P_1 || s_1 || ... (256-byte points, checked by G2MSM); the 32-byte
+     *        scalar slots are overwritten in place with l_i(0)
+     * @param xs Evaluation points (key indices), one per point
+     * @return ok False on an empty or mismatched input, an evaluation point outside [1, r), a repeated
+     *         evaluation point, or a failed precompile call
+     * @return sum The 256-byte interpolated G2 point
+     */
+    function interpolateG2AtZero(bytes memory pairs, uint256[] memory xs)
+        internal
+        view
+        returns (bool ok, bytes memory sum)
+    {
+        uint256 n = xs.length;
+        if (n == 0 || pairs.length != n * 288) return (false, sum);
+        for (uint256 i = 0; i < n; i++) {
+            uint256 xi = xs[i];
+            if (xi == 0 || xi >= R) return (false, sum);
+            uint256 num = 1;
+            uint256 den = 1;
+            for (uint256 j = 0; j < n; j++) {
+                if (j != i) {
+                    num = mulmod(num, xs[j], R);
+                    den = mulmod(den, addmod(xs[j], R - xi, R), R);
+                }
+            }
+            // den == 0 iff some x_j == x_i mod r (an x_j >= r is rejected when its own turn comes)
+            if (den == 0) return (false, sum);
+            uint256 inv;
+            (ok, inv) = _invModR(den);
+            if (!ok) return (false, sum);
+            uint256 lambda = mulmod(num, inv, R);
+            assembly ("memory-safe") {
+                // scalar slot i: data offset i * 288 + 256, i.e. memory pairs + 32 + i * 288 + 256
+                mstore(add(pairs, add(mul(i, 288), 288)), lambda)
+            }
+        }
+        return g2Msm(pairs);
+    }
+
     /// @notice True if every byte of `data` is zero (the EIP-2537 encoding of the point at infinity)
     function isZero(bytes memory data) internal pure returns (bool) {
         return keccak256(data) == keccak256(new bytes(data.length));
     }
 
-    /// @dev (hi, lo) is a canonical Fp encoding: top 16 bytes zero and value < p
-    function _isCanonicalFp(bytes32 hi, bytes32 lo) private pure returns (bool) {
-        if (uint256(hi) >> 128 != 0) return false;
-        return hi < P_HI || (hi == P_HI && lo < P_LO);
+    /**
+     * @dev Not infinity, and every 64-byte Fp limb (hi || lo) canonical: top 16 bytes zero and value < p.
+     *      P_HI < 2^128, so hi > P_HI also catches nonzero padding bytes. pt.length must be a multiple of 64.
+     */
+    function _isCanonicalPoint(bytes memory pt) private pure returns (bool) {
+        if (isZero(pt)) return false;
+        for (uint256 off = 32; off < pt.length; off += 64) {
+            bytes32 hi;
+            bytes32 lo;
+            assembly ("memory-safe") {
+                hi := mload(add(pt, off))
+                lo := mload(add(pt, add(off, 32)))
+            }
+            if (hi > P_HI || (hi == P_HI && lo >= P_LO)) return false;
+        }
+        return true;
+    }
+
+    /// @dev a^-1 mod r as a^(r-2) mod r (Fermat) via MODEXP; a must be nonzero mod r
+    function _invModR(uint256 a) private view returns (bool ok, uint256 inv) {
+        bytes memory out;
+        (ok, out) = MODEXP.staticcall(abi.encodePacked(uint256(32), uint256(32), uint256(32), a, R - 2, R));
+        ok = ok && out.length == 32;
+        if (ok) inv = abi.decode(out, (uint256));
     }
 
     /// @dev map_to_curve(u) for u = (OS2IP(a0 || a1) mod p, OS2IP(b0 || b1) mod p)
