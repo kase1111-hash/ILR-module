@@ -158,6 +158,8 @@ function revealFraudProof(FraudProof calldata proof, bytes32 salt) external;
 4. Reveal must occur within `MAX_REVEAL_WINDOW` (1 hour) or commitment expires
 5. `submitFraudProof()` is disabled when commit-reveal mode is enabled
 
+**Follow-up (challenge griefing):** The first version allowed only one live commitment per state root, so a griefer could front-run honest commits and re-commit at every expiry to keep a fraudulent root unchallengeable until it finalized, and a reveal was never checked against the root it was committed for. Commitments are now keyed by `(challenger, commitHash)`, any number may be open per root, and the commit hash (`computeFraudProofCommitHash`) is domain-separated and binds the challenger, so a copied hash or a copied reveal is useless to anyone else. A reveal only acts on its committed root and always settles the bond (Won, Refunded or Forfeited; invalid reveals now forfeit instead of reverting), escrowed bonds never fund rewards or fee withdrawals, challenge deadlines are snapshotted at submission with a commit cutoff, roots finalize in chain order with rollback of rejected roots and their descendants, and `pause()` freezes finalization rather than challenges. Regression tests: `test/L3FraudProofs.t.sol`.
+
 ---
 
 ### H-03: Duplicate Fraud Challenges (Previously Fixed)
@@ -227,17 +229,32 @@ Multiple state commitments could reference the same `previousRoot` if submitted 
 
 ### M-04: Unbounded Credential Array Growth
 
-**File:** `DIDRegistry.sol:341-358`
+**File:** `DIDRegistry.sol` (`issueCredential`, `revokeIssuerCredentials`, `cleanupCredentials`, `_computeSybilScore`)
 **Status:** ✅ Fixed
 
 **Description:**
-Revoked credentials remained in the `_didCredentials[did]` array, causing unbounded growth.
+Revoked credentials remained in the `_didCredentials[did]` array, causing unbounded growth. The first fix (a
+cleanup function plus a score loop over only the first 50 entries) let stale entries at the front hide newer
+credentials from the sybil score.
 
 **Fix Applied:**
-- Added `cleanupCredentials(did)` function to remove revoked/expired credentials
-- Uses swap-and-pop pattern for gas-efficient removal
-- Added `getActiveCredentialCount(did)` view function
-- Users or protocols can periodically call cleanup to prevent bloat
+- A DID holds at most `MAX_CREDENTIALS_FOR_SCORE` (50) credentials, so the sybil score covers every one of them and
+  every per-DID loop (score, prune, active count, batch revoke) runs at most 50 times
+- One issuer holds at most `MAX_CREDENTIALS_PER_ISSUER` (10) of a DID's credentials. Without this, any trusted
+  issuer (even one with trust 1) could fill a DID it does not control with 50 never-expiring zero-weight
+  credentials, after which every honest issuer's `issueCredential` reverted with `TooManyCredentials`; filling a
+  DID now takes at least five issuers
+- When either limit is reached, issuance first prunes revoked/expired entries (swap-and-pop) and reverts with
+  `IssuerCredentialLimit` or `TooManyCredentials` only if the limit is still reached
+- `revokeIssuerCredentials(did, issuer, reason)` lets the DID controller (or the issuer, for its own) revoke and
+  remove all of one issuer's credentials in a single bounded call, instead of one `revokeCredential` per entry;
+  this also frees the slots of an issuer the owner has removed
+- `cleanupCredentials(did)` (permissionless, works while paused) still removes revoked/expired entries;
+  `getActiveCredentialCount(did)` and `getIssuerCredentialCount(did, issuer)` report the array's contents
+- `getSybilScore`, `meetsSybilRequirement`, `getDIDDocument` and `getDIDByController` compute the score live (at
+  most 50 credentials read), so credential expiry and `removeTrustedIssuer` / `updateTrustedIssuer` take effect
+  immediately; the stored value only feeds the `SybilScoreUpdated` event
+- `issueCredential` rejects an expiry that is not in the future (`ExpiryNotInFuture`)
 
 ---
 

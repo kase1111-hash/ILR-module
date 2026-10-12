@@ -15,9 +15,9 @@ interface IAssetRegistry {
 
     /// @notice Asset freeze status
     enum FreezeStatus {
-        Active,      // Normal operation
-        Frozen,      // Locked during dispute
-        Restricted   // Partial restrictions applied
+        Active, // Normal operation
+        Frozen, // Locked during dispute
+        Restricted // Partial restrictions applied
     }
 
     // ============ Structs ============
@@ -28,7 +28,7 @@ interface IAssetRegistry {
         address owner;
         bytes32 licenseTermsHash;
         FreezeStatus status;
-        uint256 disputeId;       // Active dispute, 0 if none
+        uint256 disputeId; // Active dispute, 0 if none
         uint256 lastModified;
     }
 
@@ -39,7 +39,7 @@ interface IAssetRegistry {
         bytes32 termsHash;
         uint256 grantedAt;
         uint256 expiresAt;
-        uint256 royaltyBps;      // Basis points (e.g., 500 = 5%)
+        uint256 royaltyBps; // Basis points (e.g., 500 = 5%)
         bool nonExclusive;
         bool active;
     }
@@ -47,38 +47,20 @@ interface IAssetRegistry {
     // ============ Events ============
 
     /// @notice Emitted when asset is registered
-    event AssetRegistered(
-        bytes32 indexed assetId,
-        address indexed owner,
-        bytes32 licenseTermsHash
-    );
+    event AssetRegistered(bytes32 indexed assetId, address indexed owner, bytes32 licenseTermsHash);
 
     /// @notice Emitted when assets are frozen for dispute
-    event AssetsFrozen(
-        uint256 indexed disputeId,
-        address indexed party,
-        bytes32[] assetIds
-    );
+    event AssetsFrozen(uint256 indexed disputeId, address indexed party, bytes32[] assetIds);
 
     /// @notice Emitted when assets are unfrozen after resolution
-    event AssetsUnfrozen(
-        uint256 indexed disputeId,
-        bytes outcome
-    );
+    event AssetsUnfrozen(uint256 indexed disputeId, bytes outcome);
 
     /// @notice Emitted when fallback license is applied
-    event FallbackLicenseApplied(
-        uint256 indexed disputeId,
-        bytes32 termsHash,
-        bytes32[] affectedAssets
-    );
+    event FallbackLicenseApplied(uint256 indexed disputeId, bytes32 termsHash, bytes32[] affectedAssets);
 
     /// @notice Emitted when license terms are modified
     event LicenseModified(
-        bytes32 indexed assetId,
-        address indexed licensee,
-        bytes32 oldTermsHash,
-        bytes32 newTermsHash
+        bytes32 indexed assetId, address indexed licensee, bytes32 oldTermsHash, bytes32 newTermsHash
     );
 
     // ============ Core Functions ============
@@ -89,11 +71,7 @@ interface IAssetRegistry {
      * @param owner Asset owner address
      * @param licenseTermsHash IPFS hash of license terms
      */
-    function registerAsset(
-        bytes32 assetId,
-        address owner,
-        bytes32 licenseTermsHash
-    ) external;
+    function registerAsset(bytes32 assetId, address owner, bytes32 licenseTermsHash) external;
 
     /**
      * @notice Freeze assets involved in a dispute
@@ -101,10 +79,7 @@ interface IAssetRegistry {
      * @param disputeId The dispute triggering the freeze
      * @param party The party whose assets to freeze
      */
-    function freezeAssets(
-        uint256 disputeId,
-        address party
-    ) external;
+    function freezeAssets(uint256 disputeId, address party) external;
 
     /**
      * @notice Unfreeze assets after dispute resolution
@@ -112,10 +87,7 @@ interface IAssetRegistry {
      * @param disputeId The resolved dispute
      * @param outcome Encoded resolution outcome
      */
-    function unfreezeAssets(
-        uint256 disputeId,
-        bytes calldata outcome
-    ) external;
+    function unfreezeAssets(uint256 disputeId, bytes calldata outcome) external;
 
     /**
      * @notice Apply fallback license terms after timeout
@@ -123,10 +95,7 @@ interface IAssetRegistry {
      * @param disputeId The timed-out dispute
      * @param fallbackTermsHash Hash of fallback license terms
      */
-    function applyFallbackLicense(
-        uint256 disputeId,
-        bytes32 fallbackTermsHash
-    ) external;
+    function applyFallbackLicense(uint256 disputeId, bytes32 fallbackTermsHash) external;
 
     /**
      * @notice Grant a license to a licensee
@@ -151,10 +120,7 @@ interface IAssetRegistry {
      * @param assetId The licensed asset
      * @param licensee The licensee to revoke
      */
-    function revokeLicense(
-        bytes32 assetId,
-        address licensee
-    ) external;
+    function revokeLicense(bytes32 assetId, address licensee) external;
 
     // ============ View Functions ============
 
@@ -171,10 +137,7 @@ interface IAssetRegistry {
      * @param licensee The licensee address
      * @return The license grant struct
      */
-    function getLicense(
-        bytes32 assetId,
-        address licensee
-    ) external view returns (LicenseGrant memory);
+    function getLicense(bytes32 assetId, address licensee) external view returns (LicenseGrant memory);
 
     /**
      * @notice Check if asset is frozen

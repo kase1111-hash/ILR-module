@@ -10,21 +10,30 @@ import "./interfaces/IILRM.sol";
 
 /**
  * @title NatLangChainTreasury
- * @notice Treasury contract for ILRM protocol - holds burns, fees, and provides defensive subsidies
- * @dev Implements the Treasury Blueprint from Treasury.md
+ * @notice Treasury contract for ILRM protocol - holds protocol tokens (deposits and subsidy repayments) and funds
+ *         defensive subsidies
+ * @dev Implements the Treasury described in Treasury.md
  *
  * Key Features:
- * - Holds protocol funds from burns and counter-fees
+ * - Holds protocol tokens deposited via deposit() and the subsidy repayments ILRM sends back as plain ERC20
+ *   transfers on resolution (see below); ILRM burns go to 0xdEaD and never reach this contract
  * - Subsidizes defensive stakes for low-resource counterparties
- * - Anti-Sybil protections (single subsidy per dispute, rolling caps, reputation)
- * - Fully algorithmic - no discretionary human control
+ * - Anti-Sybil protections (single subsidy per (ILRM, dispute), rolling caps, harassment scores)
+ * - Owner-administered parameters (Ownable2Step; intended owner: GovernanceTimelock): the owner can update
+ *   the caps, minReserve and harassment scores, pause, and emergency-withdraw any token or ETH balance
  * - Pausable for emergency stops
- * - Two-step ownership transfer via Ownable2Step
  *
- * DID integration, tiered subsidies, and dynamic caps are available as
- * separate composable extensions (see contracts/modules/).
+ * Defensive subsidies are escrowed co-stakes, never wallet payouts: the counterparty opts in through
+ * ILRM.depositStakeWithSubsidy, ILRM calls fundStakeSubsidy (ILRM-only), and ILRM pulls the granted
+ * amount straight into dispute escrow. On resolution ILRM repays this treasury its pro-rata share of the
+ * counterparty payout with a plain ERC20 transfer (in full on mutual acceptance, net of its share of the
+ * burn on timeout). Repayments are not counted in totalInflows (index ILRM.SubsidyReturned), and the
+ * per-participant rolling allowance is charged gross and is not restored on repayment.
+ *
+ * DID-based subsidies, tiered subsidies, dynamic caps and harassment-score decay are not implemented
+ * (removed in Phase 1).
  */
-contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
+contract NatLangChainTreasury is ISubsidyTreasury, ReentrancyGuard, Pausable, Ownable2Step {
     using SafeERC20 for IERC20;
 
     // ============ State Variables ============
@@ -50,11 +59,10 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
     /// @notice Minimum treasury balance to maintain (safety buffer)
     uint256 public minReserve;
 
-    /// @notice Tracks if dispute has been subsidized (prevents double-subsidy)
-    mapping(uint256 => bool) public disputeSubsidized;
-
-    /// @notice Subsidy recipient for each dispute
-    mapping(uint256 => address) public disputeSubsidyRecipient;
+    /// @notice Subsidized participant per (ILRM, dispute); non-zero means subsidized (prevents double-subsidy)
+    /// @dev Keyed by the ILRM that requested the subsidy because dispute IDs restart at 0 for every ILRM
+    ///      deployment: after setILRM to a redeployed ILRM its disputes do not collide with the old ones.
+    mapping(address ilrm => mapping(uint256 disputeId => address participant)) public subsidyRecipientOf;
 
     /// @notice Rolling window subsidy usage per participant
     mapping(address => uint256) public participantSubsidyUsed;
@@ -74,35 +82,19 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
     // ============ Events ============
 
     /// @notice Emitted when subsidy is granted
-    event SubsidyFunded(
-        address indexed participant,
-        uint256 indexed disputeId,
-        uint256 amount
-    );
+    event SubsidyFunded(address indexed participant, uint256 indexed disputeId, uint256 amount);
 
     /// @notice Emitted when treasury receives funds
-    event TreasuryReceived(
-        address indexed from,
-        uint256 amount,
-        string reason
-    );
+    event TreasuryReceived(address indexed from, uint256 amount, string reason);
 
     /// @notice Emitted when harassment score is updated
-    event HarassmentScoreUpdated(
-        address indexed participant,
-        uint256 oldScore,
-        uint256 newScore
-    );
+    event HarassmentScoreUpdated(address indexed participant, uint256 oldScore, uint256 newScore);
 
     /// @notice Emitted when ILRM address is updated
     event ILRMUpdated(address indexed oldILRM, address indexed newILRM);
 
     /// @notice Emitted when caps are updated
-    event CapsUpdated(
-        uint256 maxPerDispute,
-        uint256 maxPerParticipant,
-        uint256 windowDuration
-    );
+    event CapsUpdated(uint256 maxPerDispute, uint256 maxPerParticipant, uint256 windowDuration);
 
     // ============ Errors ============
 
@@ -115,7 +107,7 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
     error NotCounterparty(address caller, address expected);
     error InvalidAddress();
     error DisputeAlreadyResolved(uint256 disputeId);
-    error CounterpartyAlreadyStaked(uint256 disputeId);
+    error SubsidyNotEscrowed(uint256 disputeId);
     error ScoreDeltaOutOfBounds(int256 delta);
     error ETHTransferFailed();
 
@@ -127,12 +119,9 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
      * @param _maxPerParticipant Maximum subsidy per participant in window
      * @param _windowDuration Rolling window duration in seconds
      */
-    constructor(
-        IERC20 _token,
-        uint256 _maxPerDispute,
-        uint256 _maxPerParticipant,
-        uint256 _windowDuration
-    ) Ownable(msg.sender) {
+    constructor(IERC20 _token, uint256 _maxPerDispute, uint256 _maxPerParticipant, uint256 _windowDuration)
+        Ownable(msg.sender)
+    {
         if (address(_token) == address(0)) revert InvalidAddress();
 
         token = _token;
@@ -167,6 +156,7 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
 
     /**
      * @notice ILRM deposits burn proceeds directly
+     * @dev ILRM-only; the current ILRM never calls it (it burns to 0xdEaD). Kept for integrations.
      * @param amount Amount of tokens from burn
      */
     function depositBurn(uint256 amount) external onlyILRM nonReentrant {
@@ -188,56 +178,50 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
     // ============ Subsidy Functions ============
 
     /**
-     * @notice Request defensive subsidy for a dispute
-     * @dev Only counterparty (defender) can request subsidy
+     * @notice Fund part (or all) of a counterparty's defensive stake in an ILRM dispute
+     * @dev Only callable by ILRM, from inside ILRM.depositStakeWithSubsidy: ILRM has already checked
+     *      that the caller is the counterparty, that the stake window is open and the dispute unresolved,
+     *      and has committed the matching stake. The subsidy is an escrowed co-stake, never a wallet
+     *      payout: this function only approves ILRM for exactly the granted amount, which ILRM pulls into
+     *      escrow in the same transaction (any revert there rolls this bookkeeping back too).
+     *      ILRM repays this treasury its pro-rata share of the counterparty payout on resolution with a
+     *      plain ERC20 transfer; the rolling allowance is charged gross and not restored on repayment.
      * @param disputeId The dispute ID in ILRM
-     * @param stakeNeeded Amount of stake required
-     * @param participant The participant requesting subsidy (must be counterparty)
+     * @param participant The counterparty (defender) being subsidized
+     * @param maxAmount Maximum subsidy requested (ILRM caps it at the dispute's stake)
+     * @return subsidyAmount Amount granted, after all caps; ILRM is approved for exactly this amount
      */
-    function requestSubsidy(
-        uint256 disputeId,
-        uint256 stakeNeeded,
-        address participant
-    ) external nonReentrant whenNotPaused returns (uint256 subsidyAmount) {
-        // Only the participant themselves can request their subsidy
-        if (msg.sender != participant) {
-            revert NotCounterparty(msg.sender, participant);
-        }
-
-        // Validate request
-        if (disputeSubsidized[disputeId]) {
+    function fundStakeSubsidy(uint256 disputeId, address participant, uint256 maxAmount)
+        external
+        override
+        onlyILRM
+        nonReentrant
+        whenNotPaused
+        returns (uint256 subsidyAmount)
+    {
+        // Validate request (onlyILRM: msg.sender == ilrm, so (msg.sender, disputeId) is globally unique)
+        if (subsidyRecipientOf[msg.sender][disputeId] != address(0)) {
             revert DisputeAlreadySubsidized(disputeId);
         }
-        if (stakeNeeded == 0) revert ZeroAmount();
+        if (maxAmount == 0) revert ZeroAmount();
 
-        // ILRM MUST be set before subsidies can be requested
-        if (ilrm == address(0)) {
-            revert InvalidAddress();
-        }
-
-        // Verify participant is the counterparty (defender, not initiator)
-        (
-            address initiator,
-            address counterparty,
-            ,
-            uint256 counterpartyStake,
-            ,,,,,
-            bool resolved,
-            ,,
-        ) = IILRM(ilrm).disputes(disputeId);
+        // Verify participant is the counterparty (defender, not initiator); msg.sender == ilrm
+        IILRM.Dispute memory d = IILRM(msg.sender).disputes(disputeId);
 
         // Dispute must be active (not resolved)
-        if (resolved) revert DisputeAlreadyResolved(disputeId);
+        if (d.resolved) revert DisputeAlreadyResolved(disputeId);
 
-        // Counterparty must not have staked yet (subsidy is to HELP them stake)
-        if (counterpartyStake != 0) revert CounterpartyAlreadyStaked(disputeId);
-
-        if (participant != counterparty) {
-            revert NotCounterparty(participant, counterparty);
-        }
         // Initiators cannot receive subsidies (they're the attackers)
-        if (participant == initiator) {
-            revert NotCounterparty(participant, counterparty);
+        if (participant != d.counterparty || participant == d.initiator) {
+            revert NotCounterparty(participant, d.counterparty);
+        }
+
+        // Defence in depth: a zero participant would read as "not subsidized" in subsidyRecipientOf
+        if (participant == address(0)) revert InvalidAddress();
+
+        // Defence in depth: ILRM must have committed the matching (symmetric) stake before calling
+        if (d.counterpartyStake == 0 || d.counterpartyStake != d.initiatorStake) {
+            revert SubsidyNotEscrowed(disputeId);
         }
 
         // Check harassment score (threshold-based, no tiers)
@@ -252,7 +236,12 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
         }
 
         // Calculate available subsidy
-        subsidyAmount = stakeNeeded;
+        subsidyAmount = maxAmount;
+
+        // Never more than the stake actually owed in the dispute
+        if (subsidyAmount > d.initiatorStake) {
+            subsidyAmount = d.initiatorStake;
+        }
 
         // Cap by per-dispute limit
         if (subsidyAmount > maxPerDispute) {
@@ -269,42 +258,45 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
 
         // Cap by treasury balance (minus reserve)
         uint256 treasuryBalance = token.balanceOf(address(this));
-        uint256 availableBalance = treasuryBalance > minReserve
-            ? treasuryBalance - minReserve
-            : 0;
+        uint256 availableBalance = treasuryBalance > minReserve ? treasuryBalance - minReserve : 0;
         if (subsidyAmount > availableBalance) {
             subsidyAmount = availableBalance;
         }
 
+        // Computed amount after caps, not a balance check
+        // slither-disable-next-line incorrect-equality
         if (subsidyAmount == 0) revert NoSubsidyAvailable();
 
         // Update state
-        disputeSubsidized[disputeId] = true;
-        disputeSubsidyRecipient[disputeId] = participant;
+        subsidyRecipientOf[msg.sender][disputeId] = participant;
         participantSubsidyUsed[participant] += subsidyAmount;
         totalSubsidiesDistributed += subsidyAmount;
 
-        // Transfer subsidy
-        token.safeTransfer(participant, subsidyAmount);
+        // ILRM pulls exactly this amount into dispute escrow; never pay a wallet
+        token.forceApprove(msg.sender, subsidyAmount);
 
         emit SubsidyFunded(participant, disputeId, subsidyAmount);
     }
 
     /**
      * @notice Calculate potential subsidy without executing
+     * @dev Preview only: it does not cap by the dispute's stake, so callers should pass the dispute's
+     *      initiatorStake (or less) as stakeNeeded to match what fundStakeSubsidy would grant. Refers to
+     *      disputes of the currently wired ilrm. The grant can still shrink before the stake is included
+     *      (bound it with ILRM.depositStakeWithSubsidy's maxTopUp).
      * @param disputeId The dispute ID
-     * @param stakeNeeded Amount of stake required
+     * @param stakeNeeded Amount of stake required (pass ILRM.disputes(disputeId).initiatorStake)
      * @param participant The participant to check
      * @return subsidyAmount Potential subsidy amount
      * @return eligible Whether participant is eligible
      */
-    function calculateSubsidy(
-        uint256 disputeId,
-        uint256 stakeNeeded,
-        address participant
-    ) external view returns (uint256 subsidyAmount, bool eligible) {
+    function calculateSubsidy(uint256 disputeId, uint256 stakeNeeded, address participant)
+        external
+        view
+        returns (uint256 subsidyAmount, bool eligible)
+    {
         // Check basic eligibility
-        if (disputeSubsidized[disputeId]) return (0, false);
+        if (subsidyRecipientOf[ilrm][disputeId] != address(0)) return (0, false);
         if (stakeNeeded == 0) return (0, false);
         if (harassmentScore[participant] >= HARASSMENT_THRESHOLD) return (0, false);
 
@@ -320,18 +312,14 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
         if (block.timestamp > participantWindowStart[participant] + windowDuration) {
             usedInWindow = 0; // Window expired, would reset
         }
-        uint256 participantAvailable = maxPerParticipant > usedInWindow
-            ? maxPerParticipant - usedInWindow
-            : 0;
+        uint256 participantAvailable = maxPerParticipant > usedInWindow ? maxPerParticipant - usedInWindow : 0;
         if (subsidyAmount > participantAvailable) {
             subsidyAmount = participantAvailable;
         }
 
         // Check treasury balance
         uint256 treasuryBalance = token.balanceOf(address(this));
-        uint256 availableBalance = treasuryBalance > minReserve
-            ? treasuryBalance - minReserve
-            : 0;
+        uint256 availableBalance = treasuryBalance > minReserve ? treasuryBalance - minReserve : 0;
         if (subsidyAmount > availableBalance) {
             subsidyAmount = availableBalance;
         }
@@ -343,14 +331,11 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
 
     /**
      * @notice Update harassment score for a participant
-     * @dev Called by ILRM after dispute resolution
+     * @dev ILRM-only; the current ILRM never calls it. Scores are set by the owner via setHarassmentScore.
      * @param participant The participant to update
      * @param scoreDelta Change in score (positive = worse behavior)
      */
-    function updateHarassmentScore(
-        address participant,
-        int256 scoreDelta
-    ) external onlyILRM {
+    function updateHarassmentScore(address participant, int256 scoreDelta) external onlyILRM {
         // Reasonable bound: delta should be between -100 and +100
         if (scoreDelta < -100 || scoreDelta > 100) revert ScoreDeltaOutOfBounds(scoreDelta);
 
@@ -372,7 +357,7 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
 
     /**
      * @notice Admin setter for harassment score (for initial setup/testing)
-     * @dev Owner can set scores directly; production path is updateHarassmentScore via ILRM
+     * @dev Owner-only. This is how scores are set: the current ILRM never calls updateHarassmentScore.
      * @param participant The participant to update
      * @param score The new score (0-100)
      */
@@ -387,6 +372,10 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
 
     /**
      * @notice Set the authorized ILRM contract
+     * @dev Subsidy records are kept per ILRM (subsidyRecipientOf), so a redeployed ILRM whose dispute IDs
+     *      restart at 0 does not collide with the old one. Disputes still open in the old ILRM still
+     *      resolve and repay this treasury with plain transfers, but the old ILRM can no longer draw new
+     *      subsidies (NotILRM). Pointing back to an earlier ILRM restores its records.
      * @param _ilrm New ILRM address
      */
     function setILRM(address _ilrm) external onlyOwner {
@@ -401,11 +390,10 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
      * @param _maxPerParticipant New per-participant cap
      * @param _windowDuration New window duration
      */
-    function updateCaps(
-        uint256 _maxPerDispute,
-        uint256 _maxPerParticipant,
-        uint256 _windowDuration
-    ) external onlyOwner {
+    function updateCaps(uint256 _maxPerDispute, uint256 _maxPerParticipant, uint256 _windowDuration)
+        external
+        onlyOwner
+    {
         maxPerDispute = _maxPerDispute;
         maxPerParticipant = _maxPerParticipant;
         windowDuration = _windowDuration;
@@ -438,7 +426,7 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
      */
     function emergencyWithdrawETH(address to, uint256 amount) external onlyOwner nonReentrant {
         if (to == address(0)) revert InvalidAddress();
-        (bool success, ) = to.call{value: amount}("");
+        (bool success,) = to.call{value: amount}("");
         if (!success) revert ETHTransferFailed();
     }
 
@@ -469,6 +457,24 @@ contract NatLangChainTreasury is ReentrancyGuard, Pausable, Ownable2Step {
         return maxPerParticipant > participantSubsidyUsed[participant]
             ? maxPerParticipant - participantSubsidyUsed[participant]
             : 0;
+    }
+
+    /**
+     * @notice Whether a dispute of the currently wired ilrm has been subsidized
+     * @dev For the currently wired ilrm; see subsidyRecipientOf for history across ILRM deployments
+     * @param disputeId The dispute ID in the current ilrm
+     */
+    function disputeSubsidized(uint256 disputeId) external view returns (bool) {
+        return subsidyRecipientOf[ilrm][disputeId] != address(0);
+    }
+
+    /**
+     * @notice Subsidized participant of a dispute of the currently wired ilrm (address(0) if none)
+     * @dev For the currently wired ilrm; see subsidyRecipientOf for history across ILRM deployments
+     * @param disputeId The dispute ID in the current ilrm
+     */
+    function disputeSubsidyRecipient(uint256 disputeId) external view returns (address) {
+        return subsidyRecipientOf[ilrm][disputeId];
     }
 
     /**

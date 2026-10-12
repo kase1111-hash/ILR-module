@@ -16,7 +16,7 @@
 
 const { expect } = require("chai");
 const { ethers } = require("hardhat");
-const { time, loadFixture } = require("@nomicfoundation/hardhat-network-helpers");
+const { time, loadFixture, setBalance } = require("@nomicfoundation/hardhat-network-helpers");
 
 describe("ILRM Lifecycle Tests", function () {
   // ============ Constants from Appendix A ============
@@ -28,7 +28,14 @@ describe("ILRM Lifecycle Tests", function () {
   const COOLDOWN_PERIOD = 30 * 24 * 60 * 60;    // 30 days
 
   async function deployFixture() {
-    const [owner, oracle, initiator, counterparty, third] = await ethers.getSigners();
+    const [owner, , initiator, counterparty, third] = await ethers.getSigners();
+
+    // ILRM calls back verifySignature() on its oracle, so the oracle must be a contract:
+    // deploy a mock oracle and send "oracle" transactions from its address
+    const MockOracle = await ethers.getContractFactory("MockOracle");
+    const mockOracle = await MockOracle.deploy();
+    const oracle = await ethers.getImpersonatedSigner(mockOracle.target);
+    await setBalance(mockOracle.target, ethers.parseEther("10"));
 
     const MockToken = await ethers.getContractFactory("MockToken");
     const token = await MockToken.deploy();
@@ -57,7 +64,7 @@ describe("ILRM Lifecycle Tests", function () {
       nonExclusive: true
     };
 
-    return { ilrm, token, registry, owner, oracle, initiator, counterparty, third, STAKE, EVIDENCE_HASH, fallback };
+    return { ilrm, mockOracle, token, registry, owner, oracle, initiator, counterparty, third, STAKE, EVIDENCE_HASH, fallback };
   }
 
   // ============================================================
@@ -314,6 +321,26 @@ describe("ILRM Lifecycle Tests", function () {
 
       await expect(ilrm.connect(initiator).submitLLMProposal(0, "proposal", "0x"))
         .to.be.revertedWith("Only oracle");
+    });
+
+    /**
+     * ⚠️  CRITICAL (H-01): ILRM re-verifies the oracle signature itself
+     */
+    it("should reject proposal when oracle signature does not verify", async function () {
+      const { ilrm, mockOracle, oracle, initiator, counterparty, STAKE, EVIDENCE_HASH, fallback } = await loadFixture(deployFixture);
+
+      await ilrm.connect(initiator).initiateBreachDispute(
+        counterparty.address,
+        STAKE,
+        EVIDENCE_HASH,
+        fallback
+      );
+      await ilrm.connect(counterparty).depositStake(0);
+
+      await mockOracle.setVerify(false);
+
+      await expect(ilrm.connect(oracle).submitLLMProposal(0, "proposal", "0x"))
+        .to.be.revertedWith("Invalid signature");
     });
 
     /**

@@ -12,6 +12,13 @@
 
 This document tracks the production readiness of the NatLangChain ILRM Protocol. Items are categorized by priority and completion status.
 
+> ⚠️ **L3 is not production-ready and must not be deployed.** The L3 contracts (`L3Bridge`, `L3DisputeBatcher`,
+> `L3StateVerifier`) have known-unsound security: fraud proofs check no state transition, the sequencer posts no
+> bond, settlements are not tied to finalized state roots, and bridged disputes are not validated against the
+> ILRM (see [SPEC.md 4.3](SPEC.md#43-l3app-specific-rollups-natlangchain-roadmapmd)). No deploy script deploys
+> them, and no "✅ Done" item below makes them deployable: L3 items are tracked for research and testing only and
+> are excluded from every mainnet deployment.
+
 ---
 
 ## Security (Critical)
@@ -30,7 +37,7 @@ This document tracks the production readiness of the NatLangChain ILRM Protocol.
 | CEI pattern enforced | ✅ Done | Checks-effects-interactions |
 | Input validation | ✅ Done | Critical parameters validated |
 | Formal verification | ⬜ Recommended | Consider for critical paths |
-| MEV protection (commit-reveal) | ✅ Done | L3Bridge.sol commit-reveal scheme |
+| MEV protection (commit-reveal) | ✅ Done | L3Bridge.sol commit-reveal scheme (L3 only: not production-ready, must not be deployed) |
 
 ---
 
@@ -134,7 +141,7 @@ This document tracks the production readiness of the NatLangChain ILRM Protocol.
 ### P1 - Recommended Before Mainnet
 
 7. ✅ **Gas Benchmarks** - Generated via CI workflow
-8. ✅ **MEV Protection** - Commit-reveal for fraud proofs (L3Bridge.sol)
+8. ✅ **MEV Protection** - Commit-reveal for fraud proofs (L3Bridge.sol; L3 is not production-ready and must not be deployed)
 9. ✅ **Multi-sig Setup Guide** - docs/DEPLOYMENT_GUIDE.md
 
 ### P2 - Post-Launch
@@ -153,13 +160,17 @@ This document tracks the production readiness of the NatLangChain ILRM Protocol.
 | Optimism Sepolia | ⬜ TODO | L2 test deployment |
 | Optimism Mainnet | ⬜ Target | Primary L2 deployment |
 | Arbitrum Mainnet | ⬜ Planned | Secondary L2 |
-| Ethereum Mainnet | ⬜ Planned | Bridge/governance only |
+| Ethereum Mainnet | ⬜ Planned | Bridge/governance only (not the L3Bridge, which must not be deployed anywhere) |
 
 ---
 
 ## Sign-off Checklist
 
 Before mainnet deployment, confirm (see [docs/SIGN_OFF_PROCEDURES.md](docs/SIGN_OFF_PROCEDURES.md) for detailed steps):
+
+### Scope
+- [ ] No L3 contract (L3Bridge, L3DisputeBatcher, L3StateVerifier) is deployed, configured or funded: L3 is not
+      production-ready and must not be deployed
 
 ### Testing
 - [ ] All P0 items completed
@@ -180,7 +191,7 @@ Before mainnet deployment, confirm (see [docs/SIGN_OFF_PROCEDURES.md](docs/SIGN_
 ### Operations
 - [ ] Multi-sig configured and tested
   - [ ] Gnosis Safe deployed
-  - [ ] All contracts ownership transferred
+  - [ ] All contracts ownership transferred (the L3 contracts are not deployed, so there is nothing to transfer)
   - [ ] Standard operation tested
   - [ ] Emergency pause tested
   - [ ] Threshold enforcement verified

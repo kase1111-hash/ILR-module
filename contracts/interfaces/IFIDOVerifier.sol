@@ -79,31 +79,17 @@ interface IFIDOVerifier {
 
     /// @notice Emitted when a new FIDO key is registered
     event FIDOKeyRegistered(
-        address indexed user,
-        bytes32 indexed credentialIdHash,
-        bytes32 publicKeyX,
-        bytes32 publicKeyY
+        address indexed user, bytes32 indexed credentialIdHash, bytes32 publicKeyX, bytes32 publicKeyY
     );
 
     /// @notice Emitted when a FIDO key is revoked
-    event FIDOKeyRevoked(
-        address indexed user,
-        bytes32 indexed credentialIdHash
-    );
+    event FIDOKeyRevoked(address indexed user, bytes32 indexed credentialIdHash);
 
     /// @notice Emitted when a signature is successfully verified
-    event FIDOSignatureVerified(
-        address indexed user,
-        bytes32 indexed credentialIdHash,
-        bytes32 challenge
-    );
+    event FIDOSignatureVerified(address indexed user, bytes32 indexed credentialIdHash, bytes32 challenge);
 
     /// @notice Emitted when a challenge is generated
-    event ChallengeGenerated(
-        address indexed user,
-        bytes32 indexed challenge,
-        uint256 deadline
-    );
+    event ChallengeGenerated(address indexed user, bytes32 indexed challenge, uint256 deadline);
 
     // ============ Registration Functions ============
 
@@ -139,15 +125,15 @@ interface IFIDOVerifier {
      * @param expectedChallenge The challenge that was signed
      * @return valid True if the assertion is valid
      */
-    function verifyAssertion(
-        address user,
-        WebAuthnAssertion calldata assertion,
-        bytes32 expectedChallenge
-    ) external returns (bool valid);
+    function verifyAssertion(address user, WebAuthnAssertion calldata assertion, bytes32 expectedChallenge)
+        external
+        returns (bool valid);
 
     /**
      * @notice Verify a P-256 signature directly
-     * @dev Lower-level verification for custom implementations
+     * @dev Lower-level verification for custom implementations. Returns false (on both the precompile and the
+     *      pure-Solidity path) when r or s is outside [1, n-1] or the public key is not a point on P-256 with
+     *      coordinates below p; this includes (0,0), the key read back for an unregistered credential.
      * @param messageHash The hash of the message that was signed
      * @param r Signature R component
      * @param s Signature S component
@@ -155,27 +141,25 @@ interface IFIDOVerifier {
      * @param publicKeyY Public key Y coordinate
      * @return valid True if the signature is valid
      */
-    function verifyP256Signature(
-        bytes32 messageHash,
-        bytes32 r,
-        bytes32 s,
-        bytes32 publicKeyX,
-        bytes32 publicKeyY
-    ) external view returns (bool valid);
+    function verifyP256Signature(bytes32 messageHash, bytes32 r, bytes32 s, bytes32 publicKeyX, bytes32 publicKeyY)
+        external
+        view
+        returns (bool valid);
 
     /**
      * @notice Generate a challenge for signing
      * @dev Combines nonce, action, and timestamp for replay protection.
      *      Increments user nonce to prevent challenge reuse/front-running.
+     *      challenge = keccak256(abi.encode(msg.sender, action, data, nonce, block.timestamp, block.chainid)),
+     *      so the action/data boundary is unambiguous.
      * @param action The action being authorized (e.g., "accept-proposal")
      * @param data Additional data to include in challenge (e.g., disputeId)
      * @return challenge The challenge to be signed
      * @return deadline Expiration timestamp for this challenge
      */
-    function generateChallenge(
-        string calldata action,
-        bytes calldata data
-    ) external returns (bytes32 challenge, uint256 deadline);
+    function generateChallenge(string calldata action, bytes calldata data)
+        external
+        returns (bytes32 challenge, uint256 deadline);
 
     // ============ View Functions ============
 
@@ -185,10 +169,7 @@ interface IFIDOVerifier {
      * @param credentialIdHash Hash of the credential ID
      * @return key The FIDO key information
      */
-    function getKey(
-        address user,
-        bytes32 credentialIdHash
-    ) external view returns (FIDOKey memory key);
+    function getKey(address user, bytes32 credentialIdHash) external view returns (FIDOKey memory key);
 
     /**
      * @notice Check if a user has any registered FIDO keys

@@ -1,188 +1,200 @@
 // =============================================================================
 // Treasury Event Handlers - TheGraph Subgraph
 // =============================================================================
-// Handles all events from the Treasury fund management contract
+// Handles every event of contracts/Treasury.sol (NatLangChainTreasury).
+// Stake subsidies are escrowed in ILRM: the dispute-side view (StakeSubsidy,
+// repayments, protocol totals) comes from ILRM.StakeSubsidized/SubsidyReturned;
+// SubsidyFunded here feeds only the Treasury-side records and daily metrics, so
+// nothing is counted twice.
 // =============================================================================
 
-import { BigInt, Address } from "@graphprotocol/graph-ts";
+import { BigInt } from "@graphprotocol/graph-ts";
 import {
+  CapsUpdated,
+  HarassmentScoreUpdated,
+  ILRMUpdated,
+  OwnershipTransferStarted,
+  OwnershipTransferred,
+  Paused,
   SubsidyFunded,
   TreasuryReceived,
-  HarassmentScoreUpdated,
-  CapsUpdated
+  Unpaused
 } from "../generated/Treasury/Treasury";
 import {
-  TreasuryMetric,
-  Subsidy,
-  Burn,
-  Party,
   HarassmentScore,
-  ProtocolMetric
+  ProtocolContract,
+  TreasuryDeposit,
+  TreasuryMetric,
+  TreasurySubsidy
 } from "../generated/schema";
+import {
+  KIND_TREASURY,
+  ZERO,
+  dayStart,
+  eventId,
+  getOrCreateContract,
+  newAdminEvent,
+  recordOwnershipTransferStarted,
+  recordOwnershipTransferred,
+  recordPause,
+  touchParty
+} from "./common";
 
-// =============================================================================
-// Helper Functions
-// =============================================================================
+// Reasons used by the contract itself. deposit() takes free text from any caller, so a reason is only a
+// label: "burn" counts as burn proceeds only when sent by the Treasury's ILRM (see isBurnDeposit).
+const REASON_BURN = "burn"; // depositBurn() (ILRM-only)
+const REASON_ETH = "eth"; // receive()
 
 function getOrCreateTreasuryMetric(timestamp: BigInt): TreasuryMetric {
-  // Convert to day (86400 seconds)
-  let dayTimestamp = timestamp.div(BigInt.fromI32(86400)).times(BigInt.fromI32(86400));
-  let id = dayTimestamp.toString();
+  const date = dayStart(timestamp);
+  const id = date.toString();
   let metric = TreasuryMetric.load(id);
-
   if (metric == null) {
     metric = new TreasuryMetric(id);
-    metric.date = dayTimestamp;
-    metric.totalSubsidies = BigInt.fromI32(0);
-    metric.totalBurns = BigInt.fromI32(0);
-    metric.totalReceived = BigInt.fromI32(0);
+    metric.date = date;
+    metric.totalSubsidies = ZERO;
     metric.subsidyCount = 0;
-    metric.burnCount = 0;
-    metric.subsidyCap = BigInt.fromI32(0);
-    metric.burnCap = BigInt.fromI32(0);
+    metric.totalReceived = ZERO;
+    metric.totalBurnDeposits = ZERO;
+    metric.burnDepositCount = 0;
+    metric.totalReceivedEth = ZERO;
   }
-
   return metric;
 }
 
-function getOrCreateParty(address: Address, timestamp: BigInt): Party {
-  let id = address.toHexString();
-  let party = Party.load(id);
-
-  if (party == null) {
-    party = new Party(id);
-    party.totalDisputes = 0;
-    party.disputesResolved = 0;
-    party.disputesTimedOut = 0;
-    party.totalStaked = BigInt.fromI32(0);
-    party.totalBurned = BigInt.fromI32(0);
-    party.harassmentScore = BigInt.fromI32(0);
-    party.totalSubsidiesReceived = BigInt.fromI32(0);
-    party.firstSeen = timestamp;
-    party.lastActive = timestamp;
-    party.save();
-  }
-
-  return party;
-}
-
-function getOrCreateProtocolMetric(): ProtocolMetric {
-  let id = "protocol";
-  let metric = ProtocolMetric.load(id);
-
-  if (metric == null) {
-    metric = new ProtocolMetric(id);
-    metric.totalDisputes = BigInt.fromI32(0);
-    metric.activeDisputes = BigInt.fromI32(0);
-    metric.resolvedDisputes = BigInt.fromI32(0);
-    metric.timedOutDisputes = BigInt.fromI32(0);
-    metric.totalValueStaked = BigInt.fromI32(0);
-    metric.totalValueBurned = BigInt.fromI32(0);
-    metric.totalSubsidiesDistributed = BigInt.fromI32(0);
-    metric.uniqueParticipants = BigInt.fromI32(0);
-    metric.totalCounterProposals = BigInt.fromI32(0);
-    metric.totalL3Batches = BigInt.fromI32(0);
-    metric.avgResolutionBlocks = BigInt.fromI32(0);
-    metric.lastUpdatedBlock = BigInt.fromI32(0);
-  }
-
-  return metric;
+/**
+ * Whether a TreasuryReceived log is burn proceeds. depositBurn() is ILRM-only and labels its inflow "burn",
+ * but deposit() lets anyone pick the same label, so the label alone is not trusted: the sender must also
+ * be the ILRM the Treasury had at that point (ProtocolContract.ilrm, from ILRMUpdated). Only that ILRM can
+ * emit a "burn" inflow from its own address. No ILRM indexed yet means no burn deposits.
+ */
+function isBurnDeposit(event: TreasuryReceived): boolean {
+  if (event.params.reason != REASON_BURN) return false;
+  const contract = ProtocolContract.load(event.address.toHexString());
+  if (contract == null) return false;
+  const ilrm = contract.ilrm;
+  return ilrm !== null && ilrm.equals(event.params.from);
 }
 
 // =============================================================================
-// Event Handlers
+// Subsidies and inflows
 // =============================================================================
 
 export function handleSubsidyFunded(event: SubsidyFunded): void {
-  let timestamp = event.block.timestamp;
+  const participant = touchParty(event.params.participant, event.block.timestamp);
 
-  // Get or create recipient party
-  let recipient = getOrCreateParty(event.params.recipient, timestamp);
-  recipient.totalSubsidiesReceived = recipient.totalSubsidiesReceived.plus(event.params.amount);
-  recipient.lastActive = timestamp;
-  recipient.save();
+  const grant = new TreasurySubsidy(eventId(event));
+  grant.treasury = event.address;
+  grant.participant = participant.id;
+  grant.disputeId = event.params.disputeId;
+  grant.dispute = event.params.disputeId.toString();
+  grant.amount = event.params.amount;
+  grant.timestamp = event.block.timestamp;
+  grant.txHash = event.transaction.hash;
+  grant.save();
 
-  // Create subsidy record
-  let subsidyId = event.transaction.hash.toHexString();
-  let subsidy = new Subsidy(subsidyId);
-  subsidy.recipient = recipient.id;
-  subsidy.distributor = event.params.distributor;
-  subsidy.amount = event.params.amount;
-  subsidy.reason = event.params.reason;
-  subsidy.timestamp = timestamp;
-  subsidy.txHash = event.transaction.hash;
-  subsidy.save();
-
-  // Update treasury metrics
-  let treasuryMetric = getOrCreateTreasuryMetric(timestamp);
-  treasuryMetric.totalSubsidies = treasuryMetric.totalSubsidies.plus(event.params.amount);
-  treasuryMetric.subsidyCount = treasuryMetric.subsidyCount + 1;
-  treasuryMetric.save();
-
-  // Update protocol metrics
-  let protocol = getOrCreateProtocolMetric();
-  protocol.totalSubsidiesDistributed = protocol.totalSubsidiesDistributed.plus(event.params.amount);
-  protocol.lastUpdatedBlock = event.block.number;
-  protocol.save();
+  const metric = getOrCreateTreasuryMetric(event.block.timestamp);
+  metric.totalSubsidies = metric.totalSubsidies.plus(event.params.amount);
+  metric.subsidyCount = metric.subsidyCount + 1;
+  metric.save();
 }
 
 export function handleTreasuryReceived(event: TreasuryReceived): void {
-  let timestamp = event.block.timestamp;
+  const reason = event.params.reason;
+  // receive() logs ETH with reason "eth". deposit() takes free text, so a token deposit labelled
+  // "eth" is indistinguishable from an ETH transfer in this event.
+  const isEth = reason == REASON_ETH;
+  const isBurn = isBurnDeposit(event);
 
-  // If this is a burn record it
-  if (event.params.reason == "burn" || event.params.reason == "timeout_burn") {
-    let burnId = event.transaction.hash.toHexString() + "-" + event.logIndex.toString();
-    let burn = new Burn(burnId);
-    burn.amount = event.params.amount;
-    burn.reason = event.params.reason;
-    burn.timestamp = timestamp;
-    burn.txHash = event.transaction.hash;
-    burn.save();
+  const deposit = new TreasuryDeposit(eventId(event));
+  deposit.treasury = event.address;
+  deposit.from = event.params.from;
+  deposit.amount = event.params.amount;
+  deposit.reason = reason;
+  deposit.isEth = isEth;
+  deposit.isBurn = isBurn;
+  deposit.timestamp = event.block.timestamp;
+  deposit.txHash = event.transaction.hash;
+  deposit.save();
 
-    // Update treasury metrics
-    let treasuryMetric = getOrCreateTreasuryMetric(timestamp);
-    treasuryMetric.totalBurns = treasuryMetric.totalBurns.plus(event.params.amount);
-    treasuryMetric.burnCount = treasuryMetric.burnCount + 1;
-    treasuryMetric.save();
+  const metric = getOrCreateTreasuryMetric(event.block.timestamp);
+  if (isEth) {
+    metric.totalReceivedEth = metric.totalReceivedEth.plus(event.params.amount);
   } else {
-    // General treasury received
-    let treasuryMetric = getOrCreateTreasuryMetric(timestamp);
-    treasuryMetric.totalReceived = treasuryMetric.totalReceived.plus(event.params.amount);
-    treasuryMetric.save();
+    metric.totalReceived = metric.totalReceived.plus(event.params.amount);
+    if (isBurn) {
+      metric.totalBurnDeposits = metric.totalBurnDeposits.plus(event.params.amount);
+      metric.burnDepositCount = metric.burnDepositCount + 1;
+    }
   }
+  metric.save();
 }
 
-export function handleTreasuryHarassmentUpdate(event: HarassmentScoreUpdated): void {
-  let partyId = event.params.participant.toHexString();
-  let party = Party.load(partyId);
+export function handleHarassmentScoreUpdated(event: HarassmentScoreUpdated): void {
+  // The Treasury keeps its own 0-100 score, separate from ILRM.harassmentScore
+  const party = touchParty(event.params.participant, event.block.timestamp);
+  party.treasuryHarassmentScore = event.params.newScore;
+  party.save();
 
-  if (party == null) {
-    party = getOrCreateParty(event.params.participant, event.block.timestamp);
-  }
-
-  let timestamp = event.block.timestamp;
-
-  // Create harassment score record
-  let recordId = partyId + "-treasury-" + event.block.number.toString();
-  let record = new HarassmentScore(recordId);
-  record.party = partyId;
+  const record = new HarassmentScore(eventId(event));
+  record.party = party.id;
+  record.source = "TREASURY";
   record.oldScore = event.params.oldScore;
   record.newScore = event.params.newScore;
-  record.timestamp = timestamp;
+  record.timestamp = event.block.timestamp;
   record.txHash = event.transaction.hash;
   record.save();
+}
 
-  // Update party
-  party.harassmentScore = event.params.newScore;
-  party.lastActive = timestamp;
-  party.save();
+// =============================================================================
+// Configuration
+// =============================================================================
+
+export function handleILRMUpdated(event: ILRMUpdated): void {
+  const contract = getOrCreateContract(event, KIND_TREASURY);
+  contract.ilrm = event.params.newILRM;
+  contract.save();
+
+  const entry = newAdminEvent(event, KIND_TREASURY, "ILRMUpdated");
+  entry.account = event.params.newILRM;
+  entry.previousAccount = event.params.oldILRM;
+  entry.save();
 }
 
 export function handleCapsUpdated(event: CapsUpdated): void {
-  let timestamp = event.block.timestamp;
+  const contract = getOrCreateContract(event, KIND_TREASURY);
+  contract.maxSubsidyPerDispute = event.params.maxPerDispute;
+  contract.maxSubsidyPerParticipant = event.params.maxPerParticipant;
+  contract.subsidyWindowDuration = event.params.windowDuration;
+  contract.save();
 
-  let treasuryMetric = getOrCreateTreasuryMetric(timestamp);
-  treasuryMetric.subsidyCap = event.params.subsidyCap;
-  treasuryMetric.burnCap = event.params.burnCap;
-  treasuryMetric.save();
+  const entry = newAdminEvent(event, KIND_TREASURY, "CapsUpdated");
+  entry.details =
+    "maxPerDispute=" +
+    event.params.maxPerDispute.toString() +
+    " maxPerParticipant=" +
+    event.params.maxPerParticipant.toString() +
+    " windowDuration=" +
+    event.params.windowDuration.toString();
+  entry.save();
+}
+
+// =============================================================================
+// Ownable2Step / Pausable
+// =============================================================================
+
+export function handleOwnershipTransferStarted(event: OwnershipTransferStarted): void {
+  recordOwnershipTransferStarted(event, KIND_TREASURY, event.params.previousOwner, event.params.newOwner);
+}
+
+export function handleOwnershipTransferred(event: OwnershipTransferred): void {
+  recordOwnershipTransferred(event, KIND_TREASURY, event.params.previousOwner, event.params.newOwner);
+}
+
+export function handlePaused(event: Paused): void {
+  recordPause(event, KIND_TREASURY, event.params.account, true);
+}
+
+export function handleUnpaused(event: Unpaused): void {
+  recordPause(event, KIND_TREASURY, event.params.account, false);
 }

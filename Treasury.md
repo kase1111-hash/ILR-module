@@ -1,353 +1,375 @@
 # NatLangChain Treasury
 
-**Version:** 1.5
-**Status:** Fully Implemented
-**Contract:** `contracts/Treasury.sol`
-**Last Updated:** January 2026
+**Version:** 2.0
+**Status:** Implemented (flat-cap escrowed subsidies; see the implementation table for what is not implemented)
+**Contracts:** `contracts/Treasury.sol` (`NatLangChainTreasury`), subsidy and incentive code in `contracts/ILRM.sol`
+**Last Updated:** October 2026
+
+This document describes the code as it is. Every function, variable and event named here exists in the
+contracts; features that were designed but are not implemented are listed as such.
 
 ---
 
-## Purpose
+## 1. Purpose and funds map
 
-The NatLangChain Treasury serves three core functions:
+The Treasury funds **defensive stake subsidies**: a low-resource counterparty can stake into an ILRM dispute
+with part of its stake funded by the Treasury. The subsidy is an escrowed co-stake held by ILRM, never a
+payment to the counterparty's wallet, and ILRM repays the Treasury its pro-rata share on resolution.
 
-1. **Hold Protocol Funds**: Accumulated from burns, counter-fees, and escalated stakes
-2. **Subsidize Defensive Stakes**: Provide stake assistance for low-resource participants in ILRM disputes
-3. **Maintain Algorithmic Control**: Fully on-chain rules with no discretionary human intervention
+Protocol value sits in five places. They are separate and none of them feeds another automatically:
+
+| Where | Inflows | Outflows |
+|-------|---------|----------|
+| `NatLangChainTreasury` token balance | `deposit(amount, reason)` from anyone (counted in `totalInflows`); `depositBurn(amount)` (ILRM-only, and the current ILRM never calls it); subsidy repayments from ILRM (plain ERC20 transfers, **not** counted in `totalInflows`; index `ILRM.SubsidyReturned`) | Subsidy grants pulled by ILRM into dispute escrow; owner `emergencyWithdraw` |
+| `NatLangChainTreasury` ETH balance | `receive()` (emits `TreasuryReceived(from, amount, "eth")`) | Owner `emergencyWithdrawETH` |
+| `ILRM.treasury` (ETH accounting variable inside ILRM) | Counter-proposal fee excess (`msg.value - fee` in `counterPropose`); ETH sent to `ILRM.receive()` | Owner `ILRM.withdrawTreasury` |
+| `ILRM.tokenReserves` (tokens held by ILRM) | `ILRM.depositTokenReserves(amount)` from anyone; **irrevocable** | Only capped initiator incentives on non-participation (section 6) |
+| Burn address `0x000000000000000000000000000000000000dEaD` | Token: 50% of the total stake on `TimeoutWithBurn` plus the odd-wei dust. ETH: every counter-proposal fee and every voluntary-request fee | None |
+
+ILRM burns to `0x…dEaD`; it never sends burns or fees to the Treasury.
 
 ---
 
-## Architecture
+## 2. Implemented vs not implemented
+
+| Feature | Status | Where |
+|---------|--------|-------|
+| Escrowed defensive co-stake | Implemented | `ILRM.depositStakeWithSubsidy` -> `Treasury.fundStakeSubsidy` |
+| Top-up slippage bound (`maxTopUp`) | Implemented | `ILRM.depositStakeWithSubsidy` |
+| Pro-rata repayment on resolution | Implemented | `ILRM._payCounterpartySide` |
+| Per-dispute cap | Implemented | `maxPerDispute` in `fundStakeSubsidy` |
+| Per-participant rolling-window cap | Implemented | `maxPerParticipant` / `windowDuration` in `fundStakeSubsidy` |
+| Reserve floor | Implemented | `minReserve` in `fundStakeSubsidy` |
+| Harassment-score threshold | Implemented | `HARASSMENT_THRESHOLD` (50) in `fundStakeSubsidy` |
+| Single subsidy per (ILRM, dispute) | Implemented | `subsidyRecipientOf` |
+| Capped initiator incentive from `ILRM.tokenReserves` | Implemented | `ILRM._takeInitiatorIncentive`, `ILRM.setInitiatorIncentiveCaps` |
+| Dynamic caps | Removed in Phase 1 (566242d, REFOCUS_PLAN.md) | - |
+| Tiered subsidies | Removed in Phase 1 (566242d, REFOCUS_PLAN.md) | - |
+| DID-based subsidies | Removed in Phase 1 (566242d, REFOCUS_PLAN.md) | - |
+| Harassment-score decay | Removed in Phase 1 (566242d, REFOCUS_PLAN.md) | - |
+| ILRM-fed harassment scores | Removed in Phase 1 (566242d, REFOCUS_PLAN.md): ILRM never calls `Treasury.updateHarassmentScore`; scores are set by the owner with `setHarassmentScore` | - |
+| Multi-token support | Removed in Phase 1 (566242d, REFOCUS_PLAN.md); single ERC20 `token` | - |
+
+---
+
+## 3. Subsidy escrow flow
+
+The counterparty (defender) of an ILRM dispute, inside the 3-day stake window:
+
+1. **Preview.** `stake = ILRM.disputes(id).initiatorStake`, then
+   `(preview, eligible) = treasury.calculateSubsidy(id, min(maxSubsidy, stake), me)`.
+   `calculateSubsidy` does not cap by the stake itself, so pass `min(maxSubsidy, stake)`.
+2. **Bound the top-up.** `maxTopUp = stake - preview`.
+3. **Approve.** `token.approve(ILRM, maxTopUp)` (a larger allowance is fine: `maxTopUp` is what bounds the charge).
+4. **Stake.** `ILRM.depositStakeWithSubsidy(id, maxSubsidy, maxTopUp)`.
+
+`ILRM.depositStakeWithSubsidy` (`nonReentrant`, `whenNotPaused`) checks, in order:
+
+| # | Check | Revert |
+|---|-------|--------|
+| 1 | caller is the dispute's counterparty | `"Not counterparty"` |
+| 2 | not staked yet (`counterpartyStake == 0`) | `"Already staked"` |
+| 3 | dispute not resolved | `"Dispute resolved"` |
+| 4 | inside the stake window (`block.timestamp <= startTime + STAKE_WINDOW`) | `"Stake window closed"` |
+| 5 | `subsidyTreasury != address(0)` | `"Subsidies disabled"` |
+| 6 | `maxSubsidy > 0` | `"Zero subsidy"` |
+| 7 | pre-call bound: `stake - min(maxSubsidy, stake) <= maxTopUp` | `"Top-up exceeds max"` |
+
+It then commits the symmetric stake (`counterpartyStake = initiatorStake`) and calls
+`treasury.fundStakeSubsidy(id, caller, min(maxSubsidy, stake))`, which checks:
+
+| Check | Revert |
+|-------|--------|
+| caller is the wired `ilrm` | `NotILRM(caller)` |
+| Treasury not paused | `EnforcedPause()` |
+| no subsidy recorded for `(msg.sender, id)` | `DisputeAlreadySubsidized(id)` |
+| `maxAmount > 0` | `ZeroAmount()` |
+| dispute not resolved (read back from ILRM) | `DisputeAlreadyResolved(id)` |
+| participant is the counterparty and not the initiator | `NotCounterparty(participant, counterparty)` |
+| participant is not `address(0)` | `InvalidAddress()` |
+| ILRM committed the matching stake (`counterpartyStake == initiatorStake != 0`) | `SubsidyNotEscrowed(id)` |
+| `harassmentScore[participant] < HARASSMENT_THRESHOLD` (50) | `ParticipantFlaggedForAbuse(participant, score)` |
+| grant > 0 | `NoSubsidyAvailable()` |
+
+The grant (the per-participant window is reset first if `block.timestamp > participantWindowStart + windowDuration`):
 
 ```
-                     +-------------------+
-                     |     Treasury      |
-                     +-------------------+
-                              |
-        +---------------------+---------------------+
-        |                     |                     |
-        v                     v                     v
-+---------------+     +---------------+     +---------------+
-|    Inflows    |     |   Subsidies   |     | Anti-Abuse    |
-+---------------+     +---------------+     +---------------+
-| - Burns       |     | - Per-dispute |     | - Harassment  |
-| - Counter-fees|     | - Per-user    |     |   scores      |
-| - Escalations |     | - Dynamic     |     | - DID sybil   |
-+---------------+     | - Tiered      |     | - Single use  |
-                      +---------------+     +---------------+
+grant = min(
+    requested,                                   // min(maxSubsidy, initiatorStake), from ILRM
+    initiatorStake,                              // never more than the (escalated) stake owed
+    maxPerDispute,
+    maxPerParticipant - participantSubsidyUsed[participant],   // rolling-window remainder
+    balanceOf(treasury) - minReserve             // 0 if the balance is at or below the floor
+)
 ```
 
----
+The Treasury records `subsidyRecipientOf[ILRM][id] = participant`, charges `participantSubsidyUsed` and
+`totalSubsidiesDistributed`, `forceApprove`s ILRM for **exactly** the grant and emits `SubsidyFunded`.
 
-## Implementation Status
+Back in ILRM: `require(0 < grant <= requested, "Invalid subsidy")`, then the post-call bound
+`require(stake - grant <= maxTopUp, "Top-up exceeds max")`, then the record `stakeSubsidy(id) = (treasury, grant)`,
+then ILRM pulls the grant from the Treasury and the top-up `stake - grant` from the caller, and emits
+`StakeSubsidized` and `StakeDeposited`. All of this is one transaction: any revert undoes the Treasury record,
+the rolling-window charge, `totalSubsidiesDistributed`, the approval and the committed stake.
 
-| Feature | Status | Location |
-|---------|--------|----------|
-| Deposit Burns/Fees | Implemented | `Treasury.sol:151-171` |
-| Defensive Subsidies | Implemented | `Treasury.sol:189-273` |
-| Per-Dispute Caps | Implemented | `Treasury.sol:242-244` |
-| Per-Participant Rolling Caps | Implemented | `Treasury.sol:247-250` |
-| Harassment Score Checks | Implemented | `Treasury.sol:228-230` |
-| Anti-Sybil (Single Subsidy/Dispute) | Implemented | `Treasury.sol:200-203` |
-| Dynamic Caps | Implemented | `Treasury.sol:497-531` |
-| Tiered Subsidies | Implemented | `Treasury.sol:617-646` |
-| DID-Based Subsidies | Implemented | `Treasury.sol:812-1044` |
-| Harassment Score Decay | Implemented | `Treasury.sol` |
-| Multi-Token Support | Not Implemented | Future enhancement |
-
----
-
-## High-Level Flow
-
-### Inflows
-
-| Source | Description | Implementation |
-|--------|-------------|----------------|
-| Burns | 50% of stakes from unresolved disputes (TimeoutWithBurn) | `depositBurn()` |
-| Counter-Fees | Exponential fees from counter-proposals | `depositBurn()` |
-| Escalated Stakes | Additional stakes from repeat frivolous initiators | `depositBurn()` |
-| ETH Deposits | Direct ETH contributions | `depositETH()` |
-
-### Eligibility Check
-
-A participant qualifies for subsidy if:
-
-1. **Target of Dispute**: Must be counterparty, not initiator
-2. **Opt-In Request**: Must explicitly call `requestSubsidy()`
-3. **Good History**: Harassment score below threshold (50)
-4. **Available Allowance**: Within per-participant rolling window cap
-5. **Dispute Not Subsidized**: No prior subsidy for this dispute
-6. **DID Verified** (optional): Higher sybil scores unlock bonus subsidies
-
-### Subsidy Calculation
-
-```
-baseSubsidy = min(stakeNeeded, maxPerDispute)
-availableAllowance = getEffectiveMaxPerParticipant() - participantSubsidyUsed[participant]
-subsidyWithCap = min(baseSubsidy, availableAllowance)
-subsidyMultiplier = getSubsidyMultiplier(participant)  // Based on harassment tier
-finalSubsidy = subsidyWithCap * subsidyMultiplier / 10000
-```
-
-### Payout & Safety
-
-- Funds transferred directly from treasury to participant for staking in ILRM
-- Max per-dispute limit enforced
-- Max per-participant rolling window enforced
-- Treasury balance check ensures sustainability
-
----
-
-## Anti-Sybil / Abuse Protections
-
-| Protection | Description | Threshold |
-|------------|-------------|-----------|
-| Single Subsidy/Dispute | Only one subsidy per dispute | Boolean flag |
-| Harassment Score | High scores block subsidies | Score >= 50 |
-| Rolling Window Caps | Per-participant limits reset periodically | Configurable period |
-| DID Sybil Score | Verifiable credentials boost eligibility | Score 0-100 |
-| Tiered Subsidies | Graduated reduction for borderline scores | 4 tiers |
-
----
-
-## Constants
-
-| Constant | Default Value | Description |
-|----------|---------------|-------------|
-| `HARASSMENT_THRESHOLD` | 50 | Score at which subsidies are blocked |
-| `maxPerDispute` | Configurable | Maximum subsidy per dispute |
-| `maxPerParticipant` | Configurable | Rolling window cap per participant |
-| `rollingWindowPeriod` | Configurable | Period for cap reset |
-
----
-
-## Dynamic Caps
-
-Dynamic caps scale `maxPerParticipant` based on current treasury balance to ensure sustainability.
-
-### Configuration
+### Deployment wiring
 
 ```solidity
-// Enable dynamic caps at 10% of treasury with 1 token floor
-treasury.setDynamicCapConfig(
-    true,           // enabled
-    1000,           // 10% (1000 bps)
-    1e18            // 1 token floor
-);
+treasury.setILRM(address(ilrm));            // fundStakeSubsidy only accepts calls from this ILRM
+ilrm.setSubsidyTreasury(address(treasury)); // owner-only; address(0) disables depositStakeWithSubsidy
 ```
 
-### State Variables
-
-| Variable | Type | Description |
-|----------|------|-------------|
-| `dynamicCapEnabled` | `bool` | Toggle for dynamic caps |
-| `dynamicCapPercentageBps` | `uint256` | Percentage of treasury (basis points) |
-| `dynamicCapFloor` | `uint256` | Minimum cap floor |
-
-### Functions
-
-| Function | Description |
-|----------|-------------|
-| `setDynamicCapConfig()` | Configure dynamic cap settings |
-| `calculateDynamicCap()` | Calculate current cap from treasury balance |
-| `getEffectiveMaxPerParticipant()` | Get effective cap (considers dynamic when enabled) |
+`ILRM.setSubsidyTreasury` only affects future subsidized stakes: each dispute repays the funder recorded when
+it was staked (`ILRM.stakeSubsidy(id)`).
 
 ---
 
-## Tiered Subsidies
+## 4. Slippage bound and repayment
 
-Tiered subsidies provide graduated reduction based on harassment score - lower scores receive higher subsidies.
+### Why `maxTopUp`
 
-### Tier System
+The grant is only known when the transaction executes. Between the caller's preview and inclusion it can shrink:
+other subsidized stakes draining the Treasury's available balance (including sybil stakes placed on purpose),
+`updateCaps`, `setMinReserve` or `setHarassmentScore`, a Treasury rotation (`ILRM.setSubsidyTreasury`), or the
+caller's own per-participant window. Without a bound, a caller with a large allowance would be charged the
+difference. `maxTopUp` makes ILRM revert instead:
 
-| Tier | Harassment Score Range | Default Multiplier |
-|------|------------------------|-------------------|
-| 0 | 0 - tier1Threshold | 100% (full subsidy) |
-| 1 | tier1Threshold - tier2Threshold | tier1MultiplierBps |
-| 2 | tier2Threshold - tier3Threshold | tier2MultiplierBps |
-| 3 | tier3Threshold - HARASSMENT_THRESHOLD | tier3MultiplierBps |
-| Blocked | >= HARASSMENT_THRESHOLD | 0% (no subsidy) |
+- Checked twice. Before the Treasury call against the best case (`requested` is an upper bound on any grant), so an
+  unsatisfiable bound fails without calling the Treasury; and after the call against the actual grant, before any
+  record or transfer. The caller's outflow is therefore always `<= maxTopUp`.
+- `maxTopUp = 0`: a full subsidy or a revert. `maxTopUp = type(uint256).max`: no bound.
+- The bound only restricts the caller; it cannot be used to take more from the Treasury. ILRM enforces it itself
+  and does not trust the Treasury's return value beyond `0 < grant <= requested`.
+- A front-runner can force a revert, never an overcharge. A reverted call reserves nothing.
 
-### Configuration
+### Repayment
+
+`ILRM._payCounterpartySide` splits whatever the counterparty side receives between the defender (its own share
+of the stake, rounded down) and the recorded funder (the remainder). Repayment is a plain ERC20 transfer, so
+resolution never runs Treasury code and keeps working while the Treasury is paused or unwired.
+
+| Resolution | Counterparty-side payout `R` | Funder receives | Defender receives |
+|------------|------------------------------|-----------------|-------------------|
+| Mutual acceptance (`AcceptedProposal`) | the full stake `S` | the full subsidy `s` | its top-up `S - s` |
+| Timeout (`TimeoutWithBurn`) | `floor(S / 2)` (50% of `2S` is burned, the rest split per party, dust burned) | `R - floor(R * (S - s) / S)` (bears its share of the burn) | `floor(R * (S - s) / S)` |
+| Non-participation (`DefaultLicenseApplied`) | none | not applicable: no subsidy can exist | - |
+
+Counter-proposal rounds do not change the split: counter fees are ETH paid by the caller (burned, excess to
+`ILRM.treasury`) and only extend the deadline (1 day per counter, at most 3 days).
+
+Example (timeout): `S = 8`, `s = 5`: 8 burned, initiator 4, funder 2.5, defender 1.5.
+
+---
+
+## 5. Per-(ILRM, dispute) records and `setILRM` migration
+
+Subsidy records are keyed by the ILRM that requested them:
 
 ```solidity
-// Enable tiered subsidies with graduated reduction
-treasury.setTieredSubsidyConfig(
-    true,    // enabled
-    10,      // tier1Threshold (score >= 10)
-    25,      // tier2Threshold (score >= 25)
-    40,      // tier3Threshold (score >= 40)
-    7500,    // tier1 = 75%
-    5000,    // tier2 = 50%
-    2500     // tier3 = 25%
-);
+mapping(address ilrm => mapping(uint256 disputeId => address participant)) public subsidyRecipientOf;
 ```
 
-### State Variables
+Dispute IDs restart at 0 for every ILRM deployment, so keying by `disputeId` alone made a redeployed ILRM's
+disputes collide with the old one's (`DisputeAlreadySubsidized`). A non-zero entry means subsidized; under
+`onlyILRM`, `(msg.sender, disputeId)` is globally unique.
 
-| Variable | Type | Description |
-|----------|------|-------------|
-| `tieredSubsidiesEnabled` | `bool` | Toggle for tiered subsidies |
-| `tier1Threshold` | `uint256` | Harassment score for tier 1 boundary |
-| `tier2Threshold` | `uint256` | Harassment score for tier 2 boundary |
-| `tier3Threshold` | `uint256` | Harassment score for tier 3 boundary |
-| `tier1MultiplierBps` | `uint256` | Tier 1 subsidy multiplier (basis points) |
-| `tier2MultiplierBps` | `uint256` | Tier 2 subsidy multiplier (basis points) |
-| `tier3MultiplierBps` | `uint256` | Tier 3 subsidy multiplier (basis points) |
-
-### Functions
-
-| Function | Description |
-|----------|-------------|
-| `setTieredSubsidyConfig()` | Configure tier thresholds and multipliers |
-| `getSubsidyMultiplier()` | Get multiplier and tier for a participant |
+- `disputeSubsidized(id)` and `disputeSubsidyRecipient(id)` keep their old selectors and return types and refer to
+  the **currently wired** `ilrm`; `subsidyRecipientOf(ilrm, id)` gives the history of any ILRM.
+- `calculateSubsidy` checks the currently wired `ilrm`.
+- After `setILRM(B)`: disputes still open in the old ILRM A still resolve and repay this Treasury with plain
+  transfers; A can no longer draw subsidies (`NotILRM(A)`); B's dispute IDs are independent of A's.
+- Pointing back to A (`setILRM(A)`) restores A's records, so A's subsidized disputes still cannot be subsidized
+  twice.
+- `SubsidyFunded(participant, disputeId, amount)` has no ILRM field. Attribute it to the ILRM wired at that point
+  (order of `ILRMUpdated` events), or to the `ILRM.StakeSubsidized` event emitted in the same transaction.
 
 ---
 
-## DID Integration
+## 6. ILRM token reserves (initiator incentive)
 
-The Treasury integrates with the DIDRegistry to provide enhanced subsidy eligibility for verified participants.
+When the counterparty never stakes, `enforceTimeout` resolves the dispute as `DefaultLicenseApplied` and returns
+the initiator's stake plus an incentive from `ILRM.tokenReserves`:
 
-### Features
+```
+uncapped  = initiatorStake * INITIATOR_INCENTIVE_BPS / 10_000          // 10%
+incentive = min(uncapped,
+                maxIncentivePerDispute,
+                maxIncentivePerWindow - incentivePaidInWindow,          // 0 if already at or above the cap
+                tokenReserves)
+initiator receives initiatorStake + incentive                           // always the full stake
+```
 
-| Feature | Description |
-|---------|-------------|
-| DID Bonus Multiplier | Higher sybil scores unlock bonus subsidies |
-| Sybil Resistance | Verified credentials prevent abuse |
-| Minimum Sybil Score | Optional requirement for subsidy eligibility |
+**Why capped.** The counterparty can be a sybil of the initiator that simply never stakes, and a fresh
+counterparty faces no stake escalation. Uncapped, anyone could farm the reserves at 10% of their stake per 3-day
+cycle; one dispute staked at 10x the reserves took all of them at once.
 
-### Configuration
+### Caps, defaults and setter
+
+| Parameter | Default | Bounds |
+|-----------|---------|--------|
+| `maxIncentivePerDispute` | `DEFAULT_MAX_INCENTIVE_PER_DISPUTE` = `1e18` (1 token at 18 decimals) | `<= maxIncentivePerWindow` |
+| `maxIncentivePerWindow` | `DEFAULT_MAX_INCENTIVE_PER_WINDOW` = `10e18` | none (owner trust) |
+| `incentiveWindow` | `DEFAULT_INCENTIVE_WINDOW` = 30 days | `MIN_INCENTIVE_WINDOW` (1 day) to `MAX_INCENTIVE_WINDOW` (365 days), inclusive |
+
+- `setInitiatorIncentiveCaps(uint256 maxPerDispute, uint256 maxPerWindow, uint256 window)`: owner-only, emits
+  `InitiatorIncentiveCapsUpdated`; reverts `"Invalid incentive window"` or `"Per-dispute cap above window cap"`.
+- Zero caps are allowed and are the **kill switch**. The setter is not `whenNotPaused`, because `enforceTimeout`
+  cannot be paused.
+- The defaults assume an 18-decimals token. `scripts/deploy.js` refuses to deploy against a token with other
+  decimals unless `INCENTIVE_MAX_PER_DISPUTE` / `INCENTIVE_MAX_PER_WINDOW` / `INCENTIVE_WINDOW` (raw base units;
+  seconds) are set.
+- There is no absolute ceiling: the owner (intended: `GovernanceTimelock`) can raise the caps up to the deposited
+  reserves.
+
+### Window semantics
+
+- Fixed windows, rolled lazily. The first window starts at ILRM deployment (`incentiveWindowStart`). The first
+  paying payout at or after `incentiveWindowStart + incentiveWindow` starts a new window at its own timestamp with
+  nothing paid in it.
+- A zero incentive (a cap or the reserves exhausted, or zero caps) writes no state: it does not roll the window
+  and does not touch `tokenReserves`.
+- Configuration changes do not reset usage or the window start: a cap lowered below `incentivePaidInWindow` pays 0
+  until the window rolls, and a new window length applies to the current window.
+- When the reserves are below the cap-limited amount, the remainder of the reserves is paid.
+- The mutual-acceptance and timeout-with-burn paths never touch the reserves or the incentive state.
+
+### Preview and events
+
+- `previewInitiatorIncentive(uint256 initiatorStake) returns (uint256)`: what a non-participation resolution would
+  pay now, with the same caps. The actual payout can be lower if other payouts land first.
+- `InitiatorIncentivePaid(uint256 indexed disputeId, address indexed initiator, uint256 amount, uint256 uncappedAmount)`:
+  emitted on every non-participation resolution. `amount < uncappedAmount` (including 0) means a cap or the
+  reserves bound the payout. **Monitor these events**: a run of capped payouts is the signature of farming.
+- `InitiatorIncentiveCapsUpdated(uint256 maxPerDispute, uint256 maxPerWindow, uint256 window)`: emitted by the
+  setter and once in the constructor.
+
+### Residual risk (accepted)
+
+The caps bound farming; they do not prevent it. The window cap is global (not keyed by address), so it holds
+against any number of sybils:
+
+- Each payout is `<= min(10% of the stake, maxIncentivePerDispute)`.
+- Under a fixed configuration (window `T`, window cap `W`), at most `W` is paid per window and at most
+  `W * (ceil(t / T) + 1)` over any interval of length `t`; across a window boundary, `2W` can be paid within
+  seconds. The total paid can never exceed the deposited reserves.
+- Farming the full window cap needs about 10x the cap in stakes (`10 * W` at the 10% rate, spread over at least
+  `W / maxIncentivePerDispute` disputes) locked for the 3-day stake window; all of it is returned.
+- First come, first served. Farmers (or any third party, since `enforceTimeout` is permissionless) can time
+  resolutions so that an honest initiator's dispute lands in an exhausted window; that initiator then gets its
+  stake back but no incentive.
+- There is no per-initiator cap: initiator addresses are free, so sybils defeat it and it would only cost gas.
+- Reserves have no exit except incentives: there is no withdrawal function, and with zero caps they stay locked.
+
+With the defaults, at most 10 tokens per 30 days (20 across one boundary) can leave the reserves.
+
+---
+
+## 7. Admin and emergency functions
+
+`NatLangChainTreasury` (`Ownable2Step`, `Pausable`; intended owner: `GovernanceTimelock`):
 
 ```solidity
-treasury.setDIDSubsidyConfig(
-    didRegistry,    // DIDRegistry contract address
-    true,           // enabled
-    20,             // minSybilScore (optional minimum)
-    1500            // bonusMultiplierBps (15% bonus for verified DIDs)
-);
+function setILRM(address _ilrm) external onlyOwner;                       // emits ILRMUpdated
+function updateCaps(uint256 _maxPerDispute, uint256 _maxPerParticipant, uint256 _windowDuration)
+    external onlyOwner;                                                   // emits CapsUpdated
+function setMinReserve(uint256 _minReserve) external onlyOwner;           // no event
+function setHarassmentScore(address participant, uint256 score) external onlyOwner; // capped at 100
+function updateHarassmentScore(address participant, int256 scoreDelta) external;    // onlyILRM; never called by ILRM
+function emergencyWithdraw(address to, uint256 amount) external onlyOwner;          // any token amount
+function emergencyWithdrawETH(address to, uint256 amount) external onlyOwner;       // any ETH amount
+function pause() external onlyOwner;    // blocks fundStakeSubsidy only; repayments still arrive
+function unpause() external onlyOwner;
+function transferOwnership(address newOwner) external onlyOwner;          // Ownable2Step
+function acceptOwnership() external;
 ```
 
-### Subsidy Calculation with DID
-
-```
-baseSubsidy = calculateSubsidy(...)
-if (didEnabled && participant.hasDID()) {
-    sybilScore = didRegistry.calculateSybilScore(participant.did)
-    if (sybilScore >= minSybilScore) {
-        bonus = baseSubsidy * bonusMultiplierBps / 10000
-        finalSubsidy = baseSubsidy + bonus
-    }
-}
-```
-
----
-
-## Key Functions
-
-### Inflows
+`ILRM` (Treasury- and incentive-related admin):
 
 ```solidity
-// Deposit ERC20 tokens (from burns, counter-fees)
-function depositBurn(uint256 amount) external;
-
-// Deposit ETH directly
-function depositETH() external payable;
+function setSubsidyTreasury(address _treasury) external onlyOwner;        // address(0) disables subsidies
+function setInitiatorIncentiveCaps(uint256 _maxPerDispute, uint256 _maxPerWindow, uint256 _window)
+    external onlyOwner;                                                   // works while paused
+function withdrawTreasury(address _to, uint256 _amount) external onlyOwner; // ILRM.treasury ETH
+function pause() external onlyOwner;    // blocks new disputes, stakes (incl. subsidized) and counters;
+                                        // acceptProposal and enforceTimeout stay available
+function unpause() external onlyOwner;
 ```
 
-### Subsidies
+**Owner trust model.** The Treasury is not "fully algorithmic": its owner can change every cap, the reserve floor
+and every harassment score, pause subsidies, re-point `ilrm`, and `emergencyWithdraw` the entire token and ETH
+balance at any time. Escrowed subsidies are safe from the Treasury owner (they sit in ILRM), but repayments land
+in the Treasury and are then under the owner's control. The ILRM owner can raise the incentive caps up to the
+deposited reserves and can re-point the subsidy treasury. Both owners are intended to be `GovernanceTimelock`.
+
+---
+
+## 8. Events
+
+`NatLangChainTreasury`:
 
 ```solidity
-// Request subsidy for a dispute
-function requestSubsidy(
-    uint256 disputeId,
-    uint256 stakeNeeded,
-    address participant
-) external returns (uint256 subsidyAmount);
-
-// Preview subsidy without executing
-function calculateSubsidy(
-    uint256 stakeNeeded,
-    address participant
-) external view returns (uint256);
-
-// Get remaining allowance for participant
-function getRemainingAllowance(
-    address participant
-) external view returns (uint256);
+event SubsidyFunded(address indexed participant, uint256 indexed disputeId, uint256 amount);
+event TreasuryReceived(address indexed from, uint256 amount, string reason);
+event HarassmentScoreUpdated(address indexed participant, uint256 oldScore, uint256 newScore);
+event ILRMUpdated(address indexed oldILRM, address indexed newILRM);
+event CapsUpdated(uint256 maxPerDispute, uint256 maxPerParticipant, uint256 windowDuration);
+// plus OpenZeppelin OwnershipTransferStarted, OwnershipTransferred, Paused, Unpaused
 ```
 
-### Administration
+`ILRM` (Treasury and incentive related):
 
 ```solidity
-// Update harassment score (owner only)
-function updateHarassmentScore(address participant, uint256 score) external;
-
-// Set maximum per dispute
-function setMaxPerDispute(uint256 newMax) external;
-
-// Set maximum per participant
-function setMaxPerParticipant(uint256 newMax) external;
-
-// Configure dynamic caps
-function setDynamicCapConfig(
-    bool enabled,
-    uint256 percentageBps,
-    uint256 floor
-) external;
-
-// Configure tiered subsidies
-function setTieredSubsidyConfig(
-    bool enabled,
-    uint256 t1, uint256 t2, uint256 t3,
-    uint256 m1, uint256 m2, uint256 m3
-) external;
-```
-
-### Emergency
-
-```solidity
-// Emergency withdrawal (owner only)
-function emergencyWithdrawETH(address to, uint256 amount) external;
-function emergencyWithdrawToken(address to, uint256 amount) external;
+event SubsidyTreasuryUpdated(address indexed previousTreasury, address indexed newTreasury);
+event StakeSubsidized(uint256 indexed disputeId, address indexed counterparty, address indexed funder, uint256 amount);
+event SubsidyReturned(uint256 indexed disputeId, address indexed funder, uint256 amount);
+event TokenReservesDeposited(address indexed depositor, uint256 amount);
+event InitiatorIncentiveCapsUpdated(uint256 maxPerDispute, uint256 maxPerWindow, uint256 window);
+event InitiatorIncentivePaid(uint256 indexed disputeId, address indexed initiator, uint256 amount, uint256 uncappedAmount);
+event TreasuryWithdrawn(address indexed recipient, uint256 amount);
+event StakesBurned(uint256 indexed disputeId, uint256 burnAmount);
 ```
 
 ---
 
-## Events
+## 9. Known limitations
 
-| Event | Description |
-|-------|-------------|
-| `TreasuryReceived(uint256 amount)` | Funds deposited |
-| `SubsidyFunded(address participant, uint256 disputeId, uint256 amount)` | Subsidy granted |
-| `HarassmentScoreUpdated(address participant, uint256 oldScore, uint256 newScore)` | Score changed |
-| `DynamicCapConfigUpdated(bool enabled, uint256 percentageBps, uint256 floor)` | Dynamic cap config changed |
-| `TieredSubsidyConfigUpdated(...)` | Tier config changed |
-
----
-
-## Security Considerations
-
-| Concern | Mitigation |
-|---------|------------|
-| Reentrancy | `ReentrancyGuard` on all external calls |
-| Sybil Attacks | Single subsidy per dispute, DID verification, harassment scores |
-| Treasury Drain | Per-dispute and per-participant caps, dynamic scaling |
-| Unauthorized Access | `Ownable2Step` for admin functions |
-| Emergency Situations | `Pausable` for emergency stops |
+- **Zero-loss liquidity lock.** A colluding initiator/counterparty pair can take a subsidy and resolve by mutual
+  acceptance, which repays the Treasury in full. This costs the pair nothing but gas, yet locks Treasury liquidity
+  (up to `maxPerDispute` per dispute and `maxPerParticipant` per sybil defender per window) for up to about 10 days.
+  A per-initiator cap on outstanding subsidy, a fee or a DID requirement would address it; that is an open product
+  decision.
+- **Front-run revert.** Anyone who shrinks the grant before inclusion can make a bounded `depositStakeWithSubsidy`
+  revert (never overcharge). The defender can retry with a new preview or fall back to `depositStake`.
+- **Rolling allowance not restored.** `participantSubsidyUsed` is charged gross and is not reduced when a subsidy
+  is repaid.
+- **Blacklisting tokens.** Repayment is a push transfer. With a token that can blacklist the Treasury or the
+  counterparty, the transfer in `_payCounterpartySide` would revert and block that dispute's resolution.
+- **No token check on rotation.** `ILRM.setSubsidyTreasury` does not check that the new Treasury's `token()` is
+  ILRM's token. A mismatched Treasury cannot cause a loss (ILRM's pull of its own token from the Treasury fails and
+  the stake reverts), but subsidies stop working.
+- **Initiator-incentive farming up to the caps** (section 6).
 
 ---
 
-## Future Enhancements
+## 10. Not implemented / future enhancements
 
-| Enhancement | Priority | Description |
-|-------------|----------|-------------|
-| Multi-Token Support | Medium | Accept multiple staking tokens or native ETH |
-| Cross-Chain Treasury | Low | Unified treasury across L2s |
-| DAO Governance | Low | Community-controlled parameter changes |
+The proposals for these live in `SPEC.md` (Category 5 and Plans 6/7, all marked as proposals):
+
+| Enhancement | Notes |
+|-------------|-------|
+| Dynamic caps | Scale `maxPerParticipant` with the Treasury balance (SPEC.md Plan 6) |
+| Tiered subsidies | Graduated subsidies by harassment score (SPEC.md Plan 7) |
+| DID-based subsidies | Sybil-score bonuses; would need the identity module wired into the Treasury |
+| Harassment-score decay; ILRM-fed scores | Scores are owner-set only today |
+| Multi-token support | Single ERC20 `token` today (SPEC.md 5.3) |
+| Per-initiator cap on outstanding subsidy | Mitigates the zero-loss liquidity lock (product decision) |
+| `ILRM.tokenReserves` withdrawal path | Would change the donors' trust model; not added |
+| Exclusive initiator grace period for `enforceTimeout` | Would stop third parties from timing incentive starvation; not added |
+| Token check in `ILRM.setSubsidyTreasury`; event for `setMinReserve` | Small hardening items |
 
 ---
 
-## Related Documentation
+## Related documentation
 
 - [ILRM Specification](./SPEC.md)
 - [Safety Invariants](./Protocol-Safety-Invariants.md)

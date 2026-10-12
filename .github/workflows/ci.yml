@@ -21,7 +21,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          version: stable
 
       - name: Install dependencies
         run: forge install
@@ -50,7 +50,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          version: stable
 
       - name: Install dependencies
         run: forge install
@@ -79,7 +79,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          version: stable
 
       - name: Install dependencies
         run: forge install
@@ -105,7 +105,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          version: stable
 
       - name: Install dependencies
         run: forge install
@@ -137,6 +137,61 @@ jobs:
       - name: Run Hardhat tests
         run: npm test
 
+      - name: Typecheck SDK
+        run: npx tsc --noEmit -p .
+
+  subgraph:
+    name: Subgraph
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v6
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v6
+        with:
+          # graph-cli 0.98 needs Node >= 20.18.1
+          node-version: '22'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            subgraph/package-lock.json
+
+      - name: Install dependencies
+        run: npm ci
+
+      # check-abis compares subgraph/abis with these artifacts
+      - name: Compile contracts
+        run: npm run compile
+
+      - name: Install subgraph dependencies
+        working-directory: subgraph
+        run: npm ci
+
+      - name: Check ABIs against the compiled contracts
+        working-directory: subgraph
+        run: npm run check-abis
+
+      - name: Generate types
+        working-directory: subgraph
+        run: npm run codegen
+
+      - name: Build subgraph
+        working-directory: subgraph
+        run: npm run build
+
+      # graph test downloads the matchstick 0.6.0 binary (binary-linux-22 on Ubuntu 22.04/24.04),
+      # which links against libpq
+      - name: Ensure libpq for matchstick
+        run: |
+          if ! ldconfig -p | grep -q 'libpq\.so\.5'; then
+            sudo apt-get update
+            sudo apt-get install -y --no-install-recommends libpq5
+          fi
+
+      - name: Run matchstick tests
+        working-directory: subgraph
+        run: npm test
+
   lint:
     name: Lint & Format
     runs-on: ubuntu-latest
@@ -148,7 +203,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          version: stable
 
       - name: Check formatting
         run: forge fmt --check
@@ -165,7 +220,7 @@ jobs:
       - name: Install Foundry
         uses: foundry-rs/foundry-toolchain@v1
         with:
-          version: nightly
+          version: stable
 
       - name: Install dependencies
         run: forge install

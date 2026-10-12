@@ -27,11 +27,11 @@ contract IdentityVerifier is IIdentityVerifier, ReentrancyGuard, Ownable2Step {
 
     /// @notice Scalar field size for BN254 curve
     uint256 internal constant SNARK_SCALAR_FIELD =
-        21888242871839275222246405745257275088548364400416034343698204186575808495617;
+        21_888_242_871_839_275_222_246_405_745_257_275_088_548_364_400_416_034_343_698_204_186_575_808_495_617;
 
     /// @notice Prime field size for BN254 curve
     uint256 internal constant PRIME_Q =
-        21888242871839275222246405745257275088696311157297823662689037894645226208583;
+        21_888_242_871_839_275_222_246_405_745_257_275_088_696_311_157_297_823_662_689_037_894_645_226_208_583;
 
     // ============ Verification Key (Generated from trusted setup) ============
     // These values are placeholders - replace with actual values from snarkjs setup
@@ -112,9 +112,7 @@ contract IdentityVerifier is IIdentityVerifier, ReentrancyGuard, Ownable2Step {
         IC[1] = _vkIC[1];
 
         // Store hash of verification key for auditability
-        verificationKeyHash = keccak256(
-            abi.encode(_vkAlpha, _vkBeta, _vkGamma, _vkDelta, _vkIC)
-        );
+        verificationKeyHash = keccak256(abi.encode(_vkAlpha, _vkBeta, _vkGamma, _vkDelta, _vkIC));
 
         emit VerificationKeyUpdated(verificationKeyHash);
     }
@@ -124,10 +122,12 @@ contract IdentityVerifier is IIdentityVerifier, ReentrancyGuard, Ownable2Step {
     /**
      * @inheritdoc IIdentityVerifier
      */
-    function verifyIdentityProof(
-        Proof calldata proof,
-        IdentityPublicSignals calldata signals
-    ) external view override returns (bool valid) {
+    function verifyIdentityProof(Proof calldata proof, IdentityPublicSignals calldata signals)
+        external
+        view
+        override
+        returns (bool valid)
+    {
         // Validate public signal is in field
         if (signals.identityManager >= SNARK_SCALAR_FIELD) {
             revert InvalidPublicSignals();
@@ -142,15 +142,16 @@ contract IdentityVerifier is IIdentityVerifier, ReentrancyGuard, Ownable2Step {
     /**
      * @inheritdoc IIdentityVerifier
      */
-    function verifyDisputeIdentityProof(
-        Proof calldata proof,
-        DisputeIdentitySignals calldata signals
-    ) external view override returns (bool valid) {
+    function verifyDisputeIdentityProof(Proof calldata proof, DisputeIdentitySignals calldata signals)
+        external
+        view
+        override
+        returns (bool valid)
+    {
         // Validate all public signals are in field
         if (
-            signals.identityManager >= SNARK_SCALAR_FIELD ||
-            signals.disputeId >= SNARK_SCALAR_FIELD ||
-            signals.expectedRole >= SNARK_SCALAR_FIELD
+            signals.identityManager >= SNARK_SCALAR_FIELD || signals.disputeId >= SNARK_SCALAR_FIELD
+                || signals.expectedRole >= SNARK_SCALAR_FIELD
         ) {
             revert InvalidPublicSignals();
         }
@@ -168,10 +169,12 @@ contract IdentityVerifier is IIdentityVerifier, ReentrancyGuard, Ownable2Step {
     /**
      * @inheritdoc IIdentityVerifier
      */
-    function verifyNoncedIdentityProof(
-        Proof calldata proof,
-        NonceIdentitySignals calldata signals
-    ) external override nonReentrant returns (bool valid) {
+    function verifyNoncedIdentityProof(Proof calldata proof, NonceIdentitySignals calldata signals)
+        external
+        override
+        nonReentrant
+        returns (bool valid)
+    {
         bytes32 identityHash = bytes32(signals.identityManager);
 
         // Check nonce is valid (must be current nonce)
@@ -181,19 +184,15 @@ contract IdentityVerifier is IIdentityVerifier, ReentrancyGuard, Ownable2Step {
         }
 
         // Compute proof hash for replay detection
-        bytes32 proofHash = keccak256(
-            abi.encode(proof.a, proof.b, proof.c, signals)
-        );
+        bytes32 proofHash = keccak256(abi.encode(proof.a, proof.b, proof.c, signals));
         if (_usedProofs[proofHash]) {
             revert ProofAlreadyUsed(proofHash);
         }
 
         // Validate public signals
         if (
-            signals.identityManager >= SNARK_SCALAR_FIELD ||
-            signals.nonce >= SNARK_SCALAR_FIELD ||
-            signals.action >= SNARK_SCALAR_FIELD ||
-            signals.actionCommitment >= SNARK_SCALAR_FIELD
+            signals.identityManager >= SNARK_SCALAR_FIELD || signals.nonce >= SNARK_SCALAR_FIELD
+                || signals.action >= SNARK_SCALAR_FIELD || signals.actionCommitment >= SNARK_SCALAR_FIELD
         ) {
             revert InvalidPublicSignals();
         }
@@ -240,12 +239,11 @@ contract IdentityVerifier is IIdentityVerifier, ReentrancyGuard, Ownable2Step {
      * @param input Public inputs array
      * @return True if proof is valid
      */
-    function _verifyProof(
-        uint256[2] memory a,
-        uint256[2][2] memory b,
-        uint256[2] memory c,
-        uint256[1] memory input
-    ) internal view returns (bool) {
+    function _verifyProof(uint256[2] memory a, uint256[2][2] memory b, uint256[2] memory c, uint256[1] memory input)
+        internal
+        view
+        returns (bool)
+    {
         // Validate proof points are on curve and in field
         if (!_isOnCurveG1(a[0], a[1])) return false;
         if (!_isOnCurveG1(c[0], c[1])) return false;
@@ -299,10 +297,7 @@ contract IdentityVerifier is IIdentityVerifier, ReentrancyGuard, Ownable2Step {
      * @notice Add two G1 points using the precompile
      * @dev Uses address 0x06
      */
-    function _addG1(
-        uint256[2] memory p1,
-        uint256[2] memory p2
-    ) internal view returns (uint256[2] memory r) {
+    function _addG1(uint256[2] memory p1, uint256[2] memory p2) internal view returns (uint256[2] memory r) {
         uint256[4] memory input;
         input[0] = p1[0];
         input[1] = p1[1];
@@ -320,10 +315,7 @@ contract IdentityVerifier is IIdentityVerifier, ReentrancyGuard, Ownable2Step {
      * @notice Scalar multiply a G1 point using the precompile
      * @dev Uses address 0x07
      */
-    function _scalarMulG1(
-        uint256[2] memory p,
-        uint256 s
-    ) internal view returns (uint256[2] memory r) {
+    function _scalarMulG1(uint256[2] memory p, uint256 s) internal view returns (uint256[2] memory r) {
         uint256[3] memory input;
         input[0] = p[0];
         input[1] = p[1];

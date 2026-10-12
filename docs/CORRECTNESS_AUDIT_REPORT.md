@@ -92,11 +92,16 @@
 - Field validation ensures inputs are within SNARK_SCALAR_FIELD
 - Pairing check correctly structured for 4-point verification
 
-#### FIDOVerifier.sol - ✅ CORRECT
+#### FIDOVerifier.sol - ✅ CORRECT (P256VERIFY precompile effectively required)
 
 - P-256 curve parameters correct
-- RIP-7212 precompile integration with fallback
-- Low-s normalization prevents signature malleability
+- RIP-7212 precompile integration, with a pure-Solidity fallback that now validates the public key (canonical
+  coordinates on the curve, as the precompile does) and verifies correctly, but costs about 38M gas per
+  verification: impractical on most chains (above the EIP-7825 per-transaction gas cap), so the RIP-7212 /
+  EIP-7951 P256VERIFY precompile is effectively required for on-chain use
+- High-s signatures are normalized to low-s, not rejected: both `(r, s)` and `(r, n - s)` verify, so signatures
+  are malleable. This is benign for replay protection, which rests on single-use challenges and the sign
+  count, never on signature uniqueness
 - Point-at-infinity rejection prevents trivial signatures
 - clientDataJSON challenge validation properly parses JSON structure
 - Sign count validation detects cloned authenticators
@@ -113,8 +118,14 @@
 #### DIDRegistry.sol - ✅ CORRECT
 
 - One DID per address enforced
-- Sybil score calculation uses weighted average
-- Credential cleanup prevents unbounded array growth
+- Sybil score calculation uses weighted average over every credential the DID holds, computed live by the views
+  (credential expiry and issuer removal or trust changes count immediately)
+- Credential array capped at 50 per DID and 10 per issuer per DID, so no single issuer can fill a DID it does not
+  control; revoked/expired entries are pruned on issuance or by cleanup, and the controller can clear one
+  issuer's credentials in one call
+- An issuer renews a credential with `renewCredential`, which supersedes its own credential (same attestation
+  type, same DID) in the same array slot, so early renewal never needs a slot beyond the per-issuer limit
+- Already-expired credentials cannot be issued
 - Attestation type limits prevent loop DoS
 - Trust level capped at 100
 
@@ -267,7 +278,7 @@ All 15 issues from the prior security audit have been verified as fixed:
 | ECIES | Correct: ECDH + HKDF + AES-256-GCM |
 | Shamir | Correct: GF(2^8) with proper generator |
 | ZK Proofs | Correct: Groth16 on BN254 |
-| FIDO/WebAuthn | Correct: P-256 with RIP-7212 + fallback |
+| FIDO/WebAuthn | P-256 with RIP-7212 (effectively required): the pure-Solidity fallback validates keys and verifies correctly but costs ~38M gas, impractical on most chains; high-s signatures are normalized (malleable, benign for replay protection) |
 | BLS Signatures | Correct: BLS12-381 with EIP-2537 |
 
 ### 4.3 Economic Security

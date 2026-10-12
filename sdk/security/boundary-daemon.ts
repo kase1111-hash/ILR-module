@@ -188,7 +188,7 @@ class AuditFormatter {
 export class BoundaryDaemon extends EventEmitter {
   private config: Required<DaemonConfig>;
   private socket: net.Socket | null = null;
-  private connected: boolean = false;
+  protected connected: boolean = false;
   private reconnecting: boolean = false;
   private reconnectAttempts: number = 0;
   private pendingRequests: Map<string, DaemonRequest> = new Map();
@@ -249,7 +249,7 @@ export class BoundaryDaemon extends EventEmitter {
       });
 
       this.socket.on('data', (data) => {
-        this.handleData(data);
+        this.handleData(data.toString());
       });
 
       this.socket.on('error', (error) => {
@@ -686,16 +686,16 @@ export class MockBoundaryDaemon extends BoundaryDaemon {
 
   constructor() {
     super({ socketPath: '' });
-    (this as { connected: boolean }).connected = true;
+    this.connected = true;
   }
 
   async connect(): Promise<void> {
-    (this as { connected: boolean }).connected = true;
+    this.connected = true;
     this.emit('connected');
   }
 
   async disconnect(): Promise<void> {
-    (this as { connected: boolean }).connected = false;
+    this.connected = false;
     this.emit('disconnected');
   }
 

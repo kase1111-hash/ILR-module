@@ -119,59 +119,88 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 
 | Feature | Status | Location | Notes |
 |---------|--------|----------|-------|
-| Transaction Queuing | ✅ | `BatchQueue.sol:115-175` | Multiple tx types |
-| Batch Release Logic | ✅ | `BatchQueue.sol:195-275` | Time + count based |
-| Batch Execution | ✅ | `BatchQueue.sol:280-320` | On target contract |
-| Order Randomization | ✅ | `BatchQueue.sol:385-395` | Fisher-Yates shuffle |
-| Chainlink Automation | ✅ | `BatchQueue.sol:325-345` | checkUpkeep/performUpkeep |
-| Token/ETH Escrow | ✅ | `BatchQueue.sol:350-375` | During queue period |
-| Cancellation Support | ✅ | `BatchQueue.sol:180-195` | Configurable |
-| Expiration Handling | ✅ | `BatchQueue.sol:245-250` | Auto-refund |
+| Transaction Queuing | ✅ | `BatchQueue.sol:146-219` | Relayed types (dispute initiation, stake deposit, proposal acceptance) only via typed functions that bind the party to the caller; `queueTransaction` takes record-only types (evidence, ZK proof, viewing key), never sent to ILRM |
+| Batch Release Logic | ✅ | `BatchQueue.sol:258-272, 453-514` | Min batch size + release interval; FIFO from a queue head, at most 500 entries scanned, no external calls |
+| Batch Execution | 🔶 | `BatchQueue.sol:523-638` | Relays to ILRM's `IILRMRelay` entry points for the submitter (gas-capped, resumable). The current ILRM has none and relaying is off by default, so relays fail and their escrow is reclaimable |
+| Order Randomization | ✅ | `BatchQueue.sol:674-692` | Fisher-Yates shuffle; cosmetic and predictable (public block-derived seed), hides nothing |
+| Chainlink Automation | ✅ | `BatchQueue.sol:291-303` | checkUpkeep/performUpkeep (permissionless) |
+| Token Escrow | ✅ | `BatchQueue.sol:149-170, 587-608, 652-664` | Stake of a queued dispute initiation only, tracked per transaction; ILRM gets an allowance of exactly that stake. No ETH escrow: the queue rejects ETH |
+| Cancellation Support | ✅ | `BatchQueue.sol:222-234` | Configurable; returns the escrow, works while paused |
+| Expiration Handling | ✅ | `BatchQueue.sol:237-253, 643-646` | No auto-refund: a transaction not released, or released but not executed, within maxQueueTime expires; its escrow is returned by the permissionless `reclaim()` (works while paused) |
 
 ### Dummy Transaction Generator
 
 | Feature | Status | Location | Notes |
 |---------|--------|----------|-------|
-| Probability-Based Generation | ✅ | `DummyTransactionGenerator.sol:95-140` | Configurable BPS threshold |
-| Multiple Dummy Tx Types | ✅ | `DummyTransactionGenerator.sol:285-340` | Voluntary, BatchQueue, ViewingKey |
-| Dummy Address Registry | ✅ | `DummyTransactionGenerator.sol:175-220` | Excluded from analytics |
-| Treasury Funding | ✅ | `DummyTransactionGenerator.sol:225-260` | Per-period spending limits |
-| Chainlink Automation | ✅ | `DummyTransactionGenerator.sol:145-165` | checkUpkeep/performUpkeep |
-| Random Interval Logic | ✅ | `DummyTransactionGenerator.sol:345-375` | VRF-compatible with fallback |
-| Period-Based Limits | ✅ | `DummyTransactionGenerator.sol:380-400` | Max txs and spend per period |
+| Probability-Based Generation | ✅ | `DummyTransactionGenerator.sol:151-160, 423-449` | Configurable BPS gate; keeper/owner only; one attempt per minInterval whatever its outcome (a failed generation is rolled back and logged, not retried); needs `MIN_ATTEMPT_GAS` (upkeep gas limit of at least 1M) |
+| Multiple Dummy Tx Types | ✅ | `DummyTransactionGenerator.sol:459-505, 533-545` | VoluntaryRequest (burns the 0.01 ETH fee via ILRM), BatchQueueEntry (record-only EvidenceSubmission), ViewingKeyCommit (no call yet); ZKProofSubmit / StakeDeposit fall back to a voluntary request |
+| Dummy Address Registry | ✅ | `DummyTransactionGenerator.sol:227-271` | Labeled so off-chain analytics can exclude them; on chain every dummy is attributable to the generator |
+| Treasury Funding | ✅ | `DummyTransactionGenerator.sol:276-296` | ETH treasury, owner withdrawal; spent only on the voluntary-request fee |
+| Chainlink Automation | ✅ | `DummyTransactionGenerator.sol:212-222` | checkUpkeep/performUpkeep; performUpkeep is keeper/owner only |
+| Random Interval Logic | 🔶 | `DummyTransactionGenerator.sol:321-358, 523-527` | No VRF: block-derived pseudo-randomness, predictable by the keeper, owner and block proposer (no safety property depends on it). Pacing is minInterval plus the probability gate; `maxInterval` is validated but not enforced |
+| Period-Based Limits | ✅ | `DummyTransactionGenerator.sol:459-505, 604-612` | Max txs and spend (including the dummy's own cost) per period, on every generation path |
 
 ### Compliance Council Contract
 
 | Feature | Status | Location | Notes |
 |---------|--------|----------|-------|
-| Council Member Management | ✅ | `ComplianceCouncil.sol:215-285` | Add/remove with BLS keys |
-| Member Role Types | ✅ | `IComplianceCouncil.sol:35-42` | 5 roles: User, DAO, Auditor, Legal, Regulator |
-| Warrant Request Submission | ✅ | `ComplianceCouncil.sol:295-335` | With document hash and jurisdiction |
-| Threshold Voting | ✅ | `ComplianceCouncil.sol:340-390` | m-of-n approval/rejection |
-| Appeal Mechanism | ✅ | `ComplianceCouncil.sol:410-425` | Before execution delay expires |
-| BLS Signature Submission | ✅ | `ComplianceCouncil.sol:435-495` | Per-member signatures |
-| Signature Aggregation | ✅ | `ComplianceCouncil.sol:515-535` | Lagrange interpolation |
-| Threshold Verification | ✅ | `ComplianceCouncil.sol:536-550` | Aggregated signature check |
-| Key Reconstruction | ✅ | `ComplianceCouncil.sol:552-600` | Execute reveal after threshold |
-| BLS12-381 Precompiles | ✅ | `ComplianceCouncil.sol:20-24` | EIP-2537 with fallback detection |
-| **Execution Modes** | ✅ | `ComplianceCouncil.sol:29-52` | DISABLED, STRICT_ONCHAIN, HYBRID_ATTESTED |
-| **Mode Governance** | ✅ | `ComplianceCouncil.sol:159-169` | Admin-controlled with reason logging |
-| **Hybrid Attestation** | ✅ | `ComplianceCouncil.sol:178-195` | Operator confirmation for off-chain verification |
-| Pausable Operations | ✅ | `ComplianceCouncil.sol:590-610` | Emergency pause support |
+| Council Member Management | ✅ | `ComplianceCouncil.addMember` / `removeMember` / `rotateMemberKey` | BLS G1 key shares at distinct key indices in [1, r); keys unique and kept apart from the group key; removal or rotation voids the member's partial signatures, removal also its votes |
+| Member Role Types | ✅ | `IComplianceCouncil.MemberRole` | 5 roles: User, DAO, Auditor, Legal, Regulator |
+| Warrant Request Submission | ✅ | `ComplianceCouncil.submitWarrantRequest` | With document hash and jurisdiction |
+| Threshold Voting | ✅ | `ComplianceCouncil.castVote` / `concludeVoting` | m-of-n approval/rejection by active members; only votes of members still in the membership they voted in count (a removed member's vote no longer counts; key rotation keeps it) |
+| Appeal Mechanism | ✅ | `ComplianceCouncil.fileAppeal` | Before execution delay expires |
+| BLS Signature Submission | ✅ | `ComplianceCouncil.submitSignature` | Per-member partial signatures, verified on chain against the member's G1 key share; one per key registration |
+| Current Partials | ✅ | `ComplianceCouncil.getCurrentSignatures`, SDK `selectCurrentSubmissions` | Only partials whose signer still holds the key they were made under count; `getSignatures` also lists stale ones |
+| Signature Aggregation | ✅ | `ComplianceCouncil.aggregateSignatures` | Plain G2 sum (G2MSM) of validated elements; an infinity sum is rejected. Threshold (Lagrange) aggregation: on chain in `executeReconstruction`, off chain in the SDK (`aggregateWarrantSignature`) |
+| Threshold Verification | ✅ | `ComplianceCouncil.verifyThresholdSignature` | Aggregate checked against the admin-set DKG group key; signer indices validated; informational |
+| Key Reconstruction | ✅ | `ComplianceCouncil.executeReconstruction` | Needs threshold current partials. STRICT_ONCHAIN Lagrange-interpolates them at zero on chain (`BLS12381.interpolateG2AtZero`) into the group signature f(0)·H(m) and verifies it against the group key; HYBRID_ATTESTED takes the operator's attestation of the same value. Records `decryptedKeyHash` = keccak256 of the 256-byte EIP-2537 encoding of that group signature (SDK `computeDecryptedKeyHash`), which BLS uniqueness makes independent of the signing subset; the partials are public, so it is a public commitment, not a secret |
+| BLS12-381 Precompiles | ✅ | `libraries/BLS12381.sol` | Final EIP-2537 addresses, RFC 9380 hash-to-G2, known-answer detection, fails closed without them |
+| **Execution Modes** | ✅ | `ComplianceCouncil.ExecutionMode` | DISABLED, STRICT_ONCHAIN, HYBRID_ATTESTED |
+| **Mode Governance** | ✅ | `ComplianceCouncil.setExecutionMode` / `governanceOverrideMode` | Admin-controlled (or governance timelock override) with reason logging |
+| **Hybrid Attestation** | ✅ | `ComplianceCouncil.attestHybridVerification` | Operator attests the off-chain verified decryptedKeyHash (SDK `aggregateWarrantSignature`) |
+| Pausable Operations | ✅ | `ComplianceCouncil.pause` / `unpause` | Emergency pause support |
 
 ### Treasury Contract
 
+See [Treasury.md](./Treasury.md) for the full escrow flow, funds map and owner trust model.
+
 | Feature | Status | Location | Notes |
 |---------|--------|----------|-------|
-| Deposit Burns/Fees | ✅ | `Treasury.sol:151-171` | ERC20 and ETH |
-| Defensive Subsidies | ✅ | `Treasury.sol:189-273` | Counterparty-only |
-| Per-Dispute Caps | ✅ | `Treasury.sol:242-244` | Configurable |
-| Per-Participant Rolling Caps | ✅ | `Treasury.sol:247-250` | With window reset |
-| Harassment Score Checks | ✅ | `Treasury.sol:228-230` | Threshold: 50 |
-| Anti-Sybil (Single Subsidy/Dispute) | ✅ | `Treasury.sol:200-203` | Prevents double-claiming |
-| Dynamic Caps | ✅ | `Treasury.sol:497-531` | Scale caps with treasury size |
-| Tiered Subsidies | ✅ | `Treasury.sol:617-646` | Based on harassment score tiers |
+| Token and ETH deposits | ✅ | `Treasury.deposit`, `Treasury.receive` | `depositBurn` is ILRM-only and never called: ILRM burns to `0x…dEaD` |
+| Escrowed defensive co-stake | ✅ | `ILRM.depositStakeWithSubsidy` -> `Treasury.fundStakeSubsidy` | Counterparty-only, inside the stake window; the subsidy is pulled into ILRM escrow, never paid to a wallet |
+| Top-up slippage bound | ✅ | `ILRM.depositStakeWithSubsidy(disputeId, maxSubsidy, maxTopUp)` | Reverts `"Top-up exceeds max"` before and after the Treasury call; a front-run can force a revert, never an overcharge |
+| Single subsidy per (ILRM, dispute) | ✅ | `Treasury.subsidyRecipientOf` | Keyed by ILRM so a redeployed ILRM's dispute IDs do not collide; `disputeSubsidized` / `disputeSubsidyRecipient` refer to the wired ILRM |
+| Pro-rata repayment | ✅ | `ILRM._payCounterpartySide` | Full subsidy back on mutual acceptance; funder bears its share of the burn on timeout |
+| Per-Dispute Caps | ✅ | `Treasury.fundStakeSubsidy` (`maxPerDispute`) | Owner-set via `updateCaps`; grant also capped at the dispute's stake |
+| Per-Participant Rolling Caps | ✅ | `Treasury.fundStakeSubsidy` (`maxPerParticipant`, `windowDuration`) | Charged gross, not restored on repayment |
+| Reserve floor | ✅ | `Treasury.fundStakeSubsidy` (`minReserve`) | Owner-set via `setMinReserve` |
+| Harassment Score Checks | ✅ | `Treasury.fundStakeSubsidy` (`HARASSMENT_THRESHOLD`) | Threshold: 50; scores are owner-set (`setHarassmentScore`) |
+| Capped initiator incentive | ✅ | `ILRM._takeInitiatorIncentive`, `ILRM.setInitiatorIncentiveCaps` | Paid from `ILRM.tokenReserves`, see below |
+| Dynamic Caps | ❌ | - | Removed in Phase 1 (proposal: Plan 6) |
+| Tiered Subsidies | ❌ | - | Removed in Phase 1 (proposal: Plan 7) |
+| DID-based subsidies | ❌ | - | Removed in Phase 1 |
+| Harassment score decay | ❌ | - | Removed in Phase 1 |
 | Multi-Token Support | ❌ | - | Currently single ERC20 |
+
+#### Initiator incentive (ILRM token reserves)
+
+| Parameter | Default | Bounds | Notes |
+|-----------|---------|--------|-------|
+| Rate (`INITIATOR_INCENTIVE_BPS`) | 10% of the initiator stake | constant | Upper bound, paid only on non-participation |
+| `maxIncentivePerDispute` | `1e18` | `<= maxIncentivePerWindow` | Cap on a single payout |
+| `maxIncentivePerWindow` | `10e18` | none (owner trust) | Global cap across all disputes per window |
+| `incentiveWindow` | 30 days | 1-365 days | Fixed window, rolled lazily by the first payout after expiry |
+
+Each payout is `min(10% of stake, maxIncentivePerDispute, maxIncentivePerWindow - incentivePaidInWindow, tokenReserves)`;
+the initiator always gets its full stake back, and the payout never reverts. The owner sets the caps with
+`setInitiatorIncentiveCaps` (zero caps are the kill switch, usable while paused). `previewInitiatorIncentive`
+quotes a payout and `InitiatorIncentivePaid` reports every one (`amount < uncappedAmount` means a cap bound it).
+
+**Residual risk (accepted):** the counterparty can be a sybil that never stakes, so farming up to the window cap
+remains possible: at most `maxIncentivePerWindow` per window, `W * (ceil(t / T) + 1)` over any interval `t`
+(`2W` across a window boundary), and never more than the deposited reserves. A per-initiator cap is not used
+because sybil initiator addresses are free. `tokenReserves` deposits are irrevocable and leave ILRM only as
+capped incentives.
 
 ### Governance Timelock Contract
 
@@ -225,22 +254,26 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 | Sybil Score Calculation | ✅ | `DIDRegistry.sol:380-420` | Based on credentials and trust |
 | Trusted Issuer Framework | ✅ | `DIDRegistry.sol:430-480` | With trust levels and types |
 | ILRM Integration | ✅ | `ILRM.sol:1089-1264` | DID-verified disputes |
-| Treasury Integration | ✅ | `Treasury.sol:812-1044` | DID-based subsidies |
+| Treasury Integration | ❌ | - | DID-based subsidies not implemented (removed from Treasury.sol in Phase 1) |
 
 ### L3 Bridge Contracts
 
+> ⚠️ **NOT PRODUCTION-READY - MUST NOT BE DEPLOYED.** "✅" below means the code exists and is tested, not that it
+> is safe: the L3 contracts have known-unsound security (see [4.3](#43-l3app-specific-rollups-natlangchain-roadmapmd)).
+> No deploy script deploys them.
+
 | Feature | Status | Location | Notes |
 |---------|--------|----------|-------|
-| Dispute Bridging (L2→L3) | ✅ | `L3Bridge.sol:135-165` | ILRM-authorized |
-| Settlement Processing (L3→L2) | ✅ | `L3Bridge.sol:170-215` | Sequencer-signed |
-| Batch Settlements | ✅ | `L3Bridge.sol:185-195` | Up to 100 per batch |
-| State Commitment | ✅ | `L3Bridge.sol:220-275` | With challenge period |
-| State Finalization | ✅ | `L3Bridge.sol:280-310` | After 7-day period |
-| Fraud Proof System | ✅ | `L3Bridge.sol:315-380` | With challenger bonds |
-| Merkle Proof Verification | ✅ | `L3StateVerifier.sol:55-110` | Sparse tree support |
-| Batch Verification | ✅ | `L3StateVerifier.sol:115-160` | Gas-efficient |
-| Dispute Queue | ✅ | `L3DisputeBatcher.sol:75-130` | Auto-trigger |
-| Settlement Queue | ✅ | `L3DisputeBatcher.sol:135-160` | Authorized submitters |
+| Dispute Bridging (L2→L3) | ✅ | `L3Bridge.sol:276-340` | ILRM or owner-authorized bridger; not validated against the ILRM |
+| Settlement Processing (L3→L2) | ✅ | `L3Bridge.sol:345-454` | Sequencer-signed; `stateProof == 0` not tied to any root |
+| Batch Settlements | ✅ | `L3Bridge.sol:364-388` | Up to 100 per batch; invalid items skipped (`SettlementSkipped`) |
+| State Commitment | ✅ | `L3Bridge.sol:461-520` | With challenge period; no sequencer bond |
+| State Finalization | ✅ | `L3Bridge.sol:526-566` | After 7-day period |
+| Fraud Proof System | ⚠️ | `L3Bridge.sol:596-904` | Bonds/escrow sound; the proof itself checks no state transition |
+| Merkle Proof Verification | ✅ | `L3StateVerifier.sol:95-200` | Sparse tree support |
+| Batch Verification | ✅ | `L3StateVerifier.sol:149-182` | Gas-efficient |
+| Dispute Queue | ✅ | `L3DisputeBatcher.sol:187-260` | Auto-trigger with failure backoff |
+| Settlement Queue | ✅ | `L3DisputeBatcher.sol:269-425` | Sequencer-queued, submitter-relayed; unfinalized-root items kept |
 
 ### Protocol Safety Invariants
 
@@ -344,41 +377,41 @@ The following features are documented in the project documentation but not yet i
 **Status:** ✅ IMPLEMENTED
 **Source:** `dispute-membership-circuit.md:71-75`
 
-**Description:** Buffer submissions and release in batches to prevent timing-based inference attacks.
+**Description:** Buffer submissions and release them in batches, so when an action lands on ILRM is decoupled from when it was queued. Batching hides only that timing: every queued transaction (submitter, type, data) is public from the moment it is queued (see the threat model in `IBatchQueue.sol`).
 
 **Implementation:**
-- Contract: `contracts/BatchQueue.sol`
+- Contract: `contracts/scaling/BatchQueue.sol`
 - Interface: `contracts/interfaces/IBatchQueue.sol`
 
 **Features Implemented:**
 - Configurable batch size (min/max) and release intervals
-- Transaction queuing for disputes, stakes, acceptances, ZK proofs
+- Transaction queuing for dispute initiations, stake deposits and acceptances (relayed for the caller; relaying is off by default because the current ILRM has no relay entry points) and record-only evidence, ZK proofs and viewing keys
 - Chainlink Automation compatible (checkUpkeep/performUpkeep)
-- Optional order randomization within batches
-- Token and ETH escrow during queue
+- Optional order randomization within batches (cosmetic and predictable)
+- Per-transaction token escrow for queued dispute initiations; the queue accepts no ETH
 - Cancellation support (configurable)
 - Commitment hashes for verification
-- Expiration handling for stale transactions
+- Expiration of stale transactions; escrow is returned by the permissionless `reclaim()`, not refunded automatically
 
 #### 1.4 Dummy Transactions (dispute-membership-circuit.md)
 **Status:** ✅ IMPLEMENTED
 **Source:** `dispute-membership-circuit.md:76-79`
 
-**Description:** Treasury-funded automated "noop" calls at random intervals to obscure real transaction patterns.
+**Description:** Treasury-funded automated "noop" calls at pseudo-random times that add noise to transaction counts and timing. Dummies are attributable on chain (the generator is the caller of every dummy and emits an event for each), so they add noise only for observers that do not trace call frames or logs (see `IDummyTransactionGenerator.sol`).
 
 **Implementation:**
-- Contract: `contracts/DummyTransactionGenerator.sol`
+- Contract: `contracts/scaling/DummyTransactionGenerator.sol`
 - Interface: `contracts/interfaces/IDummyTransactionGenerator.sol`
 
 **Features Implemented:**
-- Configurable probability-based generation (basis points threshold)
+- Configurable probability-based generation (basis points threshold); keeper/owner only, one attempt per minInterval whatever its outcome
 - Multiple dummy tx types: VoluntaryRequest, BatchQueueEntry, ViewingKeyCommit
-- Dedicated dummy address registry (excluded from analytics)
+- Dedicated dummy address registry (labeled for off-chain analytics; attributable on chain)
 - Treasury-funded with per-period spending limits
 - Chainlink Automation compatible (checkUpkeep/performUpkeep)
-- VRF-compatible randomness (with pseudo-random fallback)
-- Configurable min/max intervals and per-period limits
-- Batch generation for low-activity periods
+- Block-derived pseudo-randomness, predictable; no VRF (no safety property depends on the randomness)
+- Configurable minimum interval and per-period limits (`maxInterval` is validated but not enforced)
+- Batch generation for low-activity periods (owner only, same caps)
 
 #### 1.5 Threshold Decryption for Compliance (dispute-membership-circuit.md)
 **Status:** ✅ IMPLEMENTED
@@ -493,7 +526,7 @@ The following features are documented in the project documentation but not yet i
 - Contract: `contracts/DIDRegistry.sol`
 - Interface: `contracts/interfaces/IDIDRegistry.sol`
 - ILRM Integration: `contracts/ILRM.sol:1089-1264`
-- Treasury Integration: `contracts/Treasury.sol:812-1044`
+- Treasury Integration: not implemented (DID-based subsidies were removed from Treasury.sol in Phase 1)
 
 **Features Implemented:**
 - DID Format: `did:nlc:<chain-id>:<address>` (ERC-725 compatible)
@@ -505,20 +538,39 @@ The following features are documented in the project documentation but not yet i
 - 5 member role types for issuers: User, DAO, Auditor, Legal, Regulator
 - DID-verified dispute initiation (`initiateBreachDisputeWithDID`)
 - DID-verified stake deposit (`depositStakeWithDID`)
-- DID-based subsidy eligibility with bonus multipliers in Treasury
+- ~~DID-based subsidy eligibility with bonus multipliers in Treasury~~ (not implemented: removed in Phase 1)
 - Configurable minimum sybil score requirements
 
 #### 4.3 L3/App-Specific Rollups (NatLangChain-Roadmap.md)
-**Status:** ✅ IMPLEMENTED
+**Status:** ⚠️ PROTOTYPE - **NOT PRODUCTION-READY, MUST NOT BE DEPLOYED**
 **Source:** `NatLangChain-Roadmap.md:162`
+
+> ⚠️ **The L3 contracts (L3Bridge, L3DisputeBatcher, L3StateVerifier) are not production-ready and must not be
+> deployed.** Their optimistic-rollup security rests on parts that do not exist yet. These gaps are known and are
+> deliberately not patched, because closing them needs a real fraud-proof system:
+> 1. **Fraud proofs prove nothing.** `_verifyFraudProof` only checks a Merkle path from
+>    `keccak256(invalidStateData)` to `claimedRoot` (and `claimedRoot != correctRoot`, a value the challenger
+>    picks); it never checks a state transition. Anyone who knows a preimage of any node of an *honest* root (a
+>    leaf and its siblings, or just the root's two children) can reject it, roll the chain back and collect the
+>    reward, so every root can be censored by anyone with a refundable bond.
+> 2. **No sequencer bond.** A sequencer that commits a fraudulent root loses nothing.
+> 3. **Settlements are not tied to finalized state.** A settlement with `stateProof == bytes32(0)` is accepted
+>    on the word of the sequencer or any settlement relayer; a nonzero `stateProof` is only checked to be a
+>    finalized root, never that the settlement is included in it.
+> 4. **Bridged disputes are not validated against the ILRM.** The ILRM or any dispute bridger can bridge
+>    arbitrary messages (IDs, parties, stakes).
+>
+> The ILRM neither bridges disputes nor consumes settlements, so L3 settlements move no stake. No deploy
+> script (`scripts/deploy.js`, `scripts/deploy-governance.ts`) deploys the L3 contracts. `test/L3KnownLimitations.t.sol`
+> pins gaps 1-4 as executable evidence.
 
 **Description:** High-throughput dispute handling via dedicated L3 rollup with optimistic state commitments and fraud proofs.
 
 **Implementation:**
 - Bridge Interface: `contracts/interfaces/IL3Bridge.sol`
-- Bridge Contract: `contracts/L3Bridge.sol`
-- State Verifier: `contracts/L3StateVerifier.sol`
-- Dispute Batcher: `contracts/L3DisputeBatcher.sol`
+- Bridge Contract: `contracts/scaling/L3Bridge.sol`
+- State Verifier: `contracts/scaling/L3StateVerifier.sol`
+- Dispute Batcher: `contracts/scaling/L3DisputeBatcher.sol`
 
 **Architecture:**
 ```
@@ -545,58 +597,67 @@ L2 (Arbitrum/Optimism)          L3 (App-Specific Rollup)
 - L3DisputeBatcher for queue management with auto-trigger
 - Sparse Merkle tree support for efficient updates
 
-**Security Model:**
+**Security Model (intended; see the warning above for what is missing):**
 - Optimistic rollup: State assumed valid unless challenged
 - Challenger bond: 0.1 ETH minimum to prevent spam
-- Fraud reward: 50% of bond for valid challenges
+- Fraud reward: fixed 0.05 ETH (50% of the minimum bond) for valid challenges, paid only from free balance
 - State chain integrity: Each commitment links to previous root
+
+**Fraud-proof lifecycle:** A challenger commits `computeFraudProofCommitHash(challenger, proof, salt)` (domain-separated and bound to the challenger, chain, bridge and full proof) with a bond against a state root. Any number of commitments may be open per root, so no challenger can block another. The reveal (2 minutes to 62 minutes after the commit) only acts on the root the bond was posted against, and every bond ends in one of three ways: **Won** (valid proof on a canonical, unchallenged root: bond + reward), **Refunded** (valid proof, but the root was already rejected or orphaned: bond only) or **Forfeited** (invalid or mismatched proof, or never revealed, via the permissionless `forfeitExpiredCommitment`). Pending bonds are escrowed and never fund rewards or `withdrawFees`. Each root's challenge deadline is snapshotted at submission, and commits close once a reveal window opened now could still be open at that deadline, so no challenge can be pending when a root becomes finalizable. Roots finalize strictly in chain order; a successful challenge on any canonical root rolls the committed head back to its parent, so that root and all its descendants can never finalize and the sequencer rebuilds from the parent. `pause()` freezes only finalization: commits, reveals, forfeits and legacy submissions are never paused, and bridging and settlements are gated by the bridge status. Disputes are bridged by the ILRM or an owner-authorized dispute bridger (`setDisputeBridger`, e.g. the L3DisputeBatcher), and settlement batches by the sequencer or an owner-authorized settlement relayer (`setSettlementRelayer`).
+
+**Settlement batches:** `processSettlementFromL3` reverts on an invalid settlement (`DisputeNotBridged`, `InvalidSettlement` for an L3 ID mismatch or a repeat, `InvalidStateRoot` for an unfinalized nonzero `stateProof`). `batchProcessSettlements` gives every item exactly those checks, in order and against the state left by the items before it, but skips a failing item with `SettlementSkipped(l2DisputeId, l3DisputeId, reason)` instead of reverting, and returns the number applied. One bad message (never bridged, already settled, duplicated within the batch, wrong L3 ID, unfinalized proof) therefore cannot block the others or get the L3DisputeBatcher settlement queue stuck. A skipped settlement leaves no trace and can be resubmitted once valid. Only batch-level checks (caller, bridge status, `BatchSizeExceeded`) revert the whole batch, in which case the batcher keeps its queue. The batcher's `processSettlementBatch` does not relay a settlement the bridge would skip only because its `stateProof` root is not finalized yet while that root can still finalize (committed, canonical, not finalized): it stays queued, in order (`SettlementDeferred`), so an early relay by any authorized submitter loses nothing. Every other settlement is relayed and leaves the queue, applied or skipped for a permanent reason (never bridged, wrong L3 ID, already settled, or a root that was never committed, was rejected or was orphaned; the sequencer must therefore commit a root before queueing settlements that reference it). A kept settlement waits at most until its root finalizes or is rejected. If every queued settlement is waiting, the call reverts `BatchNotReady`. The check is bounded: at most 50 queued settlements, each costing at most four bridge view calls.
+
+**Auto-batch backoff:** a failed auto-batch (bridge revert, missing role, inactive bridge, out of gas) never makes the queue call revert. It also backs the time trigger off (`AutoBatchDeferred`): no time-triggered attempt for 10 minutes, doubling per consecutive failure up to 1 day, so later queue calls do not each pay for a doomed retry. Manual submission is never backed off. The backoff is reset (`AutoBatchBackoffReset`) by any successful submission, `emergencyClearBatches`, the batcher configuration changes that decide where and whether auto-batches run (`setL3Bridge`, `setAutoBatchEnabled`) and the owner-only `resetAutoBatchBackoff`, which the owner calls after fixing a cause the batcher cannot observe (e.g. the bridge's `setDisputeBridger` or `setBridgeStatus`), so the time trigger does not stay off for up to a day after a fix. The size trigger is not backed off, because only the queue call that fills the batch reaches it.
+
+**Tested invariants** (`test/L3BridgeInvariants.t.sol`, stateful fuzzing): I1 the balance covers the escrowed bonds; I2 `sum(challengerBonds) == totalEscrowedBonds == sum(Pending bonds)`; I3 no reveal window is open at a root's deadline; I4 only canonical, unchallenged roots finalize, and the finalized roots are exactly the canonical prefix; I5 bond outcomes are final and each root is successfully challenged at most once; I6 the finalized head never passes the committed head, never moves back and both heads are canonical; I7 each dispute is bridged and settled at most once and `pendingSettlementsCount == totalBridgedDisputes - totalSettlements`.
 
 ### Category 5: Treasury Enhancements (Low Priority)
 
 #### 5.1 Dynamic Subsidy Caps (Treasury.md)
-**Status:** ✅ IMPLEMENTED
-**Source:** `Treasury.md:122`
+**Status:** ❌ Not implemented (removed in Phase 1)
+**Source:** `Treasury.md` (section 10)
 
 **Description:** Scale `maxPerParticipant` based on current treasury balance to ensure sustainability.
 
-**Implementation:**
-- Location: `contracts/Treasury.sol:497-531`
-- Configuration: `setDynamicCapConfig(enabled, percentageBps, floor)`
-- View functions: `calculateDynamicCap()`, `getEffectiveMaxPerParticipant()`
-
-**Features Implemented:**
-- Toggle dynamic caps on/off via `dynamicCapEnabled`
-- Configurable percentage of treasury balance (basis points)
-- Configurable floor value (minimum cap even when treasury is low)
-- Automatic integration with `requestSubsidy()` and `calculateSubsidy()`
-- Uses lower of configured cap and dynamic cap when enabled
+**Proposal (not in the code):** see Plan 6 below.
 
 #### 5.2 Tiered Subsidies (Treasury.md)
-**Status:** ✅ IMPLEMENTED
-**Source:** `Treasury.md:125`
+**Status:** ❌ Not implemented (removed in Phase 1)
+**Source:** `Treasury.md` (section 10)
 
 **Description:** Low harassment score → full subsidy; higher score → partial subsidy (graduated scale).
 
-**Implementation:**
-- Location: `contracts/Treasury.sol:617-646`
-- Configuration: `setTieredSubsidyConfig(enabled, thresholds, multipliers)`
-- View function: `getSubsidyMultiplier(participant)`
-
-**Features Implemented:**
-- 4-tier system based on harassment score thresholds
-- Tier 0: score < tier1Threshold → 100% subsidy
-- Tier 1: tier1Threshold ≤ score < tier2Threshold → tier1MultiplierBps
-- Tier 2: tier2Threshold ≤ score < tier3Threshold → tier2MultiplierBps
-- Tier 3: tier3Threshold ≤ score < HARASSMENT_THRESHOLD → tier3MultiplierBps
-- score ≥ HARASSMENT_THRESHOLD → blocked (0%)
-- Configurable thresholds and multipliers via admin function
-- Automatic integration with `requestSubsidy()` and `calculateSubsidy()`
+**Proposal (not in the code):** see Plan 7 below. Today the Treasury applies a single threshold
+(`HARASSMENT_THRESHOLD` = 50) in `fundStakeSubsidy`.
 
 #### 5.3 Multi-Token Support (Treasury.md)
 **Status:** ❌ Not Implemented
-**Source:** `Treasury.md:131`
+**Source:** `Treasury.md` (section 10)
 
 **Description:** Accept multiple staking tokens or native ETH for stakes and subsidies.
+
+#### 5.4 Initiator Incentive Caps
+**Status:** ✅ IMPLEMENTED
+
+**Description:** The non-participation initiator incentive (10% of the stake from `ILRM.tokenReserves`) could be
+farmed with sybil counterparties that never stake. It is now capped per dispute and across all disputes per
+window, with the residual risk documented.
+
+**Implementation:**
+- `ILRM._quoteInitiatorIncentive` / `ILRM._takeInitiatorIncentive`: `min(10%, maxIncentivePerDispute, window remainder, tokenReserves)`; never reverts, the initiator always gets its full stake back
+- `ILRM.setInitiatorIncentiveCaps(maxPerDispute, maxPerWindow, window)`: owner-only, window 1-365 days, per-dispute <= per-window, zero caps allowed (kill switch), emits `InitiatorIncentiveCapsUpdated`
+- `ILRM.previewInitiatorIncentive(initiatorStake)` and the `InitiatorIncentivePaid` event
+- Defaults: 1 token per dispute, 10 tokens per 30-day window (18 decimals)
+
+#### 5.5 Subsidy Slippage Bound
+**Status:** ✅ IMPLEMENTED
+
+**Description:** The Treasury grant is only known on execution; a front-run (for example sybil subsidized stakes
+draining the Treasury) could shrink it and overcharge the defender's allowance.
+
+**Implementation:**
+- `ILRM.depositStakeWithSubsidy(disputeId, maxSubsidy, maxTopUp)`: the caller's top-up (`initiatorStake - grant`) is checked against `maxTopUp` before the Treasury call (best case) and after it (actual grant), before any record or transfer
+- Reverts `"Top-up exceeds max"`, atomically; `0` means a full subsidy or a revert, `type(uint256).max` means no bound
 
 ### Category 6: Governance & Security (Low Priority)
 
@@ -902,10 +963,10 @@ To be developed after Phase 1 core stabilization is complete.
 ### Plan 6: Dynamic Treasury Caps
 
 **Priority:** Low
-**Status:** ✅ COMPLETED
+**Status:** Not implemented (proposal; removed from Treasury.sol in Phase 1)
 **Dependencies:** None
 
-#### Implemented Changes:
+#### Proposed Changes:
 
 **New State Variables:**
 | Variable | Type | Description |
@@ -926,9 +987,9 @@ To be developed after Phase 1 core stabilization is complete.
 
 | Function | Change |
 |----------|--------|
-| `requestSubsidy()` | Uses `getEffectiveMaxPerParticipant()` instead of `maxPerParticipant` |
-| `calculateSubsidy()` | Uses `getEffectiveMaxPerParticipant()` for preview |
-| `getRemainingAllowance()` | Uses effective cap for accurate allowance |
+| `fundStakeSubsidy()` | Would use `getEffectiveMaxPerParticipant()` instead of `maxPerParticipant` |
+| `calculateSubsidy()` | Would use `getEffectiveMaxPerParticipant()` for preview |
+| `getRemainingAllowance()` | Would use the effective cap for an accurate allowance |
 
 **Configuration Example:**
 ```solidity
@@ -940,7 +1001,7 @@ treasury.setDynamicCapConfig(
 );
 ```
 
-#### Files Modified:
+#### Files to Modify:
 - `contracts/Treasury.sol`
 
 ---
@@ -948,10 +1009,10 @@ treasury.setDynamicCapConfig(
 ### Plan 7: Tiered Subsidies
 
 **Priority:** Low
-**Status:** ✅ COMPLETED
+**Status:** Not implemented (proposal; removed from Treasury.sol in Phase 1)
 **Dependencies:** None
 
-#### Implemented Changes:
+#### Proposed Changes:
 
 **New State Variables:**
 | Variable | Type | Description |
@@ -995,7 +1056,7 @@ treasury.setTieredSubsidyConfig(
 );
 ```
 
-#### Files Modified:
+#### Files to Modify:
 - `contracts/Treasury.sol`
 
 ---
@@ -1080,8 +1141,8 @@ treasury.setTieredSubsidyConfig(
 
 | Struct | Description |
 |--------|-------------|
-| `BLSPublicKey` | G1 point coordinates (x, y) |
-| `BLSSignature` | G2 point coordinates (Fp2) |
+| `BLSPublicKey` | G1 point, EIP-2537 encoding (each coordinate as two 32-byte words) |
+| `BLSSignature` | G2 point, EIP-2537 encoding (each Fp2 coordinate as four 32-byte words) |
 | `ThresholdSignature` | Aggregated sig with signer indices |
 | `CouncilMember` | Member details with BLS key and role |
 | `CouncilConfig` | Threshold, voting period, delays |
@@ -1098,8 +1159,12 @@ treasury.setTieredSubsidyConfig(
 | `concludeVoting()` | Finalize voting after period ends |
 | `fileAppeal()` | Appeal approved warrant |
 | `submitSignature()` | Submit partial BLS signature |
-| `aggregateSignatures()` | Combine partial signatures |
-| `executeReconstruction()` | Reconstruct key after threshold |
+| `getCurrentSignatures()` | Partial signatures that currently count (`getSignatures()` lists every submission) |
+| `aggregateSignatures()` | Plain G2 sum of signatures (rejects an infinity sum) |
+| `setAggregatedPublicKey()` | Set the DKG group public key (admin) |
+| `getSigningMessage()` | Warrant message bound to chain id and council address |
+| `verifyThresholdSignature()` | Verify an aggregate against the group key |
+| `executeReconstruction()` | Reconstruct the group signature after threshold and record its hash as `decryptedKeyHash` |
 
 #### Member Roles:
 
@@ -1130,6 +1195,9 @@ treasury.setTieredSubsidyConfig(
 | `signPartial()` | Create partial BLS signature |
 | `aggregateSignatures()` | Lagrange coefficient aggregation |
 | `verifyThresholdSignature()` | Verify aggregated signature |
+| `selectCurrentSubmissions()` | Drop stale submissions (removed signer, rotated key) from `getSignatures()` output |
+| `aggregateWarrantSignature()` | Read current partials from the council, verify and aggregate them, return `decryptedKeyHash` |
+| `computeDecryptedKeyHash()` | `decryptedKeyHash` of a threshold signature |
 | `reconstructSecret()` | Reconstruct master secret from shares |
 | `decryptViewingKey()` | Decrypt viewing key using reconstructed secret |
 
@@ -1206,13 +1274,13 @@ The oracle is a **governed actor** with explicit responsibilities:
 | M-01: Treasury type confusion | Medium | 🔶 Acknowledged |
 | M-02: Centralization risk | Medium | ✅ Fixed (Plan 8) |
 | M-03: Missing harassment score event | Medium | ✅ Fixed |
-| M-04: requestSubsidy caller not validated | Medium | ✅ Fixed |
+| M-04: requestSubsidy caller not validated | Medium | ✅ Fixed (requestSubsidy replaced by the ILRM escrow flow) |
 | M-05: Domain separator immutability | Medium | ✅ Fixed |
 | M-06: Counter-proposal timing manipulation | Medium | 🔶 Acknowledged |
 | M-07: Deployer auto-registered as oracle | Medium | ✅ Fixed |
 | M-08: Int256 overflow edge case | Medium | ✅ Fixed |
-| M-09: Uninitialized tier threshold | Medium | ✅ Fixed |
-| M-10: Treasury harassment score decay | Medium | ✅ Fixed |
+| M-09: Uninitialized tier threshold | Medium | N/A, feature removed in Phase 1 |
+| M-10: Treasury harassment score decay | Medium | N/A, feature removed in Phase 1 |
 | M-11: GovernanceTimelock silent pause failures | Medium | ✅ Fixed |
 | M-12: ComplianceCouncil DISABLED mode lockout | Medium | ✅ Fixed |
 | C-03: ComplianceCouncil public key aggregation placeholder | Critical | ✅ Fixed |
@@ -1222,6 +1290,9 @@ The oracle is a **governed actor** with explicit responsibilities:
 | L-01: GovernanceTimelock infinite recursion | Low | ✅ Fixed |
 | L-02: ILRM dust tracking bug | Low | ✅ Fixed |
 | L-03: Dead code in FIDO verification | Low | ✅ Fixed |
+| Initiator-incentive farming via never-staking sybil counterparties (`tokenReserves` drain) | High | 🔶 Mitigated by per-dispute and per-window caps; farming up to the window cap is a documented residual risk |
+| Subsidy grant front-run overcharges the defender's allowance | Medium | ✅ Fixed (`maxTopUp` slippage bound) |
+| Treasury subsidy records collide on dispute IDs after `setILRM` to a redeployed ILRM | Medium | ✅ Fixed (records keyed by (ILRM, disputeId)) |
 
 ### Remaining Security Tasks
 
@@ -1358,10 +1429,15 @@ Timeout (T_resolution)? → TimeoutWithBurn (Burn %, Stakes Partial Return) → 
 | `STAKE_WINDOW` | 3 days | `ILRM.sol:40` |
 | `RESOLUTION_TIMEOUT` | 7 days | `ILRM.sol:43` |
 | `COUNTER_FEE_BASE` | 0.01 ETH | `ILRM.sol:46` |
-| `INITIATOR_INCENTIVE_BPS` | 1000 (10%) | `ILRM.sol:49` |
+| `INITIATOR_INCENTIVE_BPS` | 1000 (10%, before the incentive caps) | `ILRM.INITIATOR_INCENTIVE_BPS` |
+| `MIN_INCENTIVE_WINDOW` | 1 day | `ILRM.MIN_INCENTIVE_WINDOW` |
+| `MAX_INCENTIVE_WINDOW` | 365 days | `ILRM.MAX_INCENTIVE_WINDOW` |
+| `DEFAULT_MAX_INCENTIVE_PER_DISPUTE` | 1e18 (owner-settable `maxIncentivePerDispute`) | `ILRM.DEFAULT_MAX_INCENTIVE_PER_DISPUTE` |
+| `DEFAULT_MAX_INCENTIVE_PER_WINDOW` | 10e18 (owner-settable `maxIncentivePerWindow`) | `ILRM.DEFAULT_MAX_INCENTIVE_PER_WINDOW` |
+| `DEFAULT_INCENTIVE_WINDOW` | 30 days (owner-settable `incentiveWindow`) | `ILRM.DEFAULT_INCENTIVE_WINDOW` |
 | `ESCALATION_MULTIPLIER` | 150 (1.5x) | `ILRM.sol:52` |
 | `COOLDOWN_PERIOD` | 30 days | `ILRM.sol:55` |
-| `HARASSMENT_THRESHOLD` | 50 | `Treasury.sol:44` |
+| `HARASSMENT_THRESHOLD` | 50 | `NatLangChainTreasury.HARASSMENT_THRESHOLD` |
 | `MAX_ASSETS_PER_OWNER` | 100 | `AssetRegistry.sol:23` |
 
 ---

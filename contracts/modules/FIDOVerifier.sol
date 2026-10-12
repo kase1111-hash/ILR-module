@@ -36,7 +36,7 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
     uint256 private constant P256_N = 0xFFFFFFFF00000000FFFFFFFFFFFFFFFFBCE6FAADA7179E84F3B9CAC2FC632551;
 
     /// @notice P-256 curve prime (p)
-    uint256 private constant P256_P = 0xFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF - 0x00000000FFFFFFFFFFFFFFFFFFFFFFFFFFFFFFFF;
+    uint256 private constant P256_P = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFF;
 
     /// @notice P-256 curve parameter a (-3)
     uint256 private constant P256_A = 0xFFFFFFFF00000001000000000000000000000000FFFFFFFFFFFFFFFFFFFFFFFC;
@@ -102,7 +102,11 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
         bytes32 publicKeyX,
         bytes32 publicKeyY,
         bytes calldata /* attestation */
-    ) external override nonReentrant {
+    )
+        external
+        override
+        nonReentrant
+    {
         require(credentialId.length > 0, "Invalid credential ID");
         require(publicKeyX != bytes32(0), "Invalid public key X");
         require(publicKeyY != bytes32(0), "Invalid public key Y");
@@ -111,10 +115,7 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
         require(_isOnCurve(publicKeyX, publicKeyY), "Point not on P-256 curve");
 
         // Reject point at infinity (0, 0) which would allow signature bypass
-        require(
-            !(uint256(publicKeyX) == 0 && uint256(publicKeyY) == 0),
-            "Point at infinity not allowed"
-        );
+        require(!(uint256(publicKeyX) == 0 && uint256(publicKeyY) == 0), "Point at infinity not allowed");
 
         bytes32 credIdHash = keccak256(credentialId);
 
@@ -154,11 +155,12 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
     /**
      * @inheritdoc IFIDOVerifier
      */
-    function verifyAssertion(
-        address user,
-        WebAuthnAssertion calldata assertion,
-        bytes32 expectedChallenge
-    ) external override nonReentrant returns (bool valid) {
+    function verifyAssertion(address user, WebAuthnAssertion calldata assertion, bytes32 expectedChallenge)
+        external
+        override
+        nonReentrant
+        returns (bool valid)
+    {
         // Prevent replay
         require(!_usedChallenges[expectedChallenge], "Challenge already used");
         _usedChallenges[expectedChallenge] = true;
@@ -175,10 +177,7 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
         require((authData.flags & FLAG_USER_PRESENT) != 0, "User presence required");
 
         // Verify challenge in clientDataJSON
-        require(
-            _verifyClientDataChallenge(assertion.clientDataJSON, expectedChallenge),
-            "Challenge mismatch"
-        );
+        require(_verifyClientDataChallenge(assertion.clientDataJSON, expectedChallenge), "Challenge mismatch");
 
         // Parse signature
         (bytes32 r, bytes32 s) = _parseSignature(assertion.signature);
@@ -196,9 +195,7 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
 
             // Compute message hash (authenticatorData || sha256(clientDataJSON))
             bytes32 clientDataHash = sha256(assertion.clientDataJSON);
-            bytes32 messageHash = sha256(
-                abi.encodePacked(assertion.authenticatorData, clientDataHash)
-            );
+            bytes32 messageHash = sha256(abi.encodePacked(assertion.authenticatorData, clientDataHash));
 
             // Verify signature
             if (verifyP256Signature(messageHash, r, s, key.publicKeyX, key.publicKeyY)) {
@@ -216,16 +213,20 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
     /**
      * @inheritdoc IFIDOVerifier
      */
-    function verifyP256Signature(
-        bytes32 messageHash,
-        bytes32 r,
-        bytes32 s,
-        bytes32 publicKeyX,
-        bytes32 publicKeyY
-    ) public view override returns (bool valid) {
+    function verifyP256Signature(bytes32 messageHash, bytes32 r, bytes32 s, bytes32 publicKeyX, bytes32 publicKeyY)
+        public
+        view
+        override
+        returns (bool valid)
+    {
         // Validate signature components
         if (uint256(r) == 0 || uint256(r) >= P256_N) return false;
         if (uint256(s) == 0 || uint256(s) >= P256_N) return false;
+
+        // Validate the public key on both paths, like the precompile: canonical coordinates on the curve. The
+        // pure-Solidity path encodes infinity as (0,0) and never uses b, so key (0,0) or an off-curve key (e.g. the
+        // order-2 point (1,0)) would make u2*Q vanish and let anyone forge via x(u1*G) == r. (0,0) is off-curve.
+        if (!_isOnCurve(publicKeyX, publicKeyY)) return false;
 
         // Normalize s to low-s form (malleability fix)
         if (uint256(s) > P256_N / 2) {
@@ -237,7 +238,7 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
             return _verifyWithPrecompile(messageHash, r, s, publicKeyX, publicKeyY);
         }
 
-        // Fallback to pure Solidity (expensive but works everywhere)
+        // Fallback to pure Solidity (very expensive, see _verifyPureSolidity)
         return _verifyPureSolidity(messageHash, r, s, publicKeyX, publicKeyY);
     }
 
@@ -245,24 +246,19 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
      * @inheritdoc IFIDOVerifier
      * @dev Increments nonce to prevent challenge reuse/front-running
      */
-    function generateChallenge(
-        string calldata action,
-        bytes calldata data
-    ) external override returns (bytes32 challenge, uint256 deadline) {
+    function generateChallenge(string calldata action, bytes calldata data)
+        external
+        override
+        returns (bytes32 challenge, uint256 deadline)
+    {
         uint256 nonce = _nonces[msg.sender];
         // Increment nonce to prevent reuse of same challenge parameters
         _nonces[msg.sender] = nonce + 1;
 
-        challenge = keccak256(
-            abi.encodePacked(
-                msg.sender,
-                action,
-                data,
-                nonce,
-                block.timestamp,
-                block.chainid
-            )
-        );
+        // abi.encode, not encodePacked: packing the two adjacent dynamic fields made the action/data split
+        // ambiguous (("ab","c") and ("a","bc") hashed alike), so a consumer re-deriving the challenge to bind the
+        // signed action could be shown a different action for the same signature.
+        challenge = keccak256(abi.encode(msg.sender, action, data, nonce, block.timestamp, block.chainid));
         deadline = block.timestamp + challengeDeadline;
 
         emit ChallengeGenerated(msg.sender, challenge, deadline);
@@ -273,10 +269,7 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
     /**
      * @inheritdoc IFIDOVerifier
      */
-    function getKey(
-        address user,
-        bytes32 credentialIdHash
-    ) external view override returns (FIDOKey memory key) {
+    function getKey(address user, bytes32 credentialIdHash) external view override returns (FIDOKey memory key) {
         return _keys[user][credentialIdHash];
     }
 
@@ -327,36 +320,32 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
      * @dev Test if RIP-7212 precompile is available
      */
     function _testPrecompile() internal view returns (bool) {
-        // Known good test vector for P-256
-        bytes32 testHash = 0x4b688df40bcedbe641ddb16ff0a1842d9c67ea1c3bf63f3e0471baa664531d1a;
-        bytes32 testR = 0xf1abb023518351cd71d881567b1ea663ed3efcf6c5132b354f28d3b0b7d38367;
-        bytes32 testS = 0x019f4113742a2b14bd25926b49c649155f267e60d3814b4c0cc84250e46f0083;
-        bytes32 testX = 0x04a2c953e6a1f6d8a1d2d5eb4e0b8c4e6d9e8f7a2b4c5d6e8f9a0b1c2d3e4f5a6;
-        bytes32 testY = 0x1b2c3d4e5f6a7b8c9d0e1f2a3b4c5d6e7f8a9b0c1d2e3f4a5b6c7d8e9f0a1b2c;
+        // Known good P-256 test vector (generated and verified with @noble/curves)
+        bytes32 testHash = 0x6db63153beccdf2eea6fc735bfcc6b786c70f71d4702fd9a1e1edbcd4b1bd720;
+        bytes32 testR = 0xcb625de23fe666a5a6958d57a21b2f39ede272cb99314e4cb9df19459574aa64;
+        bytes32 testS = 0x467165dead78a280aa20a20071a36a3feaf6ac1539703dc29635464033ef1ef3;
+        bytes32 testX = 0x0280bdc8e5eef0f3b10436ea18b10553c17872bf98f4f3e1ade5ee0f3c67099a;
+        bytes32 testY = 0xf63eeeed2fbae9096a680f4da72a8f1554a852477f30bc4086216c1ac965ce9a;
 
-        (bool success, bytes memory result) = P256_PRECOMPILE.staticcall(
-            abi.encodePacked(testHash, testR, testS, testX, testY)
-        );
+        (bool success, bytes memory result) =
+            P256_PRECOMPILE.staticcall(abi.encodePacked(testHash, testR, testS, testX, testY));
 
         if (!success || result.length != 32) return false;
 
-        // Just check it returns something reasonable
-        return true;
+        // RIP-7212 returns 1 for a valid signature
+        return abi.decode(result, (uint256)) == 1;
     }
 
     /**
      * @dev Verify signature using RIP-7212 precompile
      */
-    function _verifyWithPrecompile(
-        bytes32 messageHash,
-        bytes32 r,
-        bytes32 s,
-        bytes32 publicKeyX,
-        bytes32 publicKeyY
-    ) internal view returns (bool) {
-        (bool success, bytes memory result) = P256_PRECOMPILE.staticcall(
-            abi.encodePacked(messageHash, r, s, publicKeyX, publicKeyY)
-        );
+    function _verifyWithPrecompile(bytes32 messageHash, bytes32 r, bytes32 s, bytes32 publicKeyX, bytes32 publicKeyY)
+        internal
+        view
+        returns (bool)
+    {
+        (bool success, bytes memory result) =
+            P256_PRECOMPILE.staticcall(abi.encodePacked(messageHash, r, s, publicKeyX, publicKeyY));
 
         if (!success || result.length != 32) return false;
 
@@ -365,15 +354,17 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
 
     /**
      * @dev Verify signature using pure Solidity (fallback)
-     * @notice This is expensive (~1M gas) but works on all chains
+     * @notice Very expensive: about 38M gas per verification (affine double-and-add with one modular inverse
+     *         per point operation), above the per-transaction gas cap on EIP-7825 chains. Practical for
+     *         eth_call checks; deploy on chains with the RIP-7212 / EIP-7951 P256VERIFY precompile.
+     *         Callers must pass inputs validated by verifyP256Signature (r, s in [1, n-1], key on the curve):
+     *         with an unvalidated key such as (0,0) this check is forgeable.
      */
-    function _verifyPureSolidity(
-        bytes32 messageHash,
-        bytes32 r,
-        bytes32 s,
-        bytes32 publicKeyX,
-        bytes32 publicKeyY
-    ) internal pure returns (bool) {
+    function _verifyPureSolidity(bytes32 messageHash, bytes32 r, bytes32 s, bytes32 publicKeyX, bytes32 publicKeyY)
+        internal
+        pure
+        returns (bool)
+    {
         // Compute w = s^(-1) mod n
         uint256 w = _modInverse(uint256(s), P256_N);
 
@@ -384,7 +375,7 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
         uint256 u2 = mulmod(uint256(r), w, P256_N);
 
         // Compute point (x1, y1) = u1 * G + u2 * publicKey
-        (uint256 x1, ) = _ecMultiply(u1, u2, uint256(publicKeyX), uint256(publicKeyY));
+        (uint256 x1,) = _ecMultiply(u1, u2, uint256(publicKeyX), uint256(publicKeyY));
 
         // Signature is valid if x1 mod n == r
         return (x1 % P256_N) == uint256(r);
@@ -393,22 +384,16 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
     /**
      * @dev Parse authenticator data
      */
-    function _parseAuthenticatorData(
-        bytes calldata authData
-    ) internal pure returns (AuthenticatorData memory) {
+    function _parseAuthenticatorData(bytes calldata authData) internal pure returns (AuthenticatorData memory) {
         return AuthenticatorData({
-            rpIdHash: bytes32(authData[0:32]),
-            flags: uint8(authData[32]),
-            signCount: uint32(bytes4(authData[33:37]))
+            rpIdHash: bytes32(authData[0:32]), flags: uint8(authData[32]), signCount: uint32(bytes4(authData[33:37]))
         });
     }
 
     /**
      * @dev Parse DER-encoded signature to (r, s)
      */
-    function _parseSignature(
-        bytes calldata sig
-    ) internal pure returns (bytes32 r, bytes32 s) {
+    function _parseSignature(bytes calldata sig) internal pure returns (bytes32 r, bytes32 s) {
         require(sig.length >= 8, "Signature too short");
 
         // DER format: 0x30 [total-length] 0x02 [r-length] [r] 0x02 [s-length] [s]
@@ -453,10 +438,11 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
      *         The challenge must appear in the correct JSON field, not just anywhere in the data
      *         WebAuthn clientDataJSON format: {"type":"webauthn.get","challenge":"<base64url>","origin":"..."}
      */
-    function _verifyClientDataChallenge(
-        bytes calldata clientDataJSON,
-        bytes32 expectedChallenge
-    ) internal pure returns (bool) {
+    function _verifyClientDataChallenge(bytes calldata clientDataJSON, bytes32 expectedChallenge)
+        internal
+        pure
+        returns (bool)
+    {
         // Look for "challenge":" pattern to find the challenge field
         bytes memory challengeFieldPattern = '"challenge":"';
 
@@ -505,10 +491,7 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
     /**
      * @dev Find pattern in data, returns -1 if not found
      */
-    function _findPattern(
-        bytes calldata data,
-        bytes memory pattern
-    ) internal pure returns (int256) {
+    function _findPattern(bytes calldata data, bytes memory pattern) internal pure returns (int256) {
         if (pattern.length > data.length) return -1;
 
         for (uint256 i = 0; i <= data.length - pattern.length; i++) {
@@ -564,49 +547,43 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
         // y^2 = x^3 + ax + b (mod p)
         uint256 lhs = mulmod(py, py, P256_P);
         uint256 rhs = addmod(
-            addmod(
-                mulmod(mulmod(px, px, P256_P), px, P256_P),
-                mulmod(P256_A, px, P256_P),
-                P256_P
-            ),
-            P256_B,
-            P256_P
+            addmod(mulmod(mulmod(px, px, P256_P), px, P256_P), mulmod(P256_A, px, P256_P), P256_P), P256_B, P256_P
         );
 
         return lhs == rhs;
     }
 
     /**
-     * @dev Modular inverse using extended Euclidean algorithm
+     * @dev Modular inverse using the extended Euclidean algorithm, for a prime modulus m and 0 < a < m
+     *      (returns 0 for a == 0). Bezout coefficients are kept reduced mod m with mulmod/addmod: both P-256
+     *      moduli exceed type(int256).max, so the former signed coefficients overflowed (a checked-arithmetic
+     *      revert) for almost every input, and the pure-Solidity verification fallback reverted in practice.
+     *      Invariant: t_i * a == r_i (mod m).
      */
     function _modInverse(uint256 a, uint256 m) internal pure returns (uint256) {
         if (a == 0) return 0;
 
-        int256 t1 = 0;
-        int256 t2 = 1;
+        uint256 t1 = 0;
+        uint256 t2 = 1;
         uint256 r1 = m;
         uint256 r2 = a;
 
         while (r2 != 0) {
+            // Exact Euclidean quotient: the floor is intended, so there is no precision loss to avoid
             uint256 q = r1 / r2;
-            (t1, t2) = (t2, t1 - int256(q) * t2);
-            (r1, r2) = (r2, r1 - q * r2);
+            (t1, t2) = (t2, addmod(t1, m - mulmod(q, t2, m), m));
+            (r1, r2) = (r2, r1 % r2);
         }
 
-        if (t1 < 0) t1 += int256(m);
-        return uint256(t1);
+        // r1 == gcd(a, m) == 1 for prime m, so t1 * a == 1 (mod m)
+        return t1;
     }
 
     /**
      * @dev Elliptic curve point multiplication
      * @notice Simplified - in production, use optimized implementation
      */
-    function _ecMultiply(
-        uint256 u1,
-        uint256 u2,
-        uint256 pubX,
-        uint256 pubY
-    ) internal pure returns (uint256, uint256) {
+    function _ecMultiply(uint256 u1, uint256 u2, uint256 pubX, uint256 pubY) internal pure returns (uint256, uint256) {
         // P-256 generator point
         uint256 gx = 0x6B17D1F2E12C4247F8BCE6E563A440F277037D812DEB33A0F4A13945D898C296;
         uint256 gy = 0x4FE342E2FE1A7F9B8EE7EB4A7C0F9E162BCE33576B315ECECBB6406837BF51F5;
@@ -624,21 +601,17 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
     /**
      * @dev Scalar multiplication on P-256
      */
-    function _scalarMult(
-        uint256 px,
-        uint256 py,
-        uint256 scalar
-    ) internal pure returns (uint256, uint256) {
+    function _scalarMult(uint256 px, uint256 py, uint256 scalar) internal pure returns (uint256, uint256) {
         uint256 rx = 0;
         uint256 ry = 0;
-        uint256 tx = px;
-        uint256 ty = py;
+        uint256 qx = px;
+        uint256 qy = py;
 
         while (scalar > 0) {
             if (scalar & 1 == 1) {
-                (rx, ry) = _ecAdd(rx, ry, tx, ty);
+                (rx, ry) = _ecAdd(rx, ry, qx, qy);
             }
-            (tx, ty) = _ecDouble(tx, ty);
+            (qx, qy) = _ecDouble(qx, qy);
             scalar >>= 1;
         }
 
@@ -662,11 +635,7 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
         uint256 x3 = addmod(mulmod(lambda, lambda, P256_P), P256_P - mulmod(2, px, P256_P), P256_P);
 
         // y3 = lambda*(x - x3) - y
-        uint256 y3 = addmod(
-            mulmod(lambda, addmod(px, P256_P - x3, P256_P), P256_P),
-            P256_P - py,
-            P256_P
-        );
+        uint256 y3 = addmod(mulmod(lambda, addmod(px, P256_P - x3, P256_P), P256_P), P256_P - py, P256_P);
 
         return (x3, y3);
     }
@@ -674,12 +643,7 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
     /**
      * @dev Point addition on P-256
      */
-    function _ecAdd(
-        uint256 x1,
-        uint256 y1,
-        uint256 x2,
-        uint256 y2
-    ) internal pure returns (uint256, uint256) {
+    function _ecAdd(uint256 x1, uint256 y1, uint256 x2, uint256 y2) internal pure returns (uint256, uint256) {
         if (x1 == 0 && y1 == 0) return (x2, y2);
         if (x2 == 0 && y2 == 0) return (x1, y1);
 
@@ -689,25 +653,14 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
         }
 
         // lambda = (y2 - y1) / (x2 - x1)
-        uint256 lambda = mulmod(
-            addmod(y2, P256_P - y1, P256_P),
-            _modInverse(addmod(x2, P256_P - x1, P256_P), P256_P),
-            P256_P
-        );
+        uint256 lambda =
+            mulmod(addmod(y2, P256_P - y1, P256_P), _modInverse(addmod(x2, P256_P - x1, P256_P), P256_P), P256_P);
 
         // x3 = lambda^2 - x1 - x2
-        uint256 x3 = addmod(
-            addmod(mulmod(lambda, lambda, P256_P), P256_P - x1, P256_P),
-            P256_P - x2,
-            P256_P
-        );
+        uint256 x3 = addmod(addmod(mulmod(lambda, lambda, P256_P), P256_P - x1, P256_P), P256_P - x2, P256_P);
 
         // y3 = lambda*(x1 - x3) - y1
-        uint256 y3 = addmod(
-            mulmod(lambda, addmod(x1, P256_P - x3, P256_P), P256_P),
-            P256_P - y1,
-            P256_P
-        );
+        uint256 y3 = addmod(mulmod(lambda, addmod(x1, P256_P - x3, P256_P), P256_P), P256_P - y1, P256_P);
 
         return (x3, y3);
     }

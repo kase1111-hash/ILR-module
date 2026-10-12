@@ -12,6 +12,25 @@ import "../interfaces/IILRM.sol";
 /**
  * @title L3Bridge
  * @notice Bridge contract connecting L2 ILRM to App-Specific L3 Rollup
+ *
+ * @custom:security-warning NOT PRODUCTION-READY - MUST NOT BE DEPLOYED.
+ * This is a deferred, experimental scaling module. Its optimistic-rollup security rests on parts that do not
+ * exist yet; closing these gaps needs a real fraud-proof system, not a patch:
+ * 1. Fraud proofs prove nothing. _verifyFraudProof only checks a Merkle path from keccak256(invalidStateData)
+ *    to claimedRoot (and claimedRoot != correctRoot, a value the challenger picks); it never checks a state
+ *    transition. Anyone who knows a preimage of any node of an HONEST root - a leaf and its siblings, or just
+ *    the root's two children - can "prove fraud", reject the root, roll the chain back and collect the
+ *    reward. Every root can therefore be censored by anyone with a refundable bond.
+ * 2. There is no sequencer bond. A sequencer that commits a fraudulent root loses nothing; rewards are paid
+ *    only from the bridge's free balance.
+ * 3. Settlements are not tied to finalized state. A settlement with stateProof == bytes32(0) is accepted on
+ *    the word of the sequencer or of any settlement relayer; a nonzero stateProof is only checked to be a
+ *    finalized root, never that the settlement is included in it.
+ * 4. Bridged disputes are not validated against the ILRM. The ILRM or any dispute bridger can bridge
+ *    arbitrary messages (IDs, parties, stakes) that need not exist or match on L2.
+ * The ILRM itself neither bridges disputes nor consumes settlements: a settlement here only emits an event
+ * and moves no stake. No deploy script deploys this contract.
+ *
  * @dev Enables high-throughput dispute handling via dedicated rollup
  *
  * Key Features:
@@ -30,11 +49,49 @@ import "../interfaces/IILRM.sol";
  * - Sequencer signature verification
  * - Commit-reveal prevents MEV front-running of fraud proofs
  *
- * Commit-Reveal Scheme (MEV Protection):
- * 1. Challenger commits hash(proof + salt) with bond
- * 2. After MIN_REVEAL_DELAY (2 min), challenger reveals proof
- * 3. Reveal must occur within MAX_REVEAL_WINDOW (1 hour)
- * 4. Only original committer can reveal, preventing front-running
+ * Commit-Reveal Fraud Proofs (MEV protection without challenge griefing):
+ * 1. The challenger commits
+ *    commitHash = keccak256(abi.encode(FRAUD_PROOF_COMMIT_TYPEHASH, block.chainid, address(bridge),
+ *                 challenger, keccak256(abi.encode(proof)), salt))
+ *    against a state root with a bond >= MIN_CHALLENGER_BOND (see computeFraudProofCommitHash).
+ *    The hash binds the challenger, so a copied hash or a copied reveal is useless to anyone else.
+ * 2. Any number of commitments may be open against the same root. They are keyed by
+ *    (challenger, commitHash), so nobody can occupy, squat or block another challenger's commitment.
+ * 3. After MIN_REVEAL_DELAY (2 min) and within MAX_REVEAL_WINDOW (1 hour) the same challenger reveals.
+ *    The reveal only acts on the root the bond was posted against.
+ * 4. Every bond ends in exactly one outcome:
+ *    - Won: valid proof on a canonical, unchallenged root -> bond + FRAUD_PROOF_REWARD
+ *    - Refunded: valid proof, but the root was already rejected or orphaned -> bond only
+ *    - Forfeited: invalid or mismatched proof, or never revealed (forfeitExpiredCommitment) -> bond kept
+ *    Pending bonds are escrowed (totalEscrowedBonds) and never fund rewards or fee withdrawals.
+ * 5. Each root's challenge deadline is snapshotted at submission. Commits close once
+ *    block.timestamp + MIN_REVEAL_DELAY + MAX_REVEAL_WINDOW >= deadline, so no reveal window can still
+ *    be open when the root becomes finalizable.
+ *
+ * Chain Model:
+ * - Every submitted root gets a 1-based height on the canonical chain.
+ * - Roots finalize strictly in chain order (height latestFinalizedHeight + 1).
+ * - A successful challenge on any canonical root rolls the committed head back to that root's parent.
+ *   The root and all its descendants become non-canonical and can never finalize; the sequencer rebuilds
+ *   from the parent.
+ *
+ * Pause Semantics:
+ * - pause() freezes finalization only. Commits, reveals, forfeits and legacy submissions stay open,
+ *   so a pause can never be used to run out a challenge window.
+ * - Bridging, settlements and state commitments are gated by bridgeStatus (onlyActive).
+ *
+ * Roles:
+ * - Owner: configuration, roles, pause, withdrawal of free (non-escrowed) balance
+ * - Sequencer: state commitments and settlements
+ * - ILRM or owner-authorized dispute bridgers: bridgeDisputeToL3 / bridgeDisputeBatchToL3
+ * - Sequencer or owner-authorized settlement relayers: batchProcessSettlements
+ *
+ * Settlement batches:
+ * - processSettlementFromL3 reverts on an invalid settlement. batchProcessSettlements applies exactly the
+ *   same checks to each item in order, but skips a failing item (SettlementSkipped with the reason) instead
+ *   of reverting, so one bad message (never bridged, already settled, duplicated in the batch, L3 ID
+ *   mismatch, unfinalized stateProof) cannot block the others. Only caller, status and size checks revert
+ *   the whole batch.
  */
 contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     using ECDSA for bytes32;
@@ -48,14 +105,14 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     /// @notice Minimum challenger bond (0.1 ETH)
     uint256 public constant MIN_CHALLENGER_BOND = 0.1 ether;
 
-    /// @notice Fraud proof reward percentage (50% of bond)
+    /// @notice Fraud proof reward percentage (50% of the minimum bond)
     uint256 public constant FRAUD_REWARD_BPS = 5000;
 
-    /// @notice Maximum batch size for settlements
+    /// @notice Maximum batch size for settlements and dispute bridging
     uint256 public constant MAX_BATCH_SIZE = 100;
 
     /// @notice Basis points denominator
-    uint256 public constant BPS_DENOMINATOR = 10000;
+    uint256 public constant BPS_DENOMINATOR = 10_000;
 
     /// @notice Minimum reveal delay after commitment (prevents same-block front-running)
     /// @dev FIX H-02: MEV protection via commit-reveal scheme
@@ -63,6 +120,14 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
 
     /// @notice Maximum reveal window after min delay (must reveal within this window)
     uint256 public constant MAX_REVEAL_WINDOW = 1 hours;
+
+    /// @notice Domain-separated type hash for fraud-proof commitments
+    bytes32 public constant FRAUD_PROOF_COMMIT_TYPEHASH = keccak256(
+        "L3Bridge.FraudProofCommit(uint256 chainId,address bridge,address challenger,bytes32 proofHash,bytes32 salt)"
+    );
+
+    /// @notice Fixed reward for a winning fraud proof (0.05 ETH), paid only from free balance
+    uint256 public constant FRAUD_PROOF_REWARD = (MIN_CHALLENGER_BOND * FRAUD_REWARD_BPS) / BPS_DENOMINATOR;
 
     // ============ State Variables ============
 
@@ -119,24 +184,46 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     uint256 public pendingSettlementsCount;
 
     /// @notice Latest committed (but possibly unfinalized) state root
-    /// @dev FIX M-03: Tracks latest commitment to prevent chain forks
+    /// @dev FIX M-03: Tracks latest commitment to prevent chain forks; rolled back to the parent of a
+    ///      rejected root
     bytes32 public latestCommittedRoot;
 
-    /// @notice Challenger bonds
+    /// @notice Escrowed bond total per challenger (sum of that challenger's Pending commitments)
     mapping(address => uint256) public challengerBonds;
 
-    /// @notice Active fraud challenges
+    /// @notice Active fraud challenges (state root -> winning challenger)
     mapping(bytes32 => address) private _activeChallenges;
 
     /// @notice Fraud proof commitments (commit-reveal for MEV protection)
-    /// @dev FIX H-02: Maps commit hash -> commitment details
-    mapping(bytes32 => FraudProofCommitment) private _fraudProofCommitments;
-
-    /// @notice Maps state root -> commit hash (for tracking pending reveals)
-    mapping(bytes32 => bytes32) private _stateRootCommitments;
+    /// @dev Keyed by challenger, then commit hash; any number may be open per state root
+    mapping(address => mapping(bytes32 => FraudProofCommitment)) private _fraudProofCommitments;
 
     /// @notice Whether commit-reveal mode is enabled (default: true for MEV protection)
     bool public commitRevealEnabled = true;
+
+    /// @notice Challenge deadline per state root, snapshotted at submission
+    mapping(bytes32 => uint256) private _challengeDeadlines;
+
+    /// @notice 1-based chain height per submitted state root
+    mapping(bytes32 => uint256) private _rootHeights;
+
+    /// @notice Canonical state root at each height (valid up to latestCommittedHeight)
+    mapping(uint256 => bytes32) private _canonicalRootAt;
+
+    /// @notice Height of the committed chain head
+    uint256 public latestCommittedHeight;
+
+    /// @notice Height of the latest finalized root
+    uint256 public latestFinalizedHeight;
+
+    /// @notice Total of all Pending fraud-proof bonds held in escrow
+    uint256 public totalEscrowedBonds;
+
+    /// @notice Accounts (besides the ILRM) allowed to bridge disputes to L3
+    mapping(address => bool) public disputeBridgers;
+
+    /// @notice Accounts (besides the sequencer) allowed to relay settlement batches
+    mapping(address => bool) public settlementRelayers;
 
     // ============ Constructor ============
 
@@ -148,7 +235,7 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
         // Default sequencer config
         sequencerConfig = SequencerConfig({
             sequencerAddress: msg.sender,
-            commitmentInterval: 100,      // Every 100 L3 blocks
+            commitmentInterval: 100, // Every 100 L3 blocks
             challengePeriod: DEFAULT_CHALLENGE_PERIOD,
             minBatchSize: 1,
             maxBatchSize: MAX_BATCH_SIZE
@@ -169,8 +256,15 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
         _;
     }
 
-    modifier onlyILRM() {
-        require(msg.sender == address(ilrm), "Only ILRM");
+    modifier onlyDisputeBridger() {
+        if (msg.sender != address(ilrm) && !disputeBridgers[msg.sender]) revert NotAuthorizedBridger(msg.sender);
+        _;
+    }
+
+    modifier onlySequencerOrRelayer() {
+        if (msg.sender != sequencerConfig.sequencerAddress && !settlementRelayers[msg.sender]) {
+            revert NotSequencer(msg.sender);
+        }
         _;
     }
 
@@ -179,83 +273,169 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     /**
      * @inheritdoc IL3Bridge
      */
-    function bridgeDisputeToL3(
-        DisputeInitiationMessage calldata message
-    ) external override onlyILRM onlyActive nonReentrant returns (uint256 l3DisputeId) {
-        uint256 l2Id = message.l2DisputeId;
-
+    function bridgeDisputeToL3(DisputeInitiationMessage calldata message)
+        external
+        override
+        onlyDisputeBridger
+        onlyActive
+        nonReentrant
+        returns (uint256 l3DisputeId)
+    {
         // Ensure not already bridged
-        if (_l2ToL3DisputeId[l2Id] != 0) {
-            revert DisputeAlreadyBridged(l2Id);
+        if (_l2ToL3DisputeId[message.l2DisputeId] != 0) {
+            revert DisputeAlreadyBridged(message.l2DisputeId);
         }
 
+        l3DisputeId = _bridgeDispute(message);
+    }
+
+    /**
+     * @inheritdoc IL3Bridge
+     */
+    function bridgeDisputeBatchToL3(DisputeInitiationMessage[] calldata messages)
+        external
+        override
+        onlyDisputeBridger
+        onlyActive
+        nonReentrant
+        returns (uint256[] memory l3DisputeIds)
+    {
+        uint256 len = messages.length;
+        if (len > MAX_BATCH_SIZE) {
+            revert BatchSizeExceeded(len, MAX_BATCH_SIZE);
+        }
+
+        l3DisputeIds = new uint256[](len);
+        for (uint256 i = 0; i < len; i++) {
+            uint256 l2Id = messages[i].l2DisputeId;
+            uint256 existing = _l2ToL3DisputeId[l2Id];
+            if (existing != 0) {
+                // Already bridged (possibly earlier in this batch): skip instead of failing the batch
+                emit DisputeBridgeSkipped(l2Id, existing);
+            } else {
+                l3DisputeIds[i] = _bridgeDispute(messages[i]);
+            }
+        }
+    }
+
+    /**
+     * @notice Assign an L3 ID to a not-yet-bridged dispute and record it
+     */
+    function _bridgeDispute(DisputeInitiationMessage calldata m) internal returns (uint256 l3Id) {
+        uint256 l2Id = m.l2DisputeId;
+
         // Assign L3 ID
-        _l3DisputeCounter++;
-        l3DisputeId = _l3DisputeCounter;
+        l3Id = ++_l3DisputeCounter;
 
         // Store mappings
-        _l2ToL3DisputeId[l2Id] = l3DisputeId;
-        _l3ToL2DisputeId[l3DisputeId] = l2Id;
-        _bridgedDisputes[l2Id] = message;
+        _l2ToL3DisputeId[l2Id] = l3Id;
+        _l3ToL2DisputeId[l3Id] = l2Id;
+        _bridgedDisputes[l2Id] = m;
 
         totalBridgedDisputes++;
         // FIX M-02: Track pending (unsettled) disputes
         pendingSettlementsCount++;
 
-        emit DisputeBridgedToL3(l2Id, l3DisputeId, message.initiator, message.stakeAmount);
+        emit DisputeBridgedToL3(l2Id, l3Id, m.initiator, m.stakeAmount);
     }
 
     /**
      * @inheritdoc IL3Bridge
      */
-    function processSettlementFromL3(
-        DisputeSettlementMessage calldata message
-    ) external override onlySequencer onlyActive nonReentrant {
-        _processSettlement(message);
+    function processSettlementFromL3(DisputeSettlementMessage calldata message)
+        external
+        override
+        onlySequencer
+        onlyActive
+        nonReentrant
+    {
+        SettlementSkipReason reason = _checkSettlement(message);
+        if (reason != SettlementSkipReason.None) {
+            _revertInvalidSettlement(message, reason);
+        }
+        _applySettlement(message);
     }
 
     /**
      * @inheritdoc IL3Bridge
+     * @dev Equivalent to calling processSettlementFromL3 once per message and ignoring the item-level
+     *      reverts: a bad message is skipped, so it can never block the valid ones (or a relayed queue).
      */
-    function batchProcessSettlements(
-        DisputeSettlementMessage[] calldata messages
-    ) external override onlySequencer onlyActive nonReentrant {
-        if (messages.length > MAX_BATCH_SIZE) {
-            revert BatchSizeExceeded(messages.length, MAX_BATCH_SIZE);
+    function batchProcessSettlements(DisputeSettlementMessage[] calldata messages)
+        external
+        override
+        onlySequencerOrRelayer
+        onlyActive
+        nonReentrant
+        returns (uint256 processed)
+    {
+        uint256 len = messages.length;
+        if (len > MAX_BATCH_SIZE) {
+            revert BatchSizeExceeded(len, MAX_BATCH_SIZE);
         }
 
-        for (uint256 i = 0; i < messages.length; i++) {
-            _processSettlement(messages[i]);
+        for (uint256 i = 0; i < len; i++) {
+            DisputeSettlementMessage calldata message = messages[i];
+            // Checked against the state left by the earlier items, so an in-batch duplicate is AlreadySettled
+            SettlementSkipReason reason = _checkSettlement(message);
+            if (reason == SettlementSkipReason.None) {
+                _applySettlement(message);
+                processed++;
+            } else {
+                emit SettlementSkipped(message.l2DisputeId, message.l3DisputeId, reason);
+            }
         }
     }
 
     /**
-     * @notice Internal settlement processing
+     * @notice Validate a settlement against the current state (shared by the single and batch paths)
+     * @return reason None if the settlement may be applied, otherwise the first check it fails
      */
-    function _processSettlement(DisputeSettlementMessage calldata message) internal {
+    function _checkSettlement(DisputeSettlementMessage calldata message)
+        internal
+        view
+        returns (SettlementSkipReason reason)
+    {
         uint256 l2Id = message.l2DisputeId;
+        uint256 l3Id = _l2ToL3DisputeId[l2Id];
 
         // Verify dispute was bridged
-        if (_l2ToL3DisputeId[l2Id] == 0) {
-            revert DisputeNotBridged(l2Id);
-        }
+        if (l3Id == 0) return SettlementSkipReason.NotBridged;
 
         // Verify L3 ID matches
-        if (_l2ToL3DisputeId[l2Id] != message.l3DisputeId) {
-            revert InvalidSettlement(l2Id);
-        }
+        if (l3Id != message.l3DisputeId) return SettlementSkipReason.L3DisputeIdMismatch;
 
         // Verify not already settled
-        if (_settledDisputes[l2Id]) {
-            revert InvalidSettlement(l2Id);
+        if (_settledDisputes[l2Id]) return SettlementSkipReason.AlreadySettled;
+
+        // Verify state proof is from finalized root.
+        // For immediate settlements, proof can be bytes32(0) on the sequencer's (or relayer's) word alone.
+        // For delayed settlements, must reference finalized state (inclusion in that root is NOT checked).
+        if (message.stateProof != bytes32(0) && !_finalizedStates[message.stateProof]) {
+            return SettlementSkipReason.StateRootNotFinalized;
         }
 
-        // Verify state proof is from finalized root
-        if (!_finalizedStates[message.stateProof] && message.stateProof != bytes32(0)) {
-            // For immediate settlements, proof can be bytes32(0) with sequencer signature
-            // For delayed settlements, must reference finalized state
-            revert InvalidStateRoot(message.stateProof);
-        }
+        return SettlementSkipReason.None;
+    }
+
+    /**
+     * @notice Revert with the error processSettlementFromL3 has always used for a failed check
+     */
+    function _revertInvalidSettlement(DisputeSettlementMessage calldata message, SettlementSkipReason reason)
+        internal
+        pure
+    {
+        if (reason == SettlementSkipReason.NotBridged) revert DisputeNotBridged(message.l2DisputeId);
+        if (reason == SettlementSkipReason.StateRootNotFinalized) revert InvalidStateRoot(message.stateProof);
+        // L3DisputeIdMismatch or AlreadySettled
+        revert InvalidSettlement(message.l2DisputeId);
+    }
+
+    /**
+     * @notice Record a settlement that passed _checkSettlement
+     */
+    function _applySettlement(DisputeSettlementMessage calldata message) internal {
+        uint256 l2Id = message.l2DisputeId;
 
         // Mark as settled
         _settledDisputes[l2Id] = true;
@@ -266,11 +446,7 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
         }
 
         emit DisputeSettledFromL3(
-            l2Id,
-            message.l3DisputeId,
-            message.outcome,
-            message.initiatorReturn,
-            message.counterpartyReturn
+            l2Id, message.l3DisputeId, message.outcome, message.initiatorReturn, message.counterpartyReturn
         );
 
         // Note: Actual stake distribution is handled by ILRM
@@ -282,10 +458,19 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     /**
      * @inheritdoc IL3Bridge
      */
-    function submitStateCommitment(
-        StateCommitment calldata commitment
-    ) external override onlySequencer onlyActive nonReentrant {
+    function submitStateCommitment(StateCommitment calldata commitment)
+        external
+        override
+        onlySequencer
+        onlyActive
+        nonReentrant
+    {
         bytes32 root = commitment.stateRoot;
+
+        // The zero root is reserved (it means "no root" throughout the bridge)
+        if (root == bytes32(0)) {
+            revert InvalidStateRoot(root);
+        }
 
         // Verify not already committed
         if (_commitmentTimestamps[root] != 0) {
@@ -296,20 +481,20 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
         // This prevents forks where multiple commitments point to the same previousRoot
         if (latestCommittedRoot != bytes32(0)) {
             // Must chain from the latest committed root
-            require(commitment.previousRoot == latestCommittedRoot, "Invalid chain: must reference latest committed root");
+            require(
+                commitment.previousRoot == latestCommittedRoot, "Invalid chain: must reference latest committed root"
+            );
         } else if (latestFinalizedRoot != bytes32(0)) {
             // If no pending commitments, chain from latest finalized
-            require(commitment.previousRoot == latestFinalizedRoot, "Invalid chain: must reference latest finalized root");
+            require(
+                commitment.previousRoot == latestFinalizedRoot, "Invalid chain: must reference latest finalized root"
+            );
         }
         // else: genesis case - no previous root required
 
         // Verify sequencer signature
-        bytes32 messageHash = keccak256(abi.encodePacked(
-            root,
-            commitment.blockNumber,
-            commitment.disputeCount,
-            commitment.previousRoot
-        ));
+        bytes32 messageHash =
+            keccak256(abi.encodePacked(root, commitment.blockNumber, commitment.disputeCount, commitment.previousRoot));
 
         bytes32 ethSignedHash = messageHash.toEthSignedMessageHash();
         address signer = ethSignedHash.recover(commitment.sequencerSignature);
@@ -324,29 +509,30 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
         // FIX M-03: Track latest committed root for chain integrity
         latestCommittedRoot = root;
 
-        emit StateCommitmentSubmitted(
-            root,
-            commitment.blockNumber,
-            commitment.disputeCount,
-            msg.sender
-        );
+        // Place the root on the canonical chain and snapshot its challenge deadline
+        uint256 height = latestCommittedHeight + 1;
+        _rootHeights[root] = height;
+        _canonicalRootAt[height] = root;
+        latestCommittedHeight = height;
+        _challengeDeadlines[root] = block.timestamp + sequencerConfig.challengePeriod;
+
+        emit StateCommitmentSubmitted(root, commitment.blockNumber, commitment.disputeCount, msg.sender);
     }
 
     /**
      * @inheritdoc IL3Bridge
+     * @dev Frozen while paused. Roots finalize strictly in chain order and only while canonical.
      */
-    function finalizeStateCommitment(bytes32 stateRoot) external override nonReentrant {
-        uint256 commitTime = _commitmentTimestamps[stateRoot];
-
+    function finalizeStateCommitment(bytes32 stateRoot) external override nonReentrant whenNotPaused {
         // Verify commitment exists
-        if (commitTime == 0) {
+        if (_commitmentTimestamps[stateRoot] == 0) {
             revert InvalidStateRoot(stateRoot);
         }
 
-        // Verify challenge period passed
-        uint256 elapsed = block.timestamp - commitTime;
-        if (elapsed < sequencerConfig.challengePeriod) {
-            revert ChallengePeriodNotPassed(sequencerConfig.challengePeriod - elapsed);
+        // Verify challenge period passed (deadline snapshotted at submission)
+        uint256 deadline = _challengeDeadlines[stateRoot];
+        if (block.timestamp < deadline) {
+            revert ChallengePeriodNotPassed(deadline - block.timestamp);
         }
 
         // Verify not already finalized
@@ -359,9 +545,21 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
             revert InvalidStateRoot(stateRoot); // Challenged, cannot finalize
         }
 
+        // A root orphaned by a challenge on an ancestor can never finalize
+        if (!_isCanonical(stateRoot)) {
+            revert StateRootNotCanonical(stateRoot);
+        }
+
+        // Finalize strictly in chain order
+        uint256 height = _rootHeights[stateRoot];
+        if (height != latestFinalizedHeight + 1) {
+            revert ParentNotFinalized(_stateCommitments[stateRoot].previousRoot);
+        }
+
         // Finalize
         _finalizedStates[stateRoot] = true;
         latestFinalizedRoot = stateRoot;
+        latestFinalizedHeight = height;
         latestFinalizedBlock = _stateCommitments[stateRoot].blockNumber;
 
         emit StateCommitmentFinalized(stateRoot, latestFinalizedBlock);
@@ -370,10 +568,7 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     /**
      * @inheritdoc IL3Bridge
      */
-    function getLatestFinalizedState() external view override returns (
-        bytes32 stateRoot,
-        uint256 blockNumber
-    ) {
+    function getLatestFinalizedState() external view override returns (bytes32 stateRoot, uint256 blockNumber) {
         return (latestFinalizedRoot, latestFinalizedBlock);
     }
 
@@ -384,16 +579,21 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
         return _finalizedStates[stateRoot];
     }
 
+    /**
+     * @notice Whether a root is on the current canonical chain (at or below the committed head)
+     */
+    function _isCanonical(bytes32 root) internal view returns (bool) {
+        uint256 h = _rootHeights[root];
+        return h != 0 && h <= latestCommittedHeight && _canonicalRootAt[h] == root;
+    }
+
     // ============ Fraud Proofs (Commit-Reveal for MEV Protection) ============
 
     /**
      * @inheritdoc IL3Bridge
-     * @dev FIX H-02: Phase 1 of commit-reveal scheme for MEV protection
+     * @dev FIX H-02: Phase 1 of commit-reveal scheme for MEV protection. Never paused.
      */
-    function commitFraudProof(
-        bytes32 commitHash,
-        bytes32 stateRoot
-    ) external payable override nonReentrant whenNotPaused {
+    function commitFraudProof(bytes32 commitHash, bytes32 stateRoot) external payable override nonReentrant {
         // Verify commit-reveal mode is enabled
         require(commitRevealEnabled, "Commit-reveal disabled");
 
@@ -402,85 +602,53 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
             revert InsufficientChallengerBond();
         }
 
-        // Verify state is committed but not finalized
-        if (_commitmentTimestamps[stateRoot] == 0) {
-            revert InvalidStateRoot(stateRoot);
-        }
-
-        if (_finalizedStates[stateRoot]) {
-            revert ChallengePeriodExpired();
-        }
-
-        // Check if already challenged
-        if (_activeChallenges[stateRoot] != address(0)) {
-            revert InvalidStateRoot(stateRoot);
-        }
-
-        // Verify still in challenge period (with buffer for reveal window)
-        uint256 elapsed = block.timestamp - _commitmentTimestamps[stateRoot];
-        if (elapsed >= sequencerConfig.challengePeriod - MIN_REVEAL_DELAY - MAX_REVEAL_WINDOW) {
-            revert ChallengePeriodExpired();
-        }
-
-        // Verify no existing commitment for this state root
-        if (_stateRootCommitments[stateRoot] != bytes32(0)) {
+        if (commitHash == bytes32(0)) {
             revert InvalidCommitment();
         }
 
-        // Verify this commit hash is not already used
-        if (_fraudProofCommitments[commitHash].challenger != address(0)) {
+        // Committed, not finalized, not already rejected, still canonical
+        _requireChallengeable(stateRoot);
+
+        // A reveal window opened now must close before the root becomes finalizable
+        if (block.timestamp + MIN_REVEAL_DELAY + MAX_REVEAL_WINDOW >= _challengeDeadlines[stateRoot]) {
+            revert ChallengePeriodExpired();
+        }
+
+        // Commitments are per challenger: only the challenger's own earlier use of this hash can collide
+        FraudProofCommitment storage commitment = _fraudProofCommitments[msg.sender][commitHash];
+        if (commitment.status != CommitmentStatus.None) {
             revert InvalidCommitment();
         }
 
-        // Store commitment
-        _fraudProofCommitments[commitHash] = FraudProofCommitment({
-            commitHash: commitHash,
-            challenger: msg.sender,
-            bond: msg.value,
-            commitTime: block.timestamp,
-            revealed: false
-        });
+        commitment.commitHash = commitHash;
+        commitment.stateRoot = stateRoot;
+        commitment.challenger = msg.sender;
+        commitment.status = CommitmentStatus.Pending;
+        commitment.bond = msg.value;
+        commitment.commitTime = block.timestamp;
 
-        _stateRootCommitments[stateRoot] = commitHash;
+        totalEscrowedBonds += msg.value;
+        challengerBonds[msg.sender] += msg.value;
 
         emit FraudProofCommitted(commitHash, stateRoot, msg.sender, msg.value);
     }
 
     /**
      * @inheritdoc IL3Bridge
-     * @dev FIX H-02: Phase 2 of commit-reveal scheme for MEV protection
+     * @dev FIX H-02: Phase 2 of commit-reveal scheme for MEV protection. Never paused.
      */
-    function revealFraudProof(
-        FraudProof calldata proof,
-        bytes32 salt
-    ) external override nonReentrant whenNotPaused {
-        // Compute commitment hash
-        bytes32 commitHash = keccak256(abi.encodePacked(
-            proof.claimedRoot,
-            proof.correctRoot,
-            proof.disputeId,
-            proof.invalidStateData,
-            salt
-        ));
+    function revealFraudProof(FraudProof calldata proof, bytes32 salt) external override nonReentrant {
+        // The hash binds msg.sender: a copied proof + salt does not match anyone else's commitment
+        bytes32 commitHash = _commitHashFor(msg.sender, proof, salt);
+        FraudProofCommitment storage commitment = _fraudProofCommitments[msg.sender][commitHash];
 
-        FraudProofCommitment storage commitment = _fraudProofCommitments[commitHash];
-
-        // Verify commitment exists
-        if (commitment.challenger == address(0)) {
+        if (commitment.status == CommitmentStatus.None) {
             revert CommitmentNotFound();
         }
-
-        // Verify caller is the original committer
-        if (commitment.challenger != msg.sender) {
-            revert NotCommitter(msg.sender, commitment.challenger);
-        }
-
-        // Verify not already revealed
-        if (commitment.revealed) {
+        if (commitment.status != CommitmentStatus.Pending) {
             revert AlreadyRevealed();
         }
 
-        // Verify reveal timing
         uint256 timeSinceCommit = block.timestamp - commitment.commitTime;
 
         // Must wait minimum delay (prevents same-block front-running)
@@ -493,57 +661,44 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
             revert RevealTooLate();
         }
 
-        bytes32 claimedRoot = proof.claimedRoot;
+        bytes32 root = commitment.stateRoot;
+        emit FraudProofRevealed(commitHash, root, msg.sender);
 
-        // Verify state is still challengeable
-        if (_finalizedStates[claimedRoot]) {
-            revert ChallengePeriodExpired();
+        // The reveal only acts on the root the bond was posted against; an invalid proof forfeits the bond
+        if (proof.claimedRoot != root || !_verifyFraudProof(proof)) {
+            _forfeit(commitment);
+            return;
         }
 
-        if (_activeChallenges[claimedRoot] != address(0)) {
-            revert InvalidStateRoot(claimedRoot);
+        // Valid proof, but the root was already rejected or orphaned by a rejected ancestor
+        if (_activeChallenges[root] != address(0) || _finalizedStates[root] || !_isCanonical(root)) {
+            _refund(commitment);
+            return;
         }
 
-        // Mark as revealed
-        commitment.revealed = true;
+        _win(commitment, proof.disputeId);
+    }
 
-        emit FraudProofRevealed(commitHash, claimedRoot, msg.sender);
+    /**
+     * @inheritdoc IL3Bridge
+     * @dev Permissionless and never paused
+     */
+    function forfeitExpiredCommitment(address challenger, bytes32 commitHash) external override nonReentrant {
+        FraudProofCommitment storage commitment = _fraudProofCommitments[challenger][commitHash];
 
-        // Verify Merkle proof of incorrect state
-        bool proofValid = _verifyFraudProof(proof);
-        if (!proofValid) {
-            // Invalid fraud proof - challenger loses bond (stays in contract)
-            revert InvalidFraudProof();
+        if (commitment.status == CommitmentStatus.None) {
+            revert CommitmentNotFound();
+        }
+        if (commitment.status != CommitmentStatus.Pending) {
+            revert AlreadyRevealed();
         }
 
-        // Valid fraud proof!
-        // Mark state as challenged
-        _activeChallenges[claimedRoot] = msg.sender;
-
-        // Reset latestCommittedRoot if needed
-        if (latestCommittedRoot == claimedRoot) {
-            latestCommittedRoot = _stateCommitments[claimedRoot].previousRoot;
+        uint256 expiry = commitment.commitTime + MIN_REVEAL_DELAY + MAX_REVEAL_WINDOW;
+        if (block.timestamp <= expiry) {
+            revert CommitmentNotExpired(expiry - block.timestamp + 1);
         }
 
-        emit FraudProofSubmitted(claimedRoot, proof.disputeId, msg.sender);
-
-        // Calculate reward
-        uint256 bond = commitment.bond;
-        uint256 reward = (bond * FRAUD_REWARD_BPS) / BPS_DENOMINATOR;
-
-        // Check contract balance for reward
-        uint256 availableForReward = address(this).balance > bond ? address(this).balance - bond : 0;
-        if (availableForReward < reward) {
-            reward = availableForReward;
-        }
-
-        uint256 totalPayout = bond + reward;
-
-        // Return bond + reward
-        (bool success, ) = msg.sender.call{value: totalPayout}("");
-        require(success, "Reward transfer failed");
-
-        emit FraudProofValidated(claimedRoot, msg.sender, reward);
+        _forfeit(commitment);
     }
 
     /**
@@ -551,7 +706,7 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
      * @dev DEPRECATED: Use commitFraudProof + revealFraudProof for MEV protection
      *      This function remains for backwards compatibility but is vulnerable to front-running
      */
-    function submitFraudProof(FraudProof calldata proof) external payable override nonReentrant whenNotPaused {
+    function submitFraudProof(FraudProof calldata proof) external payable override nonReentrant {
         // If commit-reveal is enabled, require that path instead
         if (commitRevealEnabled) {
             revert("Use commitFraudProof + revealFraudProof for MEV protection");
@@ -563,65 +718,163 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
 
         bytes32 claimedRoot = proof.claimedRoot;
 
-        // Verify state is committed but not finalized
-        if (_commitmentTimestamps[claimedRoot] == 0) {
-            revert InvalidStateRoot(claimedRoot);
-        }
-
-        if (_finalizedStates[claimedRoot]) {
-            revert ChallengePeriodExpired();
-        }
-
-        // FIX: Check if already challenged - prevent duplicate challenges
-        if (_activeChallenges[claimedRoot] != address(0)) {
-            revert InvalidStateRoot(claimedRoot);
-        }
+        // Committed, not finalized, not already rejected, still canonical
+        _requireChallengeable(claimedRoot);
 
         // Verify still in challenge period
-        uint256 elapsed = block.timestamp - _commitmentTimestamps[claimedRoot];
-        if (elapsed >= sequencerConfig.challengePeriod) {
+        if (block.timestamp >= _challengeDeadlines[claimedRoot]) {
             revert ChallengePeriodExpired();
         }
 
-        // Verify Merkle proof of incorrect state
-        bool proofValid = _verifyFraudProof(proof);
-        if (!proofValid) {
-            // Invalid fraud proof - challenger loses bond (stays in contract)
+        // Verify Merkle proof of incorrect state (nothing is escrowed on this path)
+        if (!_verifyFraudProof(proof)) {
             revert InvalidFraudProof();
         }
 
-        // Valid fraud proof!
-        // Mark state as challenged
-        _activeChallenges[claimedRoot] = msg.sender;
+        // Reward comes only from free balance (never from escrowed bonds or this call's own bond)
+        uint256 reward = _min(FRAUD_PROOF_REWARD, _freeBalanceExcluding(msg.value));
 
-        // FIX M-03: Reset latestCommittedRoot to the challenged state's previous root
-        // This allows the chain to be rebuilt from a valid point
-        if (latestCommittedRoot == claimedRoot) {
-            latestCommittedRoot = _stateCommitments[claimedRoot].previousRoot;
-        }
-
-        emit FraudProofSubmitted(claimedRoot, proof.disputeId, msg.sender);
-
-        // FIX: Calculate reward from contract's existing balance (from prior failed proofs)
-        // The reward pool comes from failed fraud proof bonds that were forfeited
-        uint256 reward = (msg.value * FRAUD_REWARD_BPS) / BPS_DENOMINATOR;
-
-        // Check contract has enough balance for reward (excluding the msg.value just received)
-        uint256 contractBalance = address(this).balance;
-        uint256 availableForReward = contractBalance > msg.value ? contractBalance - msg.value : 0;
-
-        if (availableForReward < reward) {
-            // Not enough for full reward, give what's available
-            reward = availableForReward;
-        }
-
-        uint256 totalPayout = msg.value + reward;
-
-        // Return bond + reward
-        (bool success, ) = msg.sender.call{value: totalPayout}("");
-        require(success, "Reward transfer failed");
+        _recordSuccessfulChallenge(claimedRoot, proof.disputeId, msg.sender);
 
         emit FraudProofValidated(claimedRoot, msg.sender, reward);
+
+        // Return bond + reward
+        _sendValue(msg.sender, msg.value + reward);
+    }
+
+    /**
+     * @notice Revert unless the root can currently be challenged
+     */
+    function _requireChallengeable(bytes32 root) internal view {
+        // Verify state is committed (every committed root has a nonzero height) but not finalized
+        if (_rootHeights[root] == 0) {
+            revert InvalidStateRoot(root);
+        }
+        if (_finalizedStates[root]) {
+            revert ChallengePeriodExpired();
+        }
+        // Check if already challenged - prevent duplicate challenges
+        if (_activeChallenges[root] != address(0)) {
+            revert InvalidStateRoot(root);
+        }
+        // Roots orphaned by a rejected ancestor are already dead
+        if (!_isCanonical(root)) {
+            revert StateRootNotCanonical(root);
+        }
+    }
+
+    /**
+     * @notice Forfeit a Pending commitment: its bond leaves escrow and stays in the bridge as free balance
+     */
+    function _forfeit(FraudProofCommitment storage commitment) internal {
+        commitment.status = CommitmentStatus.Forfeited;
+        uint256 bond = commitment.bond;
+        address challenger = commitment.challenger;
+        _releaseEscrow(challenger, bond);
+
+        emit FraudProofForfeited(commitment.commitHash, commitment.stateRoot, challenger, bond);
+    }
+
+    /**
+     * @notice Refund a valid reveal whose root was already rejected or orphaned (caller is the challenger)
+     */
+    function _refund(FraudProofCommitment storage commitment) internal {
+        commitment.status = CommitmentStatus.Refunded;
+        uint256 bond = commitment.bond;
+        _releaseEscrow(msg.sender, bond);
+
+        emit FraudProofRefunded(commitment.commitHash, commitment.stateRoot, msg.sender, bond);
+
+        _sendValue(msg.sender, bond);
+    }
+
+    /**
+     * @notice Settle a winning reveal (caller is the challenger): reject the root, pay bond + reward
+     */
+    function _win(FraudProofCommitment storage commitment, uint256 disputeId) internal {
+        uint256 bond = commitment.bond;
+        // Computed while the winner's own bond is still escrowed, so it can never pay out escrow
+        uint256 reward = _min(FRAUD_PROOF_REWARD, freeBalance());
+        bytes32 root = commitment.stateRoot;
+
+        commitment.status = CommitmentStatus.Won;
+        _releaseEscrow(msg.sender, bond);
+
+        _recordSuccessfulChallenge(root, disputeId, msg.sender);
+
+        emit FraudProofValidated(root, msg.sender, reward);
+
+        // Return bond + reward
+        _sendValue(msg.sender, bond + reward);
+    }
+
+    /**
+     * @notice Reject a canonical root and roll the committed chain head back to its parent
+     * @dev Every descendant becomes non-canonical, so none of them can be finalized
+     */
+    function _recordSuccessfulChallenge(bytes32 root, uint256 disputeId, address challenger) internal {
+        _activeChallenges[root] = challenger;
+
+        // The root is canonical here, so its parent is the canonical root one height below
+        uint256 height = _rootHeights[root];
+        bytes32 newHead = _stateCommitments[root].previousRoot;
+        latestCommittedRoot = newHead;
+        latestCommittedHeight = height - 1;
+
+        emit CommittedChainRolledBack(root, newHead, height - 1);
+        emit FraudProofSubmitted(root, disputeId, challenger);
+    }
+
+    /**
+     * @notice Remove a bond from escrow accounting
+     */
+    function _releaseEscrow(address challenger, uint256 amount) internal {
+        totalEscrowedBonds -= amount;
+        challengerBonds[challenger] -= amount;
+    }
+
+    /**
+     * @notice Free balance excluding an amount received in the current call
+     */
+    function _freeBalanceExcluding(uint256 excluded) internal view returns (uint256) {
+        uint256 locked = totalEscrowedBonds + excluded;
+        uint256 balance = address(this).balance;
+        return balance > locked ? balance - locked : 0;
+    }
+
+    /**
+     * @notice Send ETH, reverting on failure
+     */
+    function _sendValue(address to, uint256 amount) internal {
+        (bool success,) = to.call{value: amount}("");
+        require(success, "Reward transfer failed");
+    }
+
+    /**
+     * @notice Smaller of two values
+     */
+    function _min(uint256 a, uint256 b) internal pure returns (uint256) {
+        return a < b ? a : b;
+    }
+
+    /**
+     * @notice Domain-separated, challenger-bound commitment hash
+     */
+    function _commitHashFor(address challenger, FraudProof calldata proof, bytes32 salt)
+        internal
+        view
+        returns (bytes32)
+    {
+        return keccak256(
+            abi.encode(
+                FRAUD_PROOF_COMMIT_TYPEHASH,
+                block.chainid,
+                address(this),
+                challenger,
+                keccak256(abi.encode(proof)),
+                salt
+            )
+        );
     }
 
     /**
@@ -653,27 +906,30 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     /**
      * @inheritdoc IL3Bridge
      */
-    function verifyDisputeState(
-        bytes32 stateRoot,
-        L3DisputeSummary calldata summary,
-        bytes32[] calldata merkleProof
-    ) external view override returns (bool valid) {
+    function verifyDisputeState(bytes32 stateRoot, L3DisputeSummary calldata summary, bytes32[] calldata merkleProof)
+        external
+        view
+        override
+        returns (bool valid)
+    {
         // Verify state root is finalized
         if (!_finalizedStates[stateRoot]) {
             return false;
         }
 
         // Compute leaf from summary
-        bytes32 leaf = keccak256(abi.encodePacked(
-            summary.l3DisputeId,
-            summary.l2DisputeId,
-            uint8(summary.state),
-            summary.counterCount,
-            summary.initiatorAccepted,
-            summary.counterpartyAccepted,
-            summary.currentProposalHash,
-            summary.lastUpdateBlock
-        ));
+        bytes32 leaf = keccak256(
+            abi.encodePacked(
+                summary.l3DisputeId,
+                summary.l2DisputeId,
+                uint8(summary.state),
+                summary.counterCount,
+                summary.initiatorAccepted,
+                summary.counterpartyAccepted,
+                summary.currentProposalHash,
+                summary.lastUpdateBlock
+            )
+        );
 
         // Verify Merkle proof
         bytes32 computed = leaf;
@@ -740,6 +996,28 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
         ilrm = IILRM(_ilrm);
     }
 
+    /**
+     * @notice Grant or revoke the dispute-bridger role (e.g. for L3DisputeBatcher)
+     * @param account Account to update
+     * @param authorized Whether the account may call bridgeDisputeToL3 / bridgeDisputeBatchToL3
+     */
+    function setDisputeBridger(address account, bool authorized) external onlyOwner {
+        require(account != address(0), "Invalid bridger");
+        disputeBridgers[account] = authorized;
+        emit DisputeBridgerUpdated(account, authorized);
+    }
+
+    /**
+     * @notice Grant or revoke the settlement-relayer role (e.g. for L3DisputeBatcher)
+     * @param account Account to update
+     * @param authorized Whether the account may call batchProcessSettlements
+     */
+    function setSettlementRelayer(address account, bool authorized) external onlyOwner {
+        require(account != address(0), "Invalid relayer");
+        settlementRelayers[account] = authorized;
+        emit SettlementRelayerUpdated(account, authorized);
+    }
+
     // ============ View Functions ============
 
     /**
@@ -801,11 +1079,9 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     }
 
     /**
-     * @notice Check if dispute is settled
-     * @param l2DisputeId The L2 dispute ID to check
-     * @return True if the dispute has been settled
+     * @inheritdoc IL3Bridge
      */
-    function isDisputeSettled(uint256 l2DisputeId) external view returns (bool) {
+    function isDisputeSettled(uint256 l2DisputeId) external view override returns (bool) {
         return _settledDisputes[l2DisputeId];
     }
 
@@ -816,6 +1092,40 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
      */
     function getCommitmentTimestamp(bytes32 stateRoot) external view returns (uint256) {
         return _commitmentTimestamps[stateRoot];
+    }
+
+    /**
+     * @notice Get the challenge deadline of a state root (snapshotted at submission)
+     * @param stateRoot The state root to query
+     * @return The timestamp from which the root may be finalized (0 if not committed)
+     */
+    function getChallengeDeadline(bytes32 stateRoot) external view returns (uint256) {
+        return _challengeDeadlines[stateRoot];
+    }
+
+    /**
+     * @notice Get the 1-based chain height a state root was submitted at
+     * @param stateRoot The state root to query
+     * @return The height (0 if not committed)
+     */
+    function getRootHeight(bytes32 stateRoot) external view returns (uint256) {
+        return _rootHeights[stateRoot];
+    }
+
+    /**
+     * @inheritdoc IL3Bridge
+     */
+    function isStateCanonical(bytes32 stateRoot) external view override returns (bool) {
+        return _isCanonical(stateRoot);
+    }
+
+    /**
+     * @notice Balance not reserved for escrowed bonds (funds rewards and fee withdrawals)
+     * @return The free balance
+     */
+    function freeBalance() public view returns (uint256) {
+        uint256 balance = address(this).balance;
+        return balance > totalEscrowedBonds ? balance - totalEscrowedBonds : 0;
     }
 
     /**
@@ -830,8 +1140,25 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     /**
      * @inheritdoc IL3Bridge
      */
-    function getFraudProofCommitment(bytes32 commitHash) external view override returns (FraudProofCommitment memory) {
-        return _fraudProofCommitments[commitHash];
+    function getFraudProofCommitment(address challenger, bytes32 commitHash)
+        external
+        view
+        override
+        returns (FraudProofCommitment memory)
+    {
+        return _fraudProofCommitments[challenger][commitHash];
+    }
+
+    /**
+     * @inheritdoc IL3Bridge
+     */
+    function computeFraudProofCommitHash(address challenger, FraudProof calldata proof, bytes32 salt)
+        external
+        view
+        override
+        returns (bytes32)
+    {
+        return _commitHashFor(challenger, proof, salt);
     }
 
     /**
@@ -841,27 +1168,20 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
         return commitRevealEnabled;
     }
 
-    /**
-     * @notice Get the commit hash for a state root being challenged
-     * @param stateRoot The state root to query
-     * @return The commit hash (bytes32(0) if no pending challenge)
-     */
-    function getStateRootCommitHash(bytes32 stateRoot) external view returns (bytes32) {
-        return _stateRootCommitments[stateRoot];
-    }
-
     // ============ Admin Functions ============
 
     /**
-     * @notice Pause the bridge - halts all state-changing operations
-     * @dev Only callable by owner. Use in emergency situations.
+     * @notice Pause the bridge - freezes state-root finalization
+     * @dev Only callable by owner. Challenges (commit, reveal, forfeit, legacy submit) are never paused,
+     *      so a pause cannot be used to run out a challenge window. Bridging and settlements are gated
+     *      by bridgeStatus instead.
      */
     function pause() external onlyOwner {
         _pause();
     }
 
     /**
-     * @notice Unpause the bridge - resumes normal operations
+     * @notice Unpause the bridge - resumes finalization
      * @dev Only callable by owner.
      */
     function unpause() external onlyOwner {
@@ -869,14 +1189,21 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     }
 
     /**
-     * @notice Withdraw accumulated fees from failed fraud proofs
-     * @dev Only callable by owner. Cannot withdraw to zero address.
+     * @notice Withdraw accumulated fees (forfeited bonds and donations)
+     * @dev Only callable by owner. Cannot withdraw to zero address, and never touches escrowed bonds.
      * @param to Recipient address
-     * @param amount Amount of ETH to withdraw
+     * @param amount Amount of ETH to withdraw (at most freeBalance())
      */
-    function withdrawFees(address to, uint256 amount) external onlyOwner {
+    function withdrawFees(address to, uint256 amount) external onlyOwner nonReentrant {
         require(to != address(0), "Invalid recipient");
-        (bool success, ) = to.call{value: amount}("");
+        uint256 available = freeBalance();
+        if (amount > available) {
+            revert InsufficientFreeBalance(amount, available);
+        }
+
+        emit FeesWithdrawn(to, amount);
+
+        (bool success,) = to.call{value: amount}("");
         require(success, "Withdrawal failed");
     }
 
@@ -884,6 +1211,7 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
      * @notice Toggle commit-reveal mode for fraud proofs
      * @dev Only callable by owner. When enabled, submitFraudProof is disabled
      *      and users must use commitFraudProof + revealFraudProof for MEV protection.
+     *      Disabling only blocks new commits; existing commitments can still be revealed or forfeited.
      * @param enabled Whether commit-reveal mode should be enabled
      */
     function setCommitRevealEnabled(bool enabled) external onlyOwner {
@@ -902,14 +1230,19 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
      * @return _totalSettled Total disputes settled
      * @return _pendingCount Current pending count
      */
-    function getMigrationState() external view onlyOwner returns (
-        bytes32 _latestFinalizedRoot,
-        uint256 _latestFinalizedBlock,
-        bytes32 _latestCommittedRoot,
-        uint256 _totalBridged,
-        uint256 _totalSettled,
-        uint256 _pendingCount
-    ) {
+    function getMigrationState()
+        external
+        view
+        onlyOwner
+        returns (
+            bytes32 _latestFinalizedRoot,
+            uint256 _latestFinalizedBlock,
+            bytes32 _latestCommittedRoot,
+            uint256 _totalBridged,
+            uint256 _totalSettled,
+            uint256 _pendingCount
+        )
+    {
         return (
             latestFinalizedRoot,
             latestFinalizedBlock,
@@ -922,7 +1255,7 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
 
     /**
      * @notice Deprecate this contract in favor of a new version
-     * @dev Pauses contract and emits deprecation event. Irreversible.
+     * @dev Pauses contract (freezing finalization) and emits deprecation event. Irreversible.
      * @param newContract Address of the new contract version
      */
     function deprecate(address newContract) external onlyOwner {

@@ -13,16 +13,25 @@
  * Commands:
  *   initiate-dispute   -- Create a breach dispute
  *   deposit-stake      -- Counterparty matches stake
- *   submit-proposal    -- Oracle submits LLM proposal
- *   accept-proposal    -- Accept current proposal
- *   counter-propose    -- Submit counter-proposal
+ *   submit-proposal    -- Oracle operator signs and submits the LLM proposal
+ *                         (once per round; run again after counter-propose)
+ *   reset-proposal     -- Oracle owner voids the current round's proposal (recovery; pinned to its hash,
+ *                         voided in ILRM immediately)
+ *   accept-proposal    -- Accept the live proposal, bound to its hash (reverts if it changed)
+ *   counter-propose    -- Submit counter-proposal (opens a new oracle proposal round)
  *   enforce-timeout    -- Trigger timeout resolution
- *   request-subsidy    -- Request defensive subsidy
+ *   request-subsidy    -- Counterparty stakes with a Treasury-funded subsidy (escrowed, never paid out)
  *   status             -- View dispute state
  *   treasury-status    -- View treasury state
  *
  * Required env vars:
  *   DEPLOYMENT_FILE  -- Path to deployment JSON (from deploy.js)
+ *
+ * Optional env vars:
+ *   SIGNER_INDEX     -- Index of the configured account to sign with (default 0)
+ *   COUNTER_FEE      -- Counter-proposal fee in ETH (default 0.01 * 2^counterCount)
+ *   PROPOSAL_HASH    -- keccak256 of the proposal text you reviewed (see `status`). accept-proposal and
+ *                       reset-proposal refuse to act if the live proposal no longer matches it
  */
 
 const { ethers } = require("hardhat");
@@ -119,15 +128,82 @@ async function depositStake(contracts, signer) {
   console.log(`  Gas used: ${receipt.gasUsed.toString()}`);
 }
 
+// EIP-712 typed data signed by oracle operators (must match NatLangChainOracle.PROPOSAL_TYPEHASH)
+const PROPOSAL_TYPES = {
+  Proposal: [
+    { name: "disputeId", type: "uint256" },
+    { name: "round", type: "uint256" },
+    { name: "evidenceHash", type: "bytes32" },
+    { name: "proposalHash", type: "bytes32" },
+    { name: "nonce", type: "uint256" }
+  ]
+};
+
 async function submitProposal(contracts, signer) {
   const disputeId = process.env.DISPUTE_ID;
   const proposal = process.env.PROPOSAL || '{"proposal": "Default resolution terms"}';
   if (!disputeId) throw new Error("DISPUTE_ID env var required");
 
-  console.log(`Submitting proposal for dispute #${disputeId}...`);
-  const tx = await contracts.ilrm.connect(signer).submitLLMProposal(disputeId, proposal, "0x");
+  // The Oracle admits one proposal per round (ILRM counterCount); each counter-proposal opens a new round
+  const [round, evidenceHash, nonce, open] = await contracts.oracle.proposalContext(disputeId);
+  if (!open) {
+    throw new Error(
+      `Dispute #${disputeId} round ${round}: round already has a proposal; owner must reset-proposal to replace it`
+    );
+  }
+
+  // ILRM only accepts proposals from the Oracle contract, which requires an EIP-712 signature
+  // from a registered oracle operator (the signer here) over the dispute's live round context
+  const { chainId } = await ethers.provider.getNetwork();
+  const domain = { name: "NatLangChainOracle", version: "1", chainId, verifyingContract: contracts.oracle.target };
+  const proposalHash = ethers.keccak256(ethers.toUtf8Bytes(proposal));
+  const value = { disputeId, round, evidenceHash, proposalHash, nonce };
+
+  // Never send a signature over a digest the Oracle would not recompute
+  const localDigest = ethers.TypedDataEncoder.hash(domain, PROPOSAL_TYPES, value);
+  const onChainDigest = await contracts.oracle.proposalDigest(disputeId, proposalHash);
+  if (localDigest !== onChainDigest) {
+    throw new Error(`EIP-712 digest mismatch (local ${localDigest}, oracle ${onChainDigest}); aborting`);
+  }
+
+  console.log(`Signing and submitting proposal for dispute #${disputeId} (round ${round}, nonce ${nonce}) via Oracle...`);
+  const signature = await signer.signTypedData(domain, PROPOSAL_TYPES, value);
+  const tx = await contracts.oracle.connect(signer).submitProposal(disputeId, proposal, signature);
   const receipt = await tx.wait();
   console.log(`Proposal submitted (tx: ${receipt.hash})`);
+  console.log(`  Gas used: ${receipt.gasUsed.toString()}`);
+}
+
+async function resetProposal(contracts, signer) {
+  const disputeId = process.env.DISPUTE_ID;
+  const reason = process.env.REASON;
+  if (!disputeId) throw new Error("DISPUTE_ID env var required");
+  if (!reason) throw new Error("REASON env var required");
+
+  // Owner recovery: voids the current round's live proposal (in ILRM too, in the same transaction) and
+  // allows exactly one replacement. Pinned to (round, hash): if anything else is live when the transaction
+  // executes (e.g. behind a timelock), it reverts ProposalMismatch instead of voiding it.
+  const [round, , , open] = await contracts.oracle.proposalContext(disputeId);
+  if (open) {
+    throw new Error(`Dispute #${disputeId} round ${round} has no proposal to reset`);
+  }
+  const slotHash = await contracts.oracle.roundProposals(disputeId, round);
+  const proposalHash = process.env.PROPOSAL_HASH || slotHash;
+  if (proposalHash.toLowerCase() !== slotHash.toLowerCase()) {
+    throw new Error(
+      `Round ${round} holds ${slotHash}, not PROPOSAL_HASH ${proposalHash}; proposal changed, run status again`
+    );
+  }
+
+  console.log(
+    `Resetting proposal ${proposalHash} (round ${round}) of dispute #${disputeId} (reason: ${reason})...`
+  );
+  const tx = await contracts.oracle.connect(signer).resetProposalExact(disputeId, round, proposalHash, reason);
+  const receipt = await tx.wait();
+  const [, , nonce] = await contracts.oracle.proposalContext(disputeId);
+  console.log(`Proposal reset (tx: ${receipt.hash})`);
+  console.log(`  The proposal and its acceptances are voided in ILRM immediately.`);
+  console.log(`  Submit the replacement now, signed at the new nonce ${nonce}.`);
   console.log(`  Gas used: ${receipt.gasUsed.toString()}`);
 }
 
@@ -135,8 +211,22 @@ async function acceptProposal(contracts, signer) {
   const disputeId = process.env.DISPUTE_ID;
   if (!disputeId) throw new Error("DISPUTE_ID env var required");
 
-  console.log(`Accepting proposal for dispute #${disputeId}...`);
-  const tx = await contracts.ilrm.connect(signer).acceptProposal(disputeId);
+  // Bind the acceptance to the text being accepted: if the proposal is voided or replaced before this
+  // transaction executes, ILRM reverts "Proposal changed" instead of accepting the new text
+  const { llmProposal } = await contracts.ilrm.disputes(disputeId);
+  if (!llmProposal) throw new Error(`Dispute #${disputeId} has no live proposal`);
+  const liveHash = ethers.keccak256(ethers.toUtf8Bytes(llmProposal));
+  const expected = process.env.PROPOSAL_HASH;
+  if (expected && expected.toLowerCase() !== liveHash.toLowerCase()) {
+    throw new Error(
+      `Live proposal hash ${liveHash} != PROPOSAL_HASH ${expected}; proposal changed, run status again`
+    );
+  }
+
+  console.log(`Accepting proposal for dispute #${disputeId}:`);
+  console.log(`  Text: ${llmProposal}`);
+  console.log(`  Hash: ${liveHash}`);
+  const tx = await contracts.ilrm.connect(signer).acceptProposalWithHash(disputeId, liveHash);
   const receipt = await tx.wait();
   console.log(`Proposal accepted (tx: ${receipt.hash})`);
   console.log(`  Gas used: ${receipt.gasUsed.toString()}`);
@@ -144,15 +234,23 @@ async function acceptProposal(contracts, signer) {
 
 async function counterPropose(contracts, signer) {
   const disputeId = process.env.DISPUTE_ID;
-  const fee = process.env.COUNTER_FEE || "0.01";
   const evidenceHash = process.env.EVIDENCE_HASH || ethers.keccak256(ethers.toUtf8Bytes("counter-evidence"));
   if (!disputeId) throw new Error("DISPUTE_ID env var required");
 
-  console.log(`Submitting counter-proposal for dispute #${disputeId} (fee: ${fee} ETH)...`);
+  // Fee doubles with each counter: 0.01 ETH * 2^counterCount
+  let fee;
+  if (process.env.COUNTER_FEE) {
+    fee = ethers.parseEther(process.env.COUNTER_FEE);
+  } else {
+    const { counterCount } = await contracts.ilrm.disputes(disputeId);
+    fee = ethers.parseEther("0.01") << counterCount;
+  }
+
+  console.log(`Submitting counter-proposal for dispute #${disputeId} (fee: ${ethers.formatEther(fee)} ETH)...`);
   const tx = await contracts.ilrm.connect(signer).counterPropose(
     disputeId,
     evidenceHash,
-    { value: ethers.parseEther(fee) }
+    { value: fee }
   );
   const receipt = await tx.wait();
   console.log(`Counter-proposal submitted (tx: ${receipt.hash})`);
@@ -172,16 +270,41 @@ async function enforceTimeout(contracts, signer) {
 
 async function requestSubsidy(contracts, signer) {
   const disputeId = process.env.DISPUTE_ID;
-  const stakeNeeded = process.env.STAKE || "1";
   if (!disputeId) throw new Error("DISPUTE_ID env var required");
 
-  const amount = ethers.parseEther(stakeNeeded);
-  console.log(`Requesting subsidy for dispute #${disputeId} (${stakeNeeded} tokens)...`);
-  const tx = await contracts.treasury.connect(signer).requestSubsidy(
-    disputeId, amount, signer.address
+  // The subsidy funds part (or all) of the counterparty's stake in ILRM escrow; it is never paid
+  // to the wallet. The signer (counterparty) pays the rest of the stake as a top-up.
+  const d = await contracts.ilrm.disputes(disputeId);
+  const stake = d.initiatorStake;
+  const maxSubsidy = process.env.MAX_SUBSIDY ? ethers.parseEther(process.env.MAX_SUBSIDY) : ethers.MaxUint256;
+  const requested = stake < maxSubsidy ? stake : maxSubsidy;
+
+  const [preview, eligible] = await contracts.treasury.calculateSubsidy(disputeId, requested, signer.address);
+  if (!eligible) throw new Error(`No subsidy available for ${signer.address} on dispute #${disputeId}`);
+
+  // maxTopUp is the slippage bound: the call reverts if a smaller-than-previewed grant would make the
+  // signer pay more than this. Default to the previewed top-up; MAX_TOP_UP overrides it.
+  const ilrmAddress = await contracts.ilrm.getAddress();
+  const maxTopUp = process.env.MAX_TOP_UP ? ethers.parseEther(process.env.MAX_TOP_UP) : stake - preview;
+  if (maxTopUp > 0n) {
+    const allowance = await contracts.token.allowance(signer.address, ilrmAddress);
+    if (allowance < maxTopUp) {
+      console.log(`Approving ILRM for a top-up of up to ${ethers.formatEther(maxTopUp)} tokens...`);
+      const approveTx = await contracts.token.connect(signer).approve(ilrmAddress, maxTopUp);
+      await approveTx.wait();
+    }
+  }
+
+  console.log(
+    `Staking ${ethers.formatEther(stake)} tokens on dispute #${disputeId} ` +
+    `with a subsidy of up to ${ethers.formatEther(preview)} tokens...`
   );
+  const tx = await contracts.ilrm.connect(signer).depositStakeWithSubsidy(disputeId, maxSubsidy, maxTopUp);
   const receipt = await tx.wait();
-  console.log(`Subsidy granted (tx: ${receipt.hash})`);
+  const [funder, amount] = await contracts.ilrm.stakeSubsidy(disputeId);
+  console.log(`Subsidized stake deposited (tx: ${receipt.hash})`);
+  console.log(`  Subsidy:    ${ethers.formatEther(amount)} tokens from ${funder}`);
+  console.log(`  Top-up paid: ${ethers.formatEther(stake - amount)} tokens`);
   console.log(`  Gas used: ${receipt.gasUsed.toString()}`);
 }
 
@@ -202,11 +325,25 @@ async function showStatus(contracts) {
   console.log(`  Start Time:         ${new Date(Number(d[4]) * 1000).toISOString()}`);
   console.log(`  Evidence Hash:      ${d[5]}`);
   console.log(`  Proposal:           ${d[6] || "(none)"}`);
+  console.log(`  Proposal Hash:      ${d[6] ? ethers.keccak256(ethers.toUtf8Bytes(d[6])) : "(none)"}`);
   console.log(`  Initiator Accepted: ${d[7]}`);
   console.log(`  CP Accepted:        ${d[8]}`);
   console.log(`  Resolved:           ${d[9]}`);
   console.log(`  Outcome:            ${outcomeNames[Number(d[10])]}`);
   console.log(`  Counter Count:      ${d[12]}`);
+  const [subsidyFunder, subsidyAmount] = await contracts.ilrm.stakeSubsidy(disputeId);
+  if (subsidyAmount > 0n) {
+    console.log(`  Subsidized Portion: ${ethers.formatEther(subsidyAmount)} tokens (funded by ${subsidyFunder})`);
+  }
+
+  try {
+    const [round, , nonce, open] = await contracts.oracle.proposalContext(disputeId);
+    console.log(`  Oracle Round:       ${round} (${open ? "open for a proposal" : "proposal submitted"})`);
+    console.log(`  Oracle Nonce:       ${nonce}`);
+    console.log(`  Oracle Request:     ${(await contracts.oracle.isPending(disputeId)) ? "pending" : "none"}`);
+  } catch (err) {
+    console.log(`  Oracle Round:       unavailable (${err.shortMessage || err.message})`);
+  }
   console.log("─".repeat(50));
 }
 
@@ -231,7 +368,8 @@ async function showTreasuryStatus(contracts) {
 
 async function main() {
   const deployment = loadDeployment();
-  const [signer] = await ethers.getSigners();
+  // SIGNER_INDEX selects another configured account (e.g. the counterparty on localhost)
+  const signer = (await ethers.getSigners())[Number(process.env.SIGNER_INDEX || 0)];
   const contracts = await getContracts(deployment);
 
   const command = process.env.COMMAND || process.argv[2];
@@ -250,6 +388,9 @@ async function main() {
       break;
     case "submit-proposal":
       await submitProposal(contracts, signer);
+      break;
+    case "reset-proposal":
+      await resetProposal(contracts, signer);
       break;
     case "accept-proposal":
       await acceptProposal(contracts, signer);
@@ -273,11 +414,13 @@ async function main() {
       console.log("Available commands:");
       console.log("  initiate-dispute   COUNTERPARTY=<addr> STAKE=<amount>");
       console.log("  deposit-stake      DISPUTE_ID=<id>");
-      console.log("  submit-proposal    DISPUTE_ID=<id> PROPOSAL=<json>");
-      console.log("  accept-proposal    DISPUTE_ID=<id>");
-      console.log("  counter-propose    DISPUTE_ID=<id> COUNTER_FEE=<eth>");
+      console.log("  submit-proposal    DISPUTE_ID=<id> PROPOSAL=<json>  (once per round; run again after counter-propose)");
+      console.log("  reset-proposal     DISPUTE_ID=<id> REASON=<text> [PROPOSAL_HASH=<bytes32>]");
+      console.log("                     (oracle owner; voids the current round's proposal in ILRM at once)");
+      console.log("  accept-proposal    DISPUTE_ID=<id> [PROPOSAL_HASH=<bytes32>]  (hash-bound; see status)");
+      console.log("  counter-propose    DISPUTE_ID=<id> [COUNTER_FEE=<eth>] [EVIDENCE_HASH=<bytes32>]");
       console.log("  enforce-timeout    DISPUTE_ID=<id>");
-      console.log("  request-subsidy    DISPUTE_ID=<id> STAKE=<amount>");
+      console.log("  request-subsidy    DISPUTE_ID=<id> [MAX_SUBSIDY=<amount>] [MAX_TOP_UP=<amount>]");
       console.log("  status             DISPUTE_ID=<id>");
       console.log("  treasury-status");
       console.log("\nExample:");

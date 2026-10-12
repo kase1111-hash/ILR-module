@@ -62,17 +62,17 @@ contract MockERC20 {
 
 contract ILRMStateMachine {
     enum DisputeState {
-        None,               // 0 - No dispute
-        Initiated,          // 1 - Initiator staked
+        None, // 0 - No dispute
+        Initiated, // 1 - Initiator staked
         CounterpartyStaked, // 2 - Both parties staked
-        LLMProposed,        // 3 - Oracle submitted proposal
-        InitiatorAccepted,  // 4 - Initiator accepted
+        LLMProposed, // 3 - Oracle submitted proposal
+        InitiatorAccepted, // 4 - Initiator accepted
         CounterpartyAccepted, // 5 - Counterparty accepted (leads to resolved)
-        CounterProposed,    // 6 - Counter-proposal submitted
-        Resolved,           // 7 - Terminal: Both accepted
-        TimeoutBurn,        // 8 - Terminal: Timeout with burns
-        NonParticipation,   // 9 - Terminal: Counterparty didn't stake
-        MaxCountersReached  // 10 - Terminal: 3 counters exhausted then timeout
+        CounterProposed, // 6 - Counter-proposal submitted
+        Resolved, // 7 - Terminal: Both accepted
+        TimeoutBurn, // 8 - Terminal: Timeout with burns
+        NonParticipation, // 9 - Terminal: Counterparty didn't stake
+        MaxCountersReached // 10 - Terminal: 3 counters exhausted then timeout
     }
 
     struct Dispute {
@@ -121,11 +121,7 @@ contract ILRMStateMachine {
 
     function submitLLMProposal(uint256 disputeId) external returns (bool) {
         Dispute storage d = disputes[disputeId];
-        require(
-            d.state == DisputeState.CounterpartyStaked ||
-            d.state == DisputeState.CounterProposed,
-            "Wrong state"
-        );
+        require(d.state == DisputeState.CounterpartyStaked || d.state == DisputeState.CounterProposed, "Wrong state");
 
         DisputeState oldState = d.state;
         d.state = DisputeState.LLMProposed;
@@ -138,7 +134,7 @@ contract ILRMStateMachine {
 
     function initiatorAccept(uint256 disputeId) external returns (bool) {
         Dispute storage d = disputes[disputeId];
-        require(d.state == DisputeState.LLMProposed, "Wrong state");
+        require(d.state == DisputeState.LLMProposed || d.state == DisputeState.CounterpartyAccepted, "Wrong state");
         require(!d.initiatorAccepted, "Already accepted");
 
         d.initiatorAccepted = true;
@@ -157,11 +153,7 @@ contract ILRMStateMachine {
 
     function counterpartyAccept(uint256 disputeId) external returns (bool) {
         Dispute storage d = disputes[disputeId];
-        require(
-            d.state == DisputeState.LLMProposed ||
-            d.state == DisputeState.InitiatorAccepted,
-            "Wrong state"
-        );
+        require(d.state == DisputeState.LLMProposed || d.state == DisputeState.InitiatorAccepted, "Wrong state");
         require(!d.counterpartyAccepted, "Already accepted");
 
         d.counterpartyAccepted = true;
@@ -214,11 +206,9 @@ contract ILRMStateMachine {
     function enforceTimeout(uint256 disputeId) external returns (bool) {
         Dispute storage d = disputes[disputeId];
         require(
-            d.state == DisputeState.CounterpartyStaked ||
-            d.state == DisputeState.LLMProposed ||
-            d.state == DisputeState.InitiatorAccepted ||
-            d.state == DisputeState.CounterpartyAccepted ||
-            d.state == DisputeState.CounterProposed,
+            d.state == DisputeState.CounterpartyStaked || d.state == DisputeState.LLMProposed
+                || d.state == DisputeState.InitiatorAccepted || d.state == DisputeState.CounterpartyAccepted
+                || d.state == DisputeState.CounterProposed,
             "Wrong state"
         );
 
@@ -239,10 +229,8 @@ contract ILRMStateMachine {
     }
 
     function isTerminalState(DisputeState state) public pure returns (bool) {
-        return state == DisputeState.Resolved ||
-               state == DisputeState.TimeoutBurn ||
-               state == DisputeState.NonParticipation ||
-               state == DisputeState.MaxCountersReached;
+        return state == DisputeState.Resolved || state == DisputeState.TimeoutBurn
+            || state == DisputeState.NonParticipation || state == DisputeState.MaxCountersReached;
     }
 
     function getState(uint256 disputeId) external view returns (DisputeState) {
@@ -260,9 +248,9 @@ contract MultiPartyStateMachine {
         AllStaked,
         LLMProposed,
         PartialAccepted,
-        QuorumAccepted,      // Terminal
-        PartialResolution,   // Terminal
-        TimeoutWithBurn      // Terminal
+        QuorumAccepted, // Terminal
+        PartialResolution, // Terminal
+        TimeoutWithBurn // Terminal
     }
 
     struct MPDispute {
@@ -301,11 +289,7 @@ contract MultiPartyStateMachine {
 
     function partyStake(uint256 disputeId) external returns (bool) {
         MPDispute storage d = disputes[disputeId];
-        require(
-            d.state == MPState.Created ||
-            d.state == MPState.PartialStaked,
-            "Wrong state"
-        );
+        require(d.state == MPState.Created || d.state == MPState.PartialStaked, "Wrong state");
 
         d.stakedCount++;
 
@@ -333,11 +317,7 @@ contract MultiPartyStateMachine {
 
     function partyAccept(uint256 disputeId) external returns (bool) {
         MPDispute storage d = disputes[disputeId];
-        require(
-            d.state == MPState.LLMProposed ||
-            d.state == MPState.PartialAccepted,
-            "Wrong state"
-        );
+        require(d.state == MPState.LLMProposed || d.state == MPState.PartialAccepted, "Wrong state");
 
         d.acceptedCount++;
 
@@ -357,11 +337,7 @@ contract MultiPartyStateMachine {
 
     function enforceStakeTimeout(uint256 disputeId) external returns (bool) {
         MPDispute storage d = disputes[disputeId];
-        require(
-            d.state == MPState.Created ||
-            d.state == MPState.PartialStaked,
-            "Wrong state"
-        );
+        require(d.state == MPState.Created || d.state == MPState.PartialStaked, "Wrong state");
         require(block.timestamp > d.startTime + STAKE_WINDOW, "Window open");
 
         MPState oldState = d.state;
@@ -374,9 +350,7 @@ contract MultiPartyStateMachine {
     function enforceResolutionTimeout(uint256 disputeId) external returns (bool) {
         MPDispute storage d = disputes[disputeId];
         require(
-            d.state == MPState.AllStaked ||
-            d.state == MPState.LLMProposed ||
-            d.state == MPState.PartialAccepted,
+            d.state == MPState.AllStaked || d.state == MPState.LLMProposed || d.state == MPState.PartialAccepted,
             "Wrong state"
         );
 
@@ -390,10 +364,12 @@ contract MultiPartyStateMachine {
         return true;
     }
 
+    function getState(uint256 disputeId) external view returns (MPState) {
+        return disputes[disputeId].state;
+    }
+
     function isTerminal(MPState state) public pure returns (bool) {
-        return state == MPState.QuorumAccepted ||
-               state == MPState.PartialResolution ||
-               state == MPState.TimeoutWithBurn;
+        return state == MPState.QuorumAccepted || state == MPState.PartialResolution || state == MPState.TimeoutWithBurn;
     }
 }
 
@@ -610,7 +586,7 @@ contract StateMachinePermutationsTest is Test {
         multiParty.partyStake(id);
         multiParty.partyStake(id);
 
-        assertEq(uint256(multiParty.disputes(id).state), uint256(MultiPartyStateMachine.MPState.AllStaked));
+        assertEq(uint256(multiParty.getState(id)), uint256(MultiPartyStateMachine.MPState.AllStaked));
 
         multiParty.submitProposal(id);
 
@@ -618,7 +594,7 @@ contract StateMachinePermutationsTest is Test {
         multiParty.partyAccept(id);
         multiParty.partyAccept(id);
 
-        assertTrue(multiParty.isTerminal(multiParty.disputes(id).state));
+        assertTrue(multiParty.isTerminal(multiParty.getState(id)));
         console.log("PASS: MultiParty quorum accept reaches terminal state");
     }
 
@@ -633,9 +609,9 @@ contract StateMachinePermutationsTest is Test {
         vm.warp(block.timestamp + 4 days);
 
         assertTrue(multiParty.enforceStakeTimeout(id));
-        assertEq(uint256(multiParty.disputes(id).state), uint256(MultiPartyStateMachine.MPState.PartialResolution));
+        assertEq(uint256(multiParty.getState(id)), uint256(MultiPartyStateMachine.MPState.PartialResolution));
 
-        assertTrue(multiParty.isTerminal(multiParty.disputes(id).state));
+        assertTrue(multiParty.isTerminal(multiParty.getState(id)));
         console.log("PASS: MultiParty partial stake timeout reaches terminal state");
     }
 
@@ -654,9 +630,9 @@ contract StateMachinePermutationsTest is Test {
         vm.warp(block.timestamp + 11 days);
 
         assertTrue(multiParty.enforceResolutionTimeout(id));
-        assertEq(uint256(multiParty.disputes(id).state), uint256(MultiPartyStateMachine.MPState.TimeoutWithBurn));
+        assertEq(uint256(multiParty.getState(id)), uint256(MultiPartyStateMachine.MPState.TimeoutWithBurn));
 
-        assertTrue(multiParty.isTerminal(multiParty.disputes(id).state));
+        assertTrue(multiParty.isTerminal(multiParty.getState(id)));
         console.log("PASS: MultiParty resolution timeout reaches terminal state");
     }
 
@@ -678,7 +654,7 @@ contract StateMachinePermutationsTest is Test {
             multiParty.partyAccept(id);
         }
 
-        assertTrue(multiParty.isTerminal(multiParty.disputes(id).state));
+        assertTrue(multiParty.isTerminal(multiParty.getState(id)));
         console.log("PASS: MultiParty large quorum reaches terminal state");
     }
 

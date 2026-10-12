@@ -85,13 +85,15 @@ contract ComplianceEscrow is IComplianceEscrow, ReentrancyGuard, Pausable, Ownab
 
     // ============ Modifiers ============
 
+    /// @dev Escrow ids are assigned sequentially from 0, so exactly the ids below the counter exist
     modifier escrowExists(uint256 escrowId) {
-        if (_escrows[escrowId].createdAt == 0) revert EscrowNotFound(escrowId);
+        if (escrowId >= _escrowCounter) revert EscrowNotFound(escrowId);
         _;
     }
 
+    /// @dev Request ids are assigned sequentially from 0, so exactly the ids below the counter exist
     modifier requestExists(uint256 requestId) {
-        if (_revealRequests[requestId].requestedAt == 0) revert RequestNotFound(requestId);
+        if (requestId >= _requestCounter) revert RequestNotFound(requestId);
         _;
     }
 
@@ -142,12 +144,11 @@ contract ComplianceEscrow is IComplianceEscrow, ReentrancyGuard, Pausable, Ownab
 
         // Register share holders
         for (uint256 i = 0; i < holders.length; i++) {
-            _shareHolders[escrowId].push(ShareHolder({
-                holder: holders[i],
-                holderType: holderTypes[i],
-                shareCommitment: bytes32(0),
-                hasSubmitted: false
-            }));
+            _shareHolders[escrowId].push(
+                ShareHolder({
+                    holder: holders[i], holderType: holderTypes[i], shareCommitment: bytes32(0), hasSubmitted: false
+                })
+            );
 
             _holderIndex[escrowId][holders[i]] = i;
             _isHolder[escrowId][holders[i]] = true;
@@ -158,22 +159,19 @@ contract ComplianceEscrow is IComplianceEscrow, ReentrancyGuard, Pausable, Ownab
         // Link dispute to escrow
         disputeEscrow[disputeId] = escrowId;
 
-        emit EscrowCreated(
-            escrowId,
-            disputeId,
-            viewingKeyCommitment,
-            threshold,
-            totalShares
-        );
+        emit EscrowCreated(escrowId, disputeId, viewingKeyCommitment, threshold, totalShares);
     }
 
     /**
      * @inheritdoc IComplianceEscrow
      */
-    function submitShareCommitment(
-        uint256 escrowId,
-        bytes32 shareCommitment
-    ) external override escrowExists(escrowId) onlyShareHolder(escrowId) nonReentrant {
+    function submitShareCommitment(uint256 escrowId, bytes32 shareCommitment)
+        external
+        override
+        escrowExists(escrowId)
+        onlyShareHolder(escrowId)
+        nonReentrant
+    {
         if (shareCommitment == bytes32(0)) revert InvalidCommitment();
 
         uint256 index = _holderIndex[escrowId][msg.sender];
@@ -191,12 +189,14 @@ contract ComplianceEscrow is IComplianceEscrow, ReentrancyGuard, Pausable, Ownab
     /**
      * @inheritdoc IComplianceEscrow
      */
-    function requestReveal(
-        uint256 escrowId,
-        string calldata reason,
-        bytes32 legalDocHash,
-        uint256 votingPeriod
-    ) external override escrowExists(escrowId) nonReentrant whenNotPaused returns (uint256 requestId) {
+    function requestReveal(uint256 escrowId, string calldata reason, bytes32 legalDocHash, uint256 votingPeriod)
+        external
+        override
+        escrowExists(escrowId)
+        nonReentrant
+        whenNotPaused
+        returns (uint256 requestId)
+    {
         EscrowConfig storage escrow = _escrows[escrowId];
 
         if (escrow.revealed) revert AlreadyRevealed(escrowId);
@@ -224,10 +224,7 @@ contract ComplianceEscrow is IComplianceEscrow, ReentrancyGuard, Pausable, Ownab
     /**
      * @inheritdoc IComplianceEscrow
      */
-    function voteOnReveal(
-        uint256 requestId,
-        bool approve
-    ) external override requestExists(requestId) nonReentrant {
+    function voteOnReveal(uint256 requestId, bool approve) external override requestExists(requestId) nonReentrant {
         RevealRequest storage request = _revealRequests[requestId];
         uint256 escrowId = request.escrowId;
 
@@ -266,11 +263,12 @@ contract ComplianceEscrow is IComplianceEscrow, ReentrancyGuard, Pausable, Ownab
     /**
      * @inheritdoc IComplianceEscrow
      */
-    function submitShareForReveal(
-        uint256 requestId,
-        uint256 shareIndex,
-        bytes calldata encryptedShare
-    ) external override requestExists(requestId) nonReentrant {
+    function submitShareForReveal(uint256 requestId, uint256 shareIndex, bytes calldata encryptedShare)
+        external
+        override
+        requestExists(requestId)
+        nonReentrant
+    {
         RevealRequest storage request = _revealRequests[requestId];
         uint256 escrowId = request.escrowId;
         EscrowConfig storage escrow = _escrows[escrowId];
@@ -297,10 +295,12 @@ contract ComplianceEscrow is IComplianceEscrow, ReentrancyGuard, Pausable, Ownab
     /**
      * @inheritdoc IComplianceEscrow
      */
-    function finalizeReveal(
-        uint256 requestId,
-        bytes32 reconstructedKeyHash
-    ) external override requestExists(requestId) nonReentrant {
+    function finalizeReveal(uint256 requestId, bytes32 reconstructedKeyHash)
+        external
+        override
+        requestExists(requestId)
+        nonReentrant
+    {
         RevealRequest storage request = _revealRequests[requestId];
         uint256 escrowId = request.escrowId;
         EscrowConfig storage escrow = _escrows[escrowId];

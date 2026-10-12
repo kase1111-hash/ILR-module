@@ -146,7 +146,7 @@ export class ILRMError extends Error {
       },
       action: this.category,
       outcome: 'failure',
-      severity: this.severity,
+      severity: this.severity as number as Severity, // same numeric scale
       message: this.message,
       data: {
         code: this.code,
@@ -391,7 +391,7 @@ export class ErrorHandler {
     try {
       const decision = await this.daemon.checkPolicy({
         action: error.category,
-        context: error.context,
+        context: { ...error.context },
         severity: error.severity,
       });
 

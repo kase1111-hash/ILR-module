@@ -3,6 +3,16 @@
 # =============================================================================
 # This configuration defines alerts for protocol monitoring
 # Compatible with: OpenZeppelin Defender, Tenderly, custom monitoring
+#
+# WARNING: L3 IS NOT PRODUCTION-READY AND MUST NOT BE DEPLOYED.
+# The L3 contracts (L3Bridge, L3DisputeBatcher, L3StateVerifier) have known-unsound
+# security: fraud proofs check no state transition, the sequencer posts no bond,
+# settlements are not tied to finalized state roots, and bridged disputes are not
+# validated against the ILRM (SPEC.md section 4.3). No deploy script deploys them.
+# The L3 entries below (L3Bridge in contract_paused, fraud_proof_challenge,
+# batch_finalization_delayed, l3_batch_submitted) are for testnet/research setups
+# only. A production deployment has no L3 contract to watch: leave them out, and
+# treat any L3 event from a production address as an incident.
 # =============================================================================
 
 # Protocol Health Alerts
@@ -16,6 +26,7 @@ alerts:
     description: "Protocol contract has been paused"
     condition:
       event: Paused
+      # L3Bridge: testnet/research only - L3 is not production-ready and must not be deployed
       contracts: [ILRM, Treasury, Oracle, L3Bridge, AssetRegistry]
     notification:
       channels: [pagerduty, slack_critical, email_oncall]
@@ -58,6 +69,7 @@ alerts:
   # High Priority Alerts (P1) - Response Within 1 Hour
   # ==========================================================================
 
+  # L3 alert: testnet/research only - L3 is not production-ready and must not be deployed
   - name: fraud_proof_challenge
     severity: high
     description: "Fraud proof challenge initiated against L3 batch"
@@ -129,6 +141,7 @@ alerts:
       channels: [slack_monitoring]
       message: "Unusual dispute volume: {{count}} disputes in last hour (avg: {{average}})"
 
+  # L3 alert: testnet/research only - L3 is not production-ready and must not be deployed
   - name: batch_finalization_delayed
     severity: medium
     description: "L3 batch finalization delayed beyond challenge period"
@@ -183,6 +196,7 @@ alerts:
       channels: [slack_activity]
       message: "Counter #{{counterNumber}} on dispute #{{disputeId}} by {{party}}"
 
+  # L3 alert: testnet/research only - L3 is not production-ready and must not be deployed
   - name: l3_batch_submitted
     severity: low
     description: "New L3 batch submitted"

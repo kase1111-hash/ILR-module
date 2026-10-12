@@ -458,7 +458,7 @@ export const fido2 = {
 };
 
 // Example usage
-export async function exampleUsage() {
+export async function fido2ExampleUsage() {
   console.log('=== FIDO2/WebAuthn Example ===\n');
 
   // Check support
@@ -489,5 +489,5 @@ export async function exampleUsage() {
 }
 
 if (typeof require !== 'undefined' && require.main === module) {
-  exampleUsage();
+  fido2ExampleUsage();
 }

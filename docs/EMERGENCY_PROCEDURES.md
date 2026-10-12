@@ -163,7 +163,7 @@
 
 ```
 11. RESTORE NORMAL OPERATIONS
-    ├─ Unpause contracts (if paused)
+    ├─ Unpause contracts (if paused; queued, executable after minDelay)
     ├─ Resume normal monitoring
     └─ Communicate resolution
 
@@ -181,7 +181,16 @@
 
 **When to Use:** Active exploitation, critical vulnerability
 
-**Who Can Execute:** Multi-sig with EMERGENCY_ROLE
+**Who Can Execute:** Multi-sig with EMERGENCY_ROLE on the GovernanceTimelock
+
+Once the timelock owns the protocol contracts, the multi-sig can no longer call `pause()` on them
+directly (they are `onlyOwner`). Pausing goes through the timelock, which pauses every registered
+pausable contract (ILRM, Treasury, MultiPartyILRM, ComplianceCouncil, BatchQueue,
+DummyTransactionGenerator) in one instant call. AssetRegistry has no pause function.
+
+Pausing is instant, unpausing is not: it is always queued and can be vetoed (see "Unpausing After
+Incident"). Each `emergencyPauseAll` starts a new pause epoch (`timelock.pauseEpoch()`), which makes
+every unpause queued before it unexecutable, so pausing again also invalidates pending unpauses.
 
 **Steps:**
 
@@ -192,21 +201,18 @@
 
 2. **Prepare Transaction**
    ```solidity
-   // Target: ILRM contract
-   function pause() external onlyOwner
-
-   // Also pause related contracts
-   Treasury.pause()
-   AssetRegistry.pause()
+   // Target: GovernanceTimelock
+   timelock.emergencyPauseAll("short, non-sensitive reason");
    ```
 
 3. **Execute via Multi-sig**
    - Go to Gnosis Safe
    - Create new transaction
-   - Target: ILRM address
-   - Data: `0x8456cb59` (pause() selector)
+   - Target: GovernanceTimelock address
+   - Data: `emergencyPauseAll(string)` with the reason
    - Collect required signatures
    - Execute
+   - Check the `ContractPauseResult` events (one per registered contract, with `success`)
 
 4. **Confirm Pause**
    ```bash
@@ -222,12 +228,48 @@
 
 **When to Use:** Mitigate attack without full pause
 
-**Example: Increase stake requirements**
+Parameter changes are ordinary timelock proposals (standard delay, or the long delay for
+LongDelay-classified calls). Only calls that governance pre-classified as `Emergency` can use the
+short emergency delay, through `executeEmergency` (see "Emergency Defensive Calls" below).
+
+**Example: Raise the Treasury minimum reserve**
 
 ```solidity
-// If griefing attack via low stakes
-Treasury.setMinStake(newHigherAmount)
+// A standard proposal by the multi-sig (PROPOSER_ROLE)
+bytes memory data = abi.encodeWithSignature("setMinReserve(uint256)", newHigherAmount);
+timelock.schedule(treasury, 0, data, bytes32(0), salt, timelock.getRequiredDelay(treasury, data));
 ```
+
+### Emergency Defensive Calls (executeEmergency)
+
+**When to Use:** A defensive call that cannot wait for the standard delay and that governance
+registered as `Emergency` (default deployment: `Oracle.revokeOracle`, `Oracle.cancelPendingRequest`,
+`Oracle.resetProposalExact`, `AssetRegistry.revokeILRM`). Check with
+`timelock.getCallClass(target, selector)` (2 = Emergency).
+
+**Who Can Execute:** EMERGENCY_ROLE (PROPOSER_ROLE is not needed)
+
+**Steps:**
+
+1. **Queue the call**
+   ```solidity
+   bytes32 id = timelock.executeEmergency(target, data, "reason");
+   ```
+   This only **schedules** the call (value 0, predecessor 0) at the emergency delay (12 hours by
+   default) and emits `EmergencyActionScheduled`. `EmergencyActionExecuted` is only emitted when an
+   action takes effect (a pause, or a queued unpause when it executes). Anything not classified
+   Emergency reverts with `NotEmergencyCall`.
+
+2. **Veto window** - during the emergency delay any `CANCELLER_ROLE` holder can stop it:
+   ```solidity
+   timelock.cancel(id);            // or timelock.cancelOperation(id)
+   ```
+
+3. **Execute after the delay**
+   ```solidity
+   bytes32 salt = timelock.getOperation(id).salt;   // also emitted as OZ CallSalt(id, salt)
+   timelock.execute(target, 0, data, bytes32(0), salt);
+   ```
 
 ### Action 3: Oracle Emergency
 
@@ -235,21 +277,79 @@ Treasury.setMinStake(newHigherAmount)
 
 **Steps:**
 
-1. **Disable Oracle**
+When the Oracle is owned by the GovernanceTimelock (the production setup), its owner-only calls
+go through the timelock: `revokeOracle` and `cancelPendingRequest` are Emergency-classified (emergency
+path), while `resetProposalExact`, `resetProposal` and `registerOracle` are standard proposals by the
+multi-sig unless governance has classified `resetProposalExact` as Emergency. If the oracle must be
+stopped immediately, pause the protocol first (Action 1), but see step 4 before pausing ILRM.
+
+1. **Revoke the compromised operator** (always before resetting, so it cannot fill the re-opened slot)
    ```solidity
-   Oracle.deauthorize(compromisedOracleAddress)
+   timelock.executeEmergency(oracle, abi.encodeWithSignature("revokeOracle(address)", compromisedOperator), "reason");
    ```
 
-2. **Block Proposals**
+2. **Withdraw pending requests** (optional, Emergency-classified)
    ```solidity
-   // Reject any pending proposals from bad oracle
-   ILRM.rejectProposal(disputeId)
+   timelock.executeEmergency(oracle, abi.encodeWithSignature("cancelPendingRequest(uint256)", disputeId), "reason");
    ```
+   This only withdraws the advisory pending-request flag (event `ProposalRequestCancelled`) that tells
+   operators a proposal is wanted. It does **not** block `submitProposal`; revoking the operator
+   (step 1) is what stops proposals.
 
-3. **Add New Oracle**
+3. **Void its live proposals**
    ```solidity
-   Oracle.authorize(newTrustedOracleAddress)
+   // For each unresolved dispute whose CURRENT-round proposal came from the compromised operator.
+   // round = Oracle.proposalContext(disputeId).round; proposalHash = Oracle.roundProposals(disputeId, round)
+   bytes memory data = abi.encodeWithSignature(
+       "resetProposalExact(uint256,uint256,bytes32,string)", disputeId, round, proposalHash, "compromised operator"
+   );
+   timelock.schedule(oracle, 0, data, bytes32(0), salt, timelock.getRequiredDelay(oracle, data));
    ```
+   Use the pinned `resetProposalExact` behind the timelock: it voids only the named proposal of the
+   named round. If a counter-proposal or another proposal landed while the call was queued, it reverts
+   `ProposalMismatch` instead of voiding a proposal nobody reviewed. (`resetProposal(disputeId, reason)`
+   acts on whatever is live when it executes.)
+
+   When it executes, the reset:
+   - voids the proposal text **and both acceptances in ILRM in the same transaction** (ILRM emits
+     `ProposalVoided(disputeId, round, proposalHash)`). From then on `acceptProposal` reverts
+     "No proposal yet", and so does `acceptProposalWithHash` with the old hash;
+   - re-opens the current round's proposal slot for exactly one replacement and bumps the
+     dispute's nonce, so every signature made before the reset is dead.
+
+   It reverts with:
+   - `NoProposalToReset` if the current round has no proposal (earlier rounds were already cleared
+     by `counterPropose`);
+   - `DisputeAlreadyResolved` for resolved disputes;
+   - `ProposalMismatch` if the live round or proposal is not the pinned one;
+   - `ResolutionDeadlinePassed` after the dispute's resolution deadline. No replacement could land
+     then: let `enforceTimeout` resolve the dispute.
+
+   Confirm the ILRM `ProposalVoided` log for every reset dispute.
+
+4. **Warn the parties**
+
+   The proposal stays acceptable only until the reset **executes** (the standard 2-day timelock delay,
+   unless governance classified `resetProposalExact` as Emergency). Tell both parties not to accept it in
+   the meantime: an acceptance mined before the reset stands only until the reset executes, when it is
+   cleared, but if both parties accept first the dispute resolves on that proposal. Parties should
+   accept only with `acceptProposalWithHash(disputeId, proposalHash)`, which reverts "Proposal changed"
+   if the text they reviewed is no longer the live one.
+
+   `counterPropose` is `whenNotPaused` while `acceptProposal` is not, so pausing ILRM removes the
+   parties' own escape (a counter-proposal opens a new round and clears the proposal) without stopping
+   acceptances. Recovery itself (the reset, the void in ILRM and the replacement) works while ILRM is
+   paused.
+
+5. **Register the new operator and submit the corrected proposal**
+   ```solidity
+   bytes memory data = abi.encodeWithSignature("registerOracle(address,bytes32)", newOperator, keyHash);
+   timelock.schedule(oracle, 0, data, bytes32(0), salt, timelock.getRequiredDelay(oracle, data));
+   Oracle.submitProposal(disputeId, correctedProposal, signature) // from newOperator
+   ```
+   The replacement is signed at the bumped nonce (`Oracle.proposalContext` / `Oracle.proposalDigest`).
+   ILRM emits `ProposalSubmitted` (no `ProposalSuperseded`: the old proposal was already voided). If no
+   replacement lands, the parties can still `counterPropose` (new round) or the dispute times out.
 
 ### Action 4: Governance Attack Response
 
@@ -257,10 +357,14 @@ Treasury.setMinStake(newHigherAmount)
 
 **Steps:**
 
-1. **Cancel Proposal** (within timelock delay)
+1. **Cancel Proposal** (within timelock delay, CANCELLER_ROLE)
    ```solidity
-   GovernanceTimelock.cancel(proposalId)
+   GovernanceTimelock.cancel(proposalId)            // or cancelOperation(proposalId)
    ```
+   This also applies to operations queued through `executeEmergency` and `emergencyUnpauseAll`.
+   A guardian that queues an unexpected unpause (`EmergencyActionScheduled` with the timelock as
+   target) is a governance attack: cancel it and follow "If a Guardian (EMERGENCY_ROLE Holder) Is
+   Rogue or Compromised" in `docs/MULTISIG_CONFIG.md`.
 
 2. **If Past Cancellation Window:**
    - Emergency pause all contracts
@@ -287,18 +391,47 @@ Treasury.setMinStake(newHigherAmount)
    cast logs --from-block $PAUSE_BLOCK --to-block latest --address $ILRM_ADDRESS
    ```
 
-2. **Unpause Contracts**
+2. **Queue the Unpause** (it does NOT take effect immediately)
+
+   Unpausing through the timelock that owns the contracts is always queued, at the standard delay
+   (minDelay, 2 days by default), and cancellers can veto it. Plan for that delay: the contracts stay
+   paused until step 4.
    ```solidity
-   ILRM.unpause()
-   Treasury.unpause()
-   AssetRegistry.unpause()
+   // EMERGENCY_ROLE: queues the call emergencyUnpauseAll() on the timelock itself and returns its id.
+   // Emits EmergencyActionScheduled(id, guardian, timelock, salt, readyAt, "Emergency unpause all").
+   bytes32 id = timelock.emergencyUnpauseAll();
+   ```
+   Governance can queue an unpause through an ordinary proposal instead: `unpause()` on a contract
+   (Standard, minDelay) or `emergencyUnpauseAll()` on the timelock (a self-call, longDelay).
+
+3. **Veto Window** - during the delay any `CANCELLER_ROLE` holder can stop it:
+   ```solidity
+   timelock.cancel(id);            // or timelock.cancelOperation(id)
    ```
 
-3. **Monitor Intensively**
+4. **Execute the Unpause After the Delay** (any executor)
+   ```solidity
+   bytes32 salt = timelock.getOperation(id).salt;   // also in EmergencyActionScheduled / OZ CallSalt
+   timelock.execute(timelock, 0, abi.encodeCall(IGovernanceTimelock.emergencyUnpauseAll, ()), bytes32(0), salt);
+   ```
+   The timelock then calls itself and unpauses every registered contract: one `ContractPauseResult`
+   event per contract (with `success`) and `EmergencyActionExecuted(..., "Emergency unpause all")`.
+   Confirm with `cast call $ILRM_ADDRESS "paused()" --rpc-url $RPC_URL` (should return `false`).
+
+   **If the protocol was paused again in the meantime**, the queued unpause can no longer execute.
+   Every operation that unpauses (`unpause()` on any contract, or `emergencyUnpauseAll` on the
+   timelock, queued by a guardian or a proposer) is bound to the pause epoch it was scheduled in, and
+   each `emergencyPauseAll` starts a new epoch: executing an earlier unpause reverts with
+   `StaleUnpause`. OpenZeppelin's views (`isOperationReady`) still report it ready, but
+   `timelock.isOperationStale(id)` is true and `getOperation(id).status` is `Stale`; it is left out of
+   `getPendingOperations()` and listed by `getStaleOperations()`. Once the new incident is resolved,
+   queue a fresh unpause (step 2) and cancel the stale ones (`timelock.cancel(id)`).
+
+5. **Monitor Intensively**
    - Watch for 24 hours post-unpause
    - Lower alert thresholds temporarily
 
-4. **Announce Recovery**
+6. **Announce Recovery**
    - Post on official channels
    - Include brief incident summary
    - Share timeline for full post-mortem

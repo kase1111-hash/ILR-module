@@ -20,126 +20,99 @@ interface IDIDRegistry {
 
     /// @notice Types of attestations that can be issued
     enum AttestationType {
-        Identity,           // Basic identity verification
-        KYC,               // Know Your Customer verification
-        Reputation,        // Reputation from other protocols
-        Governance,        // DAO/governance participation
-        Professional,      // Professional credentials
-        Custom             // Custom attestation type
+        Identity, // Basic identity verification
+        KYC, // Know Your Customer verification
+        Reputation, // Reputation from other protocols
+        Governance, // DAO/governance participation
+        Professional, // Professional credentials
+        Custom // Custom attestation type
     }
 
     /// @notice DID document status
     enum DIDStatus {
-        Inactive,          // Not yet activated
-        Active,            // Currently active
-        Suspended,         // Temporarily suspended
-        Revoked            // Permanently revoked
+        Inactive, // Not yet activated
+        Active, // Currently active
+        Suspended, // Temporarily suspended
+        Revoked // Permanently revoked
     }
 
     // ============ Structs ============
 
     /// @notice Core DID document on-chain representation
     struct DIDDocument {
-        bytes32 did;                    // DID identifier hash
-        address controller;             // Address controlling this DID
-        address[] delegates;            // Authorized delegates
-        uint256 created;                // Creation timestamp
-        uint256 updated;                // Last update timestamp
-        DIDStatus status;               // Current status
-        bytes32 documentHash;           // IPFS hash of full DID document
-        uint256 sybilScore;             // Sybil resistance score (0-100, higher = more trusted)
+        bytes32 did; // DID identifier hash
+        address controller; // Address controlling this DID
+        address[] delegates; // Authorized delegates
+        uint256 created; // Creation timestamp
+        uint256 updated; // Last update timestamp
+        DIDStatus status; // Current status
+        bytes32 documentHash; // IPFS hash of full DID document
+        // Sybil resistance score (0-100, higher = more trusted). getDIDDocument / getDIDByController return the
+        // live score; storage holds the value last recorded by a state-changing call (the SybilScoreUpdated source).
+        uint256 sybilScore;
     }
 
     /// @notice Verifiable Credential representation
     struct Credential {
-        bytes32 credentialId;           // Unique credential identifier
-        bytes32 did;                    // DID this credential is issued to
-        address issuer;                 // Credential issuer address
+        bytes32 credentialId; // Unique credential identifier
+        bytes32 did; // DID this credential is issued to
+        address issuer; // Credential issuer address
         AttestationType attestationType; // Type of attestation
-        bytes32 claimHash;              // Hash of the claim data
-        uint256 issuedAt;               // Issuance timestamp
-        uint256 expiresAt;              // Expiration timestamp (0 = never)
-        bool revoked;                   // Whether credential is revoked
-        uint256 weight;                 // Weight for sybil score calculation (0-100)
+        bytes32 claimHash; // Hash of the claim data
+        uint256 issuedAt; // Issuance timestamp
+        uint256 expiresAt; // Expiration timestamp (0 = never)
+        bool revoked; // Whether credential is revoked
+        uint256 weight; // Weight for sybil score calculation (0-100)
     }
 
     /// @notice Trusted issuer configuration
     struct TrustedIssuer {
-        address issuerAddress;          // Issuer's address
-        string name;                    // Issuer name/identifier
+        address issuerAddress; // Issuer's address
+        string name; // Issuer name/identifier
         AttestationType[] allowedTypes; // Types this issuer can issue
-        uint256 trustLevel;             // Trust level (0-100)
-        bool active;                    // Whether issuer is active
+        uint256 trustLevel; // Trust level (0-100)
+        bool active; // Whether issuer is active
     }
 
     // ============ Events ============
 
     /// @notice Emitted when a DID is registered
-    event DIDRegistered(
-        bytes32 indexed did,
-        address indexed controller,
-        bytes32 documentHash
-    );
+    event DIDRegistered(bytes32 indexed did, address indexed controller, bytes32 documentHash);
 
     /// @notice Emitted when a DID is updated
-    event DIDUpdated(
-        bytes32 indexed did,
-        bytes32 oldDocumentHash,
-        bytes32 newDocumentHash
-    );
+    event DIDUpdated(bytes32 indexed did, bytes32 oldDocumentHash, bytes32 newDocumentHash);
 
     /// @notice Emitted when DID status changes
-    event DIDStatusChanged(
-        bytes32 indexed did,
-        DIDStatus oldStatus,
-        DIDStatus newStatus
-    );
+    event DIDStatusChanged(bytes32 indexed did, DIDStatus oldStatus, DIDStatus newStatus);
 
     /// @notice Emitted when a delegate is added
-    event DelegateAdded(
-        bytes32 indexed did,
-        address indexed delegate,
-        uint256 expiresAt
-    );
+    event DelegateAdded(bytes32 indexed did, address indexed delegate, uint256 expiresAt);
 
     /// @notice Emitted when a delegate is removed
-    event DelegateRemoved(
-        bytes32 indexed did,
-        address indexed delegate
-    );
+    event DelegateRemoved(bytes32 indexed did, address indexed delegate);
 
     /// @notice Emitted when a credential is issued
     event CredentialIssued(
-        bytes32 indexed credentialId,
-        bytes32 indexed did,
-        address indexed issuer,
-        AttestationType attestationType
+        bytes32 indexed credentialId, bytes32 indexed did, address indexed issuer, AttestationType attestationType
     );
 
     /// @notice Emitted when a credential is revoked
-    event CredentialRevoked(
-        bytes32 indexed credentialId,
-        address indexed revoker,
-        string reason
-    );
+    event CredentialRevoked(bytes32 indexed credentialId, address indexed revoker, string reason);
 
-    /// @notice Emitted when sybil score is updated
-    event SybilScoreUpdated(
-        bytes32 indexed did,
-        uint256 oldScore,
-        uint256 newScore
-    );
+    /// @notice Emitted by renewCredential after CredentialRevoked (reason "superseded") for the old credential and
+    ///         CredentialIssued for its replacement, linking the two
+    event CredentialSuperseded(bytes32 indexed oldCredentialId, bytes32 indexed newCredentialId, bytes32 indexed did);
+
+    /// @notice Emitted when the recorded sybil score changes (on issuance, renewal, revocation,
+    ///         revokeIssuerCredentials, cleanup or calculateSybilScore). Expiry and issuer changes alter the live
+    ///         score without an event until one of those calls records it.
+    event SybilScoreUpdated(bytes32 indexed did, uint256 oldScore, uint256 newScore);
 
     /// @notice Emitted when a trusted issuer is added
-    event TrustedIssuerAdded(
-        address indexed issuer,
-        string name
-    );
+    event TrustedIssuerAdded(address indexed issuer, string name);
 
     /// @notice Emitted when a trusted issuer is removed
-    event TrustedIssuerRemoved(
-        address indexed issuer
-    );
+    event TrustedIssuerRemoved(address indexed issuer);
 
     // ============ Errors ============
 
@@ -158,6 +131,16 @@ interface IDIDRegistry {
     error CredentialExpired(bytes32 credentialId);
     error InsufficientSybilScore(bytes32 did, uint256 required, uint256 actual);
     error AddressAlreadyHasDID(address controller);
+    /// @notice DID already holds MAX_CREDENTIALS_FOR_SCORE credentials that are neither revoked nor expired.
+    error TooManyCredentials(bytes32 did);
+    /// @notice The issuer already holds MAX_CREDENTIALS_PER_ISSUER of the DID's credentials that are neither
+    ///         revoked nor expired. renewCredential reuses the renewed credential's slot, so it hits this limit only
+    ///         when that credential had expired and was already pruned.
+    error IssuerCredentialLimit(bytes32 did, address issuer);
+    /// @notice Only a credential's own issuer may renew (supersede) it.
+    error NotCredentialIssuer(bytes32 credentialId, address caller);
+    /// @notice A credential's expiry must be 0 (never) or later than the current block timestamp.
+    error ExpiryNotInFuture(uint256 expiresAt);
 
     // ============ DID Management Functions ============
 
@@ -234,9 +217,19 @@ interface IDIDRegistry {
      * @param did The DID to issue credential to
      * @param attestationType Type of attestation
      * @param claimHash Hash of the claim data
-     * @param expiresAt Expiration timestamp (0 = never)
+     * @param expiresAt Expiration timestamp (0 = never); otherwise must be later than block.timestamp
+     *        (ExpiryNotInFuture)
      * @param weight Weight for sybil score (0-100)
      * @return credentialId The issued credential ID
+     * @dev A DID holds at most MAX_CREDENTIALS_FOR_SCORE (50) credentials, all of which are scored, and one issuer
+     *      holds at most MAX_CREDENTIALS_PER_ISSUER (10) of them. When either limit is reached, revoked and expired
+     *      entries are pruned first (swap-and-pop); if the issuer is still at its limit the call reverts with
+     *      IssuerCredentialLimit, and if the array is still full with TooManyCredentials. The DID controller can
+     *      revoke credentials (one at a time, or all of one issuer's via revokeIssuerCredentials) to make room.
+     *      To replace one of its own credentials (e.g. renew it before it expires), an issuer calls
+     *      renewCredential instead, which needs no extra slot.
+     *      Checks run in this order: paused, trusted issuer, attestation type, DID exists and is active, expiry,
+     *      issuer limit, DID limit.
      */
     function issueCredential(
         bytes32 did,
@@ -247,11 +240,48 @@ interface IDIDRegistry {
     ) external returns (bytes32 credentialId);
 
     /**
+     * @notice Supersede one of the caller's own credentials with a new one of the same attestation type for the
+     *         same DID (e.g. renew it before it expires), without needing a free slot
+     * @param credentialId The credential to supersede: issued by the caller, not revoked (it may have expired)
+     * @param claimHash Hash of the replacement's claim data
+     * @param expiresAt Replacement's expiry (0 = never); otherwise must be later than block.timestamp
+     *        (ExpiryNotInFuture)
+     * @param weight Replacement's weight for the sybil score (0-100)
+     * @return newCredentialId The replacement credential's ID
+     * @dev The old credential is revoked (CredentialRevoked, reason "superseded") and the replacement takes over
+     *      its slot in the DID's credential array, so the array length and the issuer's MAX_CREDENTIALS_PER_ISSUER
+     *      count are unchanged. Only if the old credential had expired and was already pruned does the replacement
+     *      need a slot, exactly as issueCredential would (same IssuerCredentialLimit / TooManyCredentials rules).
+     *      Emits CredentialRevoked, CredentialIssued and CredentialSuperseded. Checks run in this order: paused,
+     *      credential exists (CredentialNotFound), caller is its issuer (NotCredentialIssuer), not revoked
+     *      (CredentialAlreadyRevoked), then issueCredential's checks: trusted issuer, attestation type still
+     *      allowed, DID exists and is active, expiry.
+     */
+    function renewCredential(bytes32 credentialId, bytes32 claimHash, uint256 expiresAt, uint256 weight)
+        external
+        returns (bytes32 newCredentialId);
+
+    /**
      * @notice Revoke a credential
      * @param credentialId The credential to revoke
      * @param reason Reason for revocation
      */
     function revokeCredential(bytes32 credentialId, string calldata reason) external;
+
+    /**
+     * @notice Revoke every credential `issuer` holds in a DID and free their slots in one call
+     * @dev Callable by the DID controller, or by `issuer` for its own credentials. Emits CredentialRevoked for
+     *      each newly revoked credential, then prunes all revoked/expired entries from the DID's array and records
+     *      the new score. Works while paused, whatever the DID's status (active, suspended or revoked), and for an
+     *      issuer that is no longer trusted (it can still clear its own credentials).
+     * @param did The DID to clear
+     * @param issuer The issuer whose credentials are revoked
+     * @param reason Reason for revocation
+     * @return revokedCount Number of credentials newly revoked
+     */
+    function revokeIssuerCredentials(bytes32 did, address issuer, string calldata reason)
+        external
+        returns (uint256 revokedCount);
 
     /**
      * @notice Verify a credential is valid
@@ -264,14 +294,18 @@ interface IDIDRegistry {
      * @notice Get all credentials for a DID
      * @param did The DID to get credentials for
      * @return Array of credential IDs
+     * @dev At most MAX_CREDENTIALS_FOR_SCORE entries. Order is not preserved: revoked/expired entries are removed
+     *      by cleanupCredentials, by revokeIssuerCredentials, or automatically when issuance finds the array full
+     *      or the issuer at its MAX_CREDENTIALS_PER_ISSUER limit.
      */
     function getCredentials(bytes32 did) external view returns (bytes32[] memory);
 
     // ============ Sybil Resistance ============
 
     /**
-     * @notice Calculate and update sybil score for a DID
-     * @dev Based on credentials, their weights, and issuer trust levels
+     * @notice Calculate the sybil score for a DID and record it, emitting SybilScoreUpdated if it changed
+     * @dev Based on credentials, their weights, and issuer trust levels. The views compute the same score live, so
+     *      calling this is never needed for freshness; it only syncs the recorded value and its event.
      * @param did The DID to calculate score for
      * @return score The calculated sybil score (0-100)
      */
@@ -279,6 +313,7 @@ interface IDIDRegistry {
 
     /**
      * @notice Check if DID meets minimum sybil score requirement
+     * @dev Uses the live score; false for an unknown or non-active DID
      * @param did The DID to check
      * @param requiredScore Minimum required score
      * @return True if DID meets requirement
@@ -287,6 +322,8 @@ interface IDIDRegistry {
 
     /**
      * @notice Get current sybil score for a DID
+     * @dev Computed live from the DID's credentials (bounded by MAX_CREDENTIALS_FOR_SCORE), so it reflects
+     *      credential expiry and issuer removal or trust changes without any transaction
      * @param did The DID to query
      * @return Current sybil score
      */
@@ -320,11 +357,7 @@ interface IDIDRegistry {
      * @param allowedTypes New allowed types
      * @param trustLevel New trust level
      */
-    function updateTrustedIssuer(
-        address issuer,
-        AttestationType[] calldata allowedTypes,
-        uint256 trustLevel
-    ) external;
+    function updateTrustedIssuer(address issuer, AttestationType[] calldata allowedTypes, uint256 trustLevel) external;
 
     /**
      * @notice Check if an address is a trusted issuer

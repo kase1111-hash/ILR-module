@@ -107,11 +107,11 @@ The protocol is organized into 4 core contracts, 7 optional modules, and 5 scali
 | **FIDOVerifier.sol** | Hardware-backed authentication | P-256/WebAuthn, RIP-7212 precompile support |
 | **DIDRegistry.sol** | Decentralized identity management | ERC-725 compatible, Verifiable Credentials, Sybil scores |
 | **GovernanceTimelock.sol** | Multi-sig governance with delays | Emergency actions, contract registry, Ownable2Step |
-| **BatchQueue.sol** | Privacy-preserving batch transactions | Fisher-Yates shuffle, Chainlink Automation |
-| **DummyTransactionGenerator.sol** | Transaction pattern obfuscation | Probability-based generation, VRF compatible |
-| **L3Bridge.sol** | Layer 3 rollup bridge | State commitments, fraud proofs, batch settlements |
-| **L3DisputeBatcher.sol** | Batch dispute handling for L3 | Auto-trigger, authorized submitters |
-| **L3StateVerifier.sol** | Merkle proof verification | Sparse tree support, batch verification |
+| **BatchQueue.sol** | Batched, delayed submission to ILRM (hides only *when* an action lands; queued transactions are public) | Interval/size-based FIFO release, per-transaction token escrow returned by cancel or permissionless `reclaim()` (no ETH), cosmetic shuffle, Chainlink Automation; relaying is off until ILRM ships relay entry points |
+| **DummyTransactionGenerator.sol** | Noise in transaction counts and timing (dummies are attributable to the generator on chain) | Keeper-gated probability-based generation, one attempt per interval, per-period count and spend caps; block-derived, predictable randomness (no VRF) |
+| **L3Bridge.sol** | Layer 3 rollup bridge. ⚠️ **Not production-ready - must not be deployed** (fraud proofs check no state transition, no sequencer bond, settlements not tied to finalized roots, bridged disputes not validated against the ILRM; see [SPEC.md 4.3](SPEC.md#43-l3app-specific-rollups-natlangchain-roadmapmd)) | State commitments, fraud proofs, batch settlements |
+| **L3DisputeBatcher.sol** | Batch dispute handling for L3. ⚠️ **Not production-ready - must not be deployed** (relays for the unsound L3Bridge) | Auto-trigger with failure backoff, authorized submitters |
+| **L3StateVerifier.sol** | Merkle proof verification. ⚠️ **Not production-ready - must not be deployed** (verifies against L3Bridge roots, whose finality is unsound) | Sparse tree support, batch verification |
 
 ---
 
@@ -130,7 +130,7 @@ The protocol is organized into 4 core contracts, 7 optional modules, and 5 scali
 - **FIDO2/WebAuthn**: Hardware-backed authentication for acceptances
 - **Decentralized Identity (DID)**: Sybil-resistant participation via credentials
 - **Viewing Keys**: Selective de-anonymization with threshold voting
-- **Batch Transactions**: Privacy-preserving transaction batching
+- **Batch Transactions**: Batched, delayed submission that decouples when an action lands from when it was queued (timing only; queued transactions are public)
 
 ### Compliance & Governance
 - **Compliance Council**: BLS threshold signatures for legal warrants
@@ -211,7 +211,7 @@ See `docs/SECURITY_AUDIT_REPORT.md` for full details.
 
 ### Prerequisites
 - [Foundry](https://getfoundry.sh/) for Solidity development
-- [Node.js](https://nodejs.org/) v18+ for TypeScript SDK
+- [Node.js](https://nodejs.org/) v20.19+ for Hardhat and the TypeScript SDK
 - Solidity ^0.8.20
 
 ### Setup
