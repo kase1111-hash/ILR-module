@@ -406,13 +406,14 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         nonReentrant
     {
         WarrantRequest storage warrant = _existingWarrant(warrantId);
+        CouncilMember storage m = _activeMember();
 
         require(warrant.status == WarrantStatus.Pending, "Not pending");
         require(block.timestamp <= warrant.votingEndsAt, "Voting ended");
         require(!_hasVoted[warrantId][msg.sender], "Already voted");
 
         _hasVoted[warrantId][msg.sender] = true;
-        _members[msg.sender].votesParticipated++;
+        m.votesParticipated++;
 
         if (approve) {
             warrant.approvalsCount++;
@@ -514,14 +515,15 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         nonReentrant
     {
         WarrantRequest storage warrant = _existingWarrant(warrantId);
-        CouncilMember storage m = _members[msg.sender];
+        // Active, so keyId != 0: a removed member's submission would otherwise carry keyId 0 and match its
+        // zeroed CouncilMember.keyId in _isCurrent
+        CouncilMember storage m = _activeMember();
         uint256 keyId = m.keyId;
 
         require(warrant.status == WarrantStatus.Approved || warrant.status == WarrantStatus.Executing, "Not approved");
         require(block.timestamp >= warrant.executionTime, "Execution delayed");
         require(block.timestamp <= warrant.executionTime + _config.signatureTimeout, "Signature timeout");
-        // One submission per key registration: a member signs again only after a key rotation. A MEMBER_ROLE
-        // holder that was never registered through addMember has keyId 0 and is rejected here too.
+        // One submission per key registration: a member signs again only after a key rotation
         require(_submittedKeyId[warrantId][msg.sender] != keyId, "Already submitted");
 
         // Update status if first signature
@@ -781,6 +783,15 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
     }
 
     /**
+     * @dev The caller's member record, which must be active. MEMBER_ROLE alone is not membership: its role admin
+     *      can grant it directly, without addMember, also back to a removed member (inactive, keyId 0).
+     */
+    function _activeMember() private view returns (CouncilMember storage m) {
+        m = _members[msg.sender];
+        require(m.isActive, "Not a member");
+    }
+
+    /**
      * @dev Validates `pk`, reserves it for `member` and returns a fresh key registration id. Rejects a key held
      *      by an active member or equal to the group key.
      */
@@ -794,12 +805,14 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
 
     /**
      * @dev A submission counts while its signer still holds the key registration it was verified under:
-     *      removal zeroes CouncilMember.keyId and rotation replaces it. Submission key ids are never 0.
+     *      removal zeroes CouncilMember.keyId and rotation replaces it. Only active members (keyId != 0) submit;
+     *      the keyId != 0 test keeps a removed member's zeroed keyId from ever matching regardless.
      */
     function _isCurrent(SignatureSubmission storage sub) private view returns (bool) {
+        uint256 keyId = sub.keyId;
         // Key ids are counters, not timestamps: Slither taints all of _members because it also stores joinedAt
         // slither-disable-next-line incorrect-equality
-        return sub.keyId == _members[sub.signer].keyId;
+        return keyId != 0 && keyId == _members[sub.signer].keyId;
     }
 
     /// @dev Number of submissions that currently count toward the threshold (at most one per member)

@@ -671,6 +671,37 @@ describe("ComplianceCouncil BLS12-381 (EIP-2537)", function () {
       await expect(council.executeReconstruction(1)).to.emit(council, "KeyReconstructed");
     });
 
+    it("a removed member whose MEMBER_ROLE is granted back directly can neither sign nor vote", async function () {
+      const { council, members, dkg, message, requester, docHash } = await loadFixture(warrantFixture);
+      for (const i of [1, 2, 3]) await signAs(council, members, dkg, message, 1, i);
+      await council.removeMember(members[2].address);
+      await expect(council.executeReconstruction(1)).to.be.revertedWith("Insufficient signatures");
+
+      // The role without addMember: still inactive, key registration id 0, stale share key still stored
+      await council.grantRole(await council.MEMBER_ROLE(), members[2].address);
+      const m = await council.getMember(members[2].address);
+      expect(m.isActive).to.equal(false);
+      expect(m.keyId).to.equal(0n);
+
+      // Its share-3 partial verifies against that stale key; recorded under keyId 0 it would have matched the
+      // zeroed registration and completed the threshold with two active signers
+      const partial = await sdk.signPartial(dkg.shares[2], message);
+      await expect(council.connect(members[2]).submitSignature(1, sdkSig(partial.signature))).to.be.revertedWith(
+        "Not a member"
+      );
+      expect((await council.getSignatures(1)).length).to.equal(3);
+      await expect(council.executeReconstruction(1)).to.be.revertedWith("Insufficient signatures");
+
+      await council.connect(requester).submitWarrantRequest(0, 44, docHash, "US");
+      await expect(council.connect(members[2]).castVote(3, true, "")).to.be.revertedWith("Not a member");
+
+      // Its key index can go to a new member, whose partial at x = 3 completes the threshold
+      await council.addMember(members[5].address, 0, sdkPk(dkg.shares[2].publicKey), 3);
+      await council.connect(members[5]).submitSignature(1, sdkSig(partial.signature));
+      await council.executeReconstruction(1);
+      expect((await council.getWarrant(1)).decryptedKeyHash).to.equal(await expectedKeyHash(dkg, message, [1, 2, 3]));
+    });
+
     it("a re-added member's old partial stays void until it signs again", async function () {
       const { council, members, dkg, message } = await loadFixture(warrantFixture);
       for (const i of [1, 2, 3]) await signAs(council, members, dkg, message, 1, i);

@@ -206,6 +206,78 @@ contract ComplianceCouncilFollowUpsTest is Test {
         _sign(m2, id, 202);
     }
 
+    // ============ (1) Only active members sign and vote, whatever their roles ============
+
+    /// @dev Removed after signing, then MEMBER_ROLE granted back directly (not through addMember): the member is
+    ///      inactive with keyId 0, so a new partial recorded under keyId 0 would match it and count
+    function test_RemovedMemberWithRegrantedRoleCannotSign() public {
+        uint256 id = _hybridApprovedWarrant();
+        _sign(m1, id, 101);
+        _sign(m2, id, 202);
+        _attest(id);
+
+        vm.startPrank(admin);
+        council.removeMember(m2);
+        council.grantRole(council.MEMBER_ROLE(), m2);
+        vm.stopPrank();
+        assertTrue(council.hasRole(council.MEMBER_ROLE(), m2));
+        assertFalse(council.isMember(m2));
+        assertEq(council.getMember(m2).keyId, 0);
+
+        vm.prank(m2);
+        vm.expectRevert(bytes("Not a member"));
+        council.submitSignature(id, _sig(202));
+
+        assertEq(council.getSignatures(id).length, 2);
+        assertFalse(council.hasSubmittedSignature(id, m2));
+        vm.expectRevert(bytes("Insufficient signatures"));
+        council.executeReconstruction(id);
+
+        // An active member completes the threshold
+        _sign(m3, id, 303);
+        council.executeReconstruction(id);
+    }
+
+    function test_RoleHolderNeverAddedCannotSignOrVote() public {
+        uint256 id = _hybridApprovedWarrant();
+        vm.startPrank(admin);
+        council.grantRole(council.MEMBER_ROLE(), m4);
+        vm.stopPrank();
+        uint256 pending = _newWarrant(2);
+
+        vm.prank(m4);
+        vm.expectRevert(bytes("Not a member"));
+        council.submitSignature(id, _sig(404));
+
+        vm.prank(m4);
+        vm.expectRevert(bytes("Not a member"));
+        council.castVote(pending, true, "");
+        assertFalse(council.hasVoted(pending, m4));
+    }
+
+    /// @dev A removed member's vote would otherwise count toward the approvals and the all-voted auto-conclusion
+    function test_RemovedMemberWithRegrantedRoleCannotVote() public {
+        _addThree();
+        vm.startPrank(admin);
+        council.setAuthorizedRequester(requester, true);
+        council.removeMember(m3);
+        council.grantRole(council.MEMBER_ROLE(), m3);
+        vm.stopPrank();
+        uint256 id = _newWarrant(5);
+
+        vm.prank(m3);
+        vm.expectRevert(bytes("Not a member"));
+        council.castVote(id, true, "");
+
+        vm.prank(m1);
+        council.castVote(id, true, "");
+        assertEq(uint256(council.getWarrant(id).status), uint256(IComplianceCouncil.WarrantStatus.Pending));
+        vm.prank(m2);
+        council.castVote(id, true, "");
+        assertEq(uint256(council.getWarrant(id).status), uint256(IComplianceCouncil.WarrantStatus.Approved));
+        assertEq(council.getWarrant(id).approvalsCount, 2);
+    }
+
     // ============ (2) updateConfig keeps the member count ============
 
     function test_UpdateConfigIgnoresTotalMembers() public {

@@ -299,6 +299,8 @@ interface IComplianceCouncil {
 
     /**
      * @notice Cast vote on a warrant request
+     * @dev Caller must be an active member (added through addMember and not removed); MEMBER_ROLE alone is not
+     *      enough
      * @param warrantId Warrant to vote on
      * @param approve True to approve, false to reject
      * @param reason Reason for vote
@@ -338,8 +340,9 @@ interface IComplianceCouncil {
     /**
      * @notice Submit a partial signature for key reconstruction
      * @dev Signs getSigningMessage(warrantId). When the precompiles are available the signature must verify
-     *      against the caller's registered key share. One submission per member and key registration: after a
-     *      key rotation the member may submit again.
+     *      against the caller's registered key share. Caller must be an active member (MEMBER_ROLE alone is not
+     *      enough). One submission per member and key registration: after a key rotation the member may submit
+     *      again.
      * @param warrantId Approved warrant ID
      * @param signature BLS signature (G2)
      */
