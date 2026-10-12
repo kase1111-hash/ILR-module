@@ -10,11 +10,13 @@ import "./interfaces/IILRM.sol";
 
 /**
  * @title NatLangChainTreasury
- * @notice Treasury contract for ILRM protocol - holds protocol token deposits and funds defensive subsidies
+ * @notice Treasury contract for ILRM protocol - holds protocol tokens (deposits and subsidy repayments) and funds
+ *         defensive subsidies
  * @dev Implements the Treasury described in Treasury.md
  *
  * Key Features:
- * - Holds protocol tokens deposited via deposit() (ILRM burns go to 0xdEaD and never reach this contract)
+ * - Holds protocol tokens deposited via deposit() and the subsidy repayments ILRM sends back as plain ERC20
+ *   transfers on resolution (see below); ILRM burns go to 0xdEaD and never reach this contract
  * - Subsidizes defensive stakes for low-resource counterparties
  * - Anti-Sybil protections (single subsidy per (ILRM, dispute), rolling caps, harassment scores)
  * - Owner-administered parameters (Ownable2Step; intended owner: GovernanceTimelock): the owner can update

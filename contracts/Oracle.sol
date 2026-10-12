@@ -328,8 +328,14 @@ contract NatLangChainOracle is IOracle, Ownable2Step {
     /**
      * @notice Set the dispute contract this oracle serves
      * @dev The consumer must implement IOracleConsumer (ILRM or MultiPartyILRM) and must have been deployed with
-     *      this Oracle as its oracle. Re-pointing to a different consumer whose dispute IDs overlap is unsupported
-     *      (round slots and nonces are keyed by disputeId only); use resetProposal to clear a stale slot.
+     *      this Oracle as its oracle. Re-pointing to a different consumer whose dispute IDs overlap is unsupported:
+     *      round slots and nonces are keyed by disputeId only, so a slot the old consumer filled blocks
+     *      submitProposal for the new consumer's dispute with the same ID in that round. resetProposal reads the
+     *      new consumer, so it clears such a slot only while it is the slot of that dispute's current round and the
+     *      dispute is unresolved and at or before its resolution deadline (an ID the new consumer never created has
+     *      start time 0, so its deadline has long passed and the reset reverts); the consumer's void hook also
+     *      reverts if it holds a different live proposal. Give a consumer with overlapping dispute IDs a fresh
+     *      Oracle instead.
      * @param _ilrm New consumer address
      */
     function setILRM(address _ilrm) external onlyOwner {
