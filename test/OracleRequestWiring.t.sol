@@ -171,7 +171,7 @@ contract OracleRequestWiringTest is Test {
         vm.expectEmit(true, false, false, true, address(oracle));
         emit ProposalRequested(id, EVIDENCE_0, block.timestamp);
         vm.prank(counterparty);
-        ilrm.depositStakeWithSubsidy(id, type(uint256).max);
+        ilrm.depositStakeWithSubsidy(id, type(uint256).max, type(uint256).max);
 
         assertTrue(oracle.isPending(id));
         (, uint256 amount) = ilrm.stakeSubsidy(id);

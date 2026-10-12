@@ -282,14 +282,15 @@ async function requestSubsidy(contracts, signer) {
   const [preview, eligible] = await contracts.treasury.calculateSubsidy(disputeId, requested, signer.address);
   if (!eligible) throw new Error(`No subsidy available for ${signer.address} on dispute #${disputeId}`);
 
-  // Approve ILRM for exactly the top-up (the allowance also bounds what the call can charge)
+  // maxTopUp is the slippage bound: the call reverts if a smaller-than-previewed grant would make the
+  // signer pay more than this. Default to the previewed top-up; MAX_TOP_UP overrides it.
   const ilrmAddress = await contracts.ilrm.getAddress();
-  const topUp = stake - preview;
-  if (topUp > 0n) {
+  const maxTopUp = process.env.MAX_TOP_UP ? ethers.parseEther(process.env.MAX_TOP_UP) : stake - preview;
+  if (maxTopUp > 0n) {
     const allowance = await contracts.token.allowance(signer.address, ilrmAddress);
-    if (allowance < topUp) {
-      console.log(`Approving ILRM for the ${ethers.formatEther(topUp)}-token top-up...`);
-      const approveTx = await contracts.token.connect(signer).approve(ilrmAddress, topUp);
+    if (allowance < maxTopUp) {
+      console.log(`Approving ILRM for a top-up of up to ${ethers.formatEther(maxTopUp)} tokens...`);
+      const approveTx = await contracts.token.connect(signer).approve(ilrmAddress, maxTopUp);
       await approveTx.wait();
     }
   }
@@ -298,7 +299,7 @@ async function requestSubsidy(contracts, signer) {
     `Staking ${ethers.formatEther(stake)} tokens on dispute #${disputeId} ` +
     `with a subsidy of up to ${ethers.formatEther(preview)} tokens...`
   );
-  const tx = await contracts.ilrm.connect(signer).depositStakeWithSubsidy(disputeId, maxSubsidy);
+  const tx = await contracts.ilrm.connect(signer).depositStakeWithSubsidy(disputeId, maxSubsidy, maxTopUp);
   const receipt = await tx.wait();
   const [funder, amount] = await contracts.ilrm.stakeSubsidy(disputeId);
   console.log(`Subsidized stake deposited (tx: ${receipt.hash})`);
@@ -419,7 +420,7 @@ async function main() {
       console.log("  accept-proposal    DISPUTE_ID=<id> [PROPOSAL_HASH=<bytes32>]  (hash-bound; see status)");
       console.log("  counter-propose    DISPUTE_ID=<id> [COUNTER_FEE=<eth>] [EVIDENCE_HASH=<bytes32>]");
       console.log("  enforce-timeout    DISPUTE_ID=<id>");
-      console.log("  request-subsidy    DISPUTE_ID=<id> [MAX_SUBSIDY=<amount>]");
+      console.log("  request-subsidy    DISPUTE_ID=<id> [MAX_SUBSIDY=<amount>] [MAX_TOP_UP=<amount>]");
       console.log("  status             DISPUTE_ID=<id>");
       console.log("  treasury-status");
       console.log("\nExample:");
