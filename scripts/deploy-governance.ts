@@ -113,7 +113,8 @@ const DUMMY_GENERATOR = "contracts/scaling/DummyTransactionGenerator.sol:DummyTr
  * defensive calls the EMERGENCY_ROLE may queue through executeEmergency (Emergency, default-deny).
  *
  * Not classified on purpose (Standard, minDelay): parameter setters (Treasury.updateCaps/setMinReserve/
- * setHarassmentScore, ILRM.updateHarassmentScore, Oracle.registerOracle/updateOracleKey/resetProposal)
+ * setHarassmentScore, ILRM.updateHarassmentScore, Oracle.registerOracle/updateOracleKey/resetProposal; the
+ * pinned Oracle.resetProposalExact is Emergency because its effect is bounded to the named proposal)
  * and pause()/unpause(). The timelock rejects unpause() as Emergency and binds every queued unpause to
  * the pause epoch it was scheduled in. Treasury.fundStakeSubsidy is onlyILRM (never called by the
  * timelock), so it needs no class.
@@ -141,6 +142,8 @@ export function buildCallPolicy(config: PolicyAddresses): CallPolicyEntry[] {
     longDelay(TREASURY, config.treasuryAddress, "emergencyWithdrawETH(address,uint256)"),
     longDelay(ILRM, config.ilrmAddress, "withdrawTreasury(address,uint256)"),
     longDelay(ILRM, config.ilrmAddress, "setSubsidyTreasury(address)"),
+    // Incentive caps bound how much of tokenReserves sybil farming can extract; raising them is a fund movement
+    longDelay(ILRM, config.ilrmAddress, "setInitiatorIncentiveCaps(uint256,uint256,uint256)"),
     longDelay(ASSET_REGISTRY, config.assetRegistryAddress, "authorizeILRM(address)"),
 
     // LongDelay: optional modules, classified when deployed (warn if missing)
@@ -154,6 +157,8 @@ export function buildCallPolicy(config: PolicyAddresses): CallPolicyEntry[] {
     emergency(ORACLE, config.oracleAddress, "revokeOracle(address)"),
     emergency(ORACLE, config.oracleAddress, "cancelPendingRequest(uint256)"),
     emergency(ASSET_REGISTRY, config.assetRegistryAddress, "revokeILRM(address)"),
+    // Voids only the named (round, proposal hash) and reverts if a later proposal has landed
+    emergency(ORACLE, config.oracleAddress, "resetProposalExact(uint256,uint256,bytes32,string)"),
   ];
 }
 
