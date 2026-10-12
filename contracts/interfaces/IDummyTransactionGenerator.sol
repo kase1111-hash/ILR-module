@@ -18,8 +18,8 @@ pragma solidity ^0.8.20;
  * - Chainlink Automation compatible (checkUpkeep / performUpkeep); generation is keeper- or owner-only
  *
  * Safety:
- * - Only the keeper or owner can trigger generation, at most one attempt (generated or skipped) per
- *   minInterval
+ * - Only the keeper or owner can trigger generation, at most one attempt (generated, skipped or failed)
+ *   per minInterval: a failing target call or the caller's gas limit cannot undo a drawn attempt
  * - Hard per-period caps (count and treasury spend, including the cost of the dummy being generated)
  *   bound the spend on every generation path, whatever the randomness
  * - Generation only ever sends ETH to the owner-set, code-checked ILRM (the constant voluntary-request
@@ -79,6 +79,10 @@ interface IDummyTransactionGenerator {
     /// @notice Emitted when generation is triggered but skipped (probability)
     event GenerationSkipped(uint256 randomValue, uint256 threshold);
 
+    /// @notice Emitted when an attempt passed the probability gate but its generation failed (the target
+    ///         call reverted or ran out of gas). The generation is rolled back; the attempt stays consumed.
+    event GenerationFailed(DummyTxType txType);
+
     /// @notice Emitted when a dummy address is registered
     event DummyAddressRegistered(address indexed dummyAddress, uint256 index);
 
@@ -108,11 +112,13 @@ interface IDummyTransactionGenerator {
     /**
      * @notice Attempt to generate a dummy transaction
      * @dev Keeper or owner only; pausable. Returns (false, VoluntaryRequest) without effects when
-     *      canGenerate() is false. Otherwise records the attempt before drawing, so at most one attempt
-     *      (generated or skipped) happens per minInterval and a skip cannot be retried. Uses block-derived
-     *      randomness to decide whether to generate (see Privacy Model). Reverts if the target call fails.
+     *      canGenerate() is false. Otherwise needs MIN_ATTEMPT_GAS gas left (reverts "Insufficient gas"
+     *      before drawing), then records the attempt and draws, so at most one attempt (generated, skipped
+     *      or failed) happens per minInterval and no outcome can be retried. Uses block-derived randomness
+     *      to decide whether to generate (see Privacy Model). Does not revert if the target call fails: the
+     *      generation is rolled back, GenerationFailed is emitted and (false, the drawn type) is returned.
      * @return generated True if a dummy tx was generated
-     * @return txType The type of dummy tx generated (if any)
+     * @return txType The type of dummy tx generated, or whose generation failed (VoluntaryRequest if none)
      */
     function tryGenerate() external returns (bool generated, DummyTxType txType);
 
@@ -147,8 +153,10 @@ interface IDummyTransactionGenerator {
 
     /**
      * @notice Chainlink Automation perform function
-     * @dev Keeper or owner only; pausable. Same as tryGenerate (internal call); the outcome is reported
-     *      by DummyTransactionGenerated or GenerationSkipped.
+     * @dev Keeper or owner only; pausable. Same as tryGenerate (internal call), including the
+     *      MIN_ATTEMPT_GAS requirement: register the upkeep with a gas limit of at least 1,000,000 (a cold
+     *      attempt with 50 dummy addresses needs about 935k). The outcome is reported by
+     *      DummyTransactionGenerated, GenerationSkipped or GenerationFailed.
      * @param performData Data from checkUpkeep (unused)
      */
     function performUpkeep(bytes calldata performData) external;
