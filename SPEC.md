@@ -144,20 +144,21 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 
 | Feature | Status | Location | Notes |
 |---------|--------|----------|-------|
-| Council Member Management | ✅ | `ComplianceCouncil.sol:215-285` | Add/remove with BLS keys |
-| Member Role Types | ✅ | `IComplianceCouncil.sol:35-42` | 5 roles: User, DAO, Auditor, Legal, Regulator |
-| Warrant Request Submission | ✅ | `ComplianceCouncil.sol:295-335` | With document hash and jurisdiction |
-| Threshold Voting | ✅ | `ComplianceCouncil.sol:340-390` | m-of-n approval/rejection |
-| Appeal Mechanism | ✅ | `ComplianceCouncil.sol:410-425` | Before execution delay expires |
-| BLS Signature Submission | ✅ | `ComplianceCouncil.sol:486-534` | Per-member signatures, verified on chain against the member's G1 key share |
-| Signature Aggregation | ✅ | `ComplianceCouncil.sol:551-567` | Plain G2 sum on chain; threshold (Lagrange) aggregation off chain in the SDK |
-| Threshold Verification | ✅ | `ComplianceCouncil.sol:570-592` | Aggregate checked against the admin-set DKG group key; signer indices validated; informational |
-| Key Reconstruction | ✅ | `ComplianceCouncil.sol:552-600` | Execute reveal after threshold |
+| Council Member Management | ✅ | `ComplianceCouncil.addMember` / `removeMember` / `rotateMemberKey` | BLS G1 key shares at distinct key indices in [1, r); keys unique and kept apart from the group key; removal or rotation voids the member's partial signatures, removal also its votes |
+| Member Role Types | ✅ | `IComplianceCouncil.MemberRole` | 5 roles: User, DAO, Auditor, Legal, Regulator |
+| Warrant Request Submission | ✅ | `ComplianceCouncil.submitWarrantRequest` | With document hash and jurisdiction |
+| Threshold Voting | ✅ | `ComplianceCouncil.castVote` / `concludeVoting` | m-of-n approval/rejection by active members; only votes of members still in the membership they voted in count (a removed member's vote no longer counts; key rotation keeps it) |
+| Appeal Mechanism | ✅ | `ComplianceCouncil.fileAppeal` | Before execution delay expires |
+| BLS Signature Submission | ✅ | `ComplianceCouncil.submitSignature` | Per-member partial signatures, verified on chain against the member's G1 key share; one per key registration |
+| Current Partials | ✅ | `ComplianceCouncil.getCurrentSignatures`, SDK `selectCurrentSubmissions` | Only partials whose signer still holds the key they were made under count; `getSignatures` also lists stale ones |
+| Signature Aggregation | ✅ | `ComplianceCouncil.aggregateSignatures` | Plain G2 sum (G2MSM) of validated elements; an infinity sum is rejected. Threshold (Lagrange) aggregation: on chain in `executeReconstruction`, off chain in the SDK (`aggregateWarrantSignature`) |
+| Threshold Verification | ✅ | `ComplianceCouncil.verifyThresholdSignature` | Aggregate checked against the admin-set DKG group key; signer indices validated; informational |
+| Key Reconstruction | ✅ | `ComplianceCouncil.executeReconstruction` | Needs threshold current partials. STRICT_ONCHAIN Lagrange-interpolates them at zero on chain (`BLS12381.interpolateG2AtZero`) into the group signature f(0)·H(m) and verifies it against the group key; HYBRID_ATTESTED takes the operator's attestation of the same value. Records `decryptedKeyHash` = keccak256 of the 256-byte EIP-2537 encoding of that group signature (SDK `computeDecryptedKeyHash`), which BLS uniqueness makes independent of the signing subset; the partials are public, so it is a public commitment, not a secret |
 | BLS12-381 Precompiles | ✅ | `libraries/BLS12381.sol` | Final EIP-2537 addresses, RFC 9380 hash-to-G2, known-answer detection, fails closed without them |
-| **Execution Modes** | ✅ | `ComplianceCouncil.sol:29-52` | DISABLED, STRICT_ONCHAIN, HYBRID_ATTESTED |
-| **Mode Governance** | ✅ | `ComplianceCouncil.sol:159-169` | Admin-controlled with reason logging |
-| **Hybrid Attestation** | ✅ | `ComplianceCouncil.sol:178-195` | Operator confirmation for off-chain verification |
-| Pausable Operations | ✅ | `ComplianceCouncil.sol:590-610` | Emergency pause support |
+| **Execution Modes** | ✅ | `ComplianceCouncil.ExecutionMode` | DISABLED, STRICT_ONCHAIN, HYBRID_ATTESTED |
+| **Mode Governance** | ✅ | `ComplianceCouncil.setExecutionMode` / `governanceOverrideMode` | Admin-controlled (or governance timelock override) with reason logging |
+| **Hybrid Attestation** | ✅ | `ComplianceCouncil.attestHybridVerification` | Operator attests the off-chain verified decryptedKeyHash (SDK `aggregateWarrantSignature`) |
+| Pausable Operations | ✅ | `ComplianceCouncil.pause` / `unpause` | Emergency pause support |
 
 ### Treasury Contract
 
@@ -1158,11 +1159,12 @@ treasury.setTieredSubsidyConfig(
 | `concludeVoting()` | Finalize voting after period ends |
 | `fileAppeal()` | Appeal approved warrant |
 | `submitSignature()` | Submit partial BLS signature |
-| `aggregateSignatures()` | Plain G2 sum of signatures |
+| `getCurrentSignatures()` | Partial signatures that currently count (`getSignatures()` lists every submission) |
+| `aggregateSignatures()` | Plain G2 sum of signatures (rejects an infinity sum) |
 | `setAggregatedPublicKey()` | Set the DKG group public key (admin) |
 | `getSigningMessage()` | Warrant message bound to chain id and council address |
 | `verifyThresholdSignature()` | Verify an aggregate against the group key |
-| `executeReconstruction()` | Reconstruct key after threshold |
+| `executeReconstruction()` | Reconstruct the group signature after threshold and record its hash as `decryptedKeyHash` |
 
 #### Member Roles:
 
@@ -1193,6 +1195,9 @@ treasury.setTieredSubsidyConfig(
 | `signPartial()` | Create partial BLS signature |
 | `aggregateSignatures()` | Lagrange coefficient aggregation |
 | `verifyThresholdSignature()` | Verify aggregated signature |
+| `selectCurrentSubmissions()` | Drop stale submissions (removed signer, rotated key) from `getSignatures()` output |
+| `aggregateWarrantSignature()` | Read current partials from the council, verify and aggregate them, return `decryptedKeyHash` |
+| `computeDecryptedKeyHash()` | `decryptedKeyHash` of a threshold signature |
 | `reconstructSecret()` | Reconstruct master secret from shares |
 | `decryptViewingKey()` | Decrypt viewing key using reconstructed secret |
 

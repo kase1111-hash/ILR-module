@@ -32,6 +32,7 @@ import {BLS12381Verifier} from "./libraries/BLS12381Verifier.sol";
  *   verification fails closed and STRICT_ONCHAIN cannot be selected
  * - Member keys are Shamir shares sk_i = f(keyIndex_i) of the group key sk = f(0); a partial signature counts
  *   only while its signer still holds the key it was verified against (not removed, key not rotated since).
+ *   A vote likewise counts only while its voter is still a member under the membership it voted in.
  *   In STRICT_ONCHAIN, executeReconstruction Lagrange-combines threshold partials into the group signature
  *   sk * H(m), checks it against the group key and records keccak256 of it as the warrant's decryptedKeyHash.
  */
@@ -88,7 +89,9 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
 
     /// @notice Votes per warrant
     mapping(uint256 => Vote[]) private _warrantVotes;
-    mapping(uint256 => mapping(address => bool)) private _hasVoted;
+
+    /// @notice Membership id of each member's latest vote per warrant (0 = none)
+    mapping(uint256 => mapping(address => uint256)) private _votedMembershipId;
 
     /// @notice Signatures per warrant
     mapping(uint256 => SignatureSubmission[]) private _warrantSignatures;
@@ -287,7 +290,9 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
             joinedAt: block.timestamp,
             votesParticipated: 0,
             signaturesProvided: 0,
-            keyId: keyId
+            keyId: keyId,
+            // A fresh id (the counter is shared with key registrations): voids the votes of an earlier membership
+            membershipId: keyId
         });
 
         if (firstAdd) _memberAddresses.push(member);
@@ -306,8 +311,9 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         require(_config.totalMembers > _config.threshold, "Cannot go below threshold");
 
         m.isActive = false;
-        // Voids the member's submitted partial signatures (see _isCurrent)
+        // Voids the member's submitted partial signatures (see _isCurrent) and votes (see _tallyVotes)
         m.keyId = 0;
+        m.membershipId = 0;
         delete _keyIndexHolder[m.keyIndex];
         delete _keyHolder[_keyHash(m.publicKey)];
         _config.totalMembers--;
@@ -406,30 +412,34 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         nonReentrant
     {
         WarrantRequest storage warrant = _existingWarrant(warrantId);
+        // Active, so membershipId != 0 (see _tallyVotes)
         CouncilMember storage m = _activeMember();
+        uint256 membershipId = m.membershipId;
 
         require(warrant.status == WarrantStatus.Pending, "Not pending");
         require(block.timestamp <= warrant.votingEndsAt, "Voting ended");
-        require(!_hasVoted[warrantId][msg.sender], "Already voted");
+        // One vote per membership: a removed and re-added member votes again
+        require(_votedMembershipId[warrantId][msg.sender] != membershipId, "Already voted");
 
-        _hasVoted[warrantId][msg.sender] = true;
+        _votedMembershipId[warrantId][msg.sender] = membershipId;
         m.votesParticipated++;
 
-        if (approve) {
-            warrant.approvalsCount++;
-        } else {
-            warrant.rejectionsCount++;
-        }
-
         _warrantVotes[warrantId].push(
-            Vote({voter: msg.sender, approved: approve, timestamp: block.timestamp, reason: reason})
+            Vote({
+                voter: msg.sender,
+                approved: approve,
+                timestamp: block.timestamp,
+                reason: reason,
+                membershipId: membershipId
+            })
         );
 
-        emit VoteCast(warrantId, msg.sender, approve, warrant.approvalsCount, warrant.rejectionsCount);
+        (uint256 approvals, uint256 rejections) = _tallyVotes(warrantId);
+        emit VoteCast(warrantId, msg.sender, approve, approvals, rejections);
 
-        // Auto-conclude if all members voted
-        if (warrant.approvalsCount + warrant.rejectionsCount >= _config.totalMembers) {
-            _concludeVoting(warrantId);
+        // Auto-conclude once every active member has a vote that counts (at most one each)
+        if (approvals + rejections >= _config.totalMembers) {
+            _concludeVoting(warrantId, approvals, rejections);
         }
     }
 
@@ -440,21 +450,25 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         require(warrant.status == WarrantStatus.Pending, "Not pending");
         require(block.timestamp > warrant.votingEndsAt, "Voting not ended");
 
-        _concludeVoting(warrantId);
+        (uint256 approvals, uint256 rejections) = _tallyVotes(warrantId);
+        _concludeVoting(warrantId, approvals, rejections);
     }
 
-    function _concludeVoting(uint256 warrantId) internal {
+    /// @dev Records the tally of the votes that count (see _tallyVotes) and decides the warrant on it
+    function _concludeVoting(uint256 warrantId, uint256 approvals, uint256 rejections) internal {
         WarrantRequest storage warrant = _warrants[warrantId];
+        warrant.approvalsCount = approvals;
+        warrant.rejectionsCount = rejections;
 
         // Require threshold approvals
-        if (warrant.approvalsCount >= _config.threshold) {
+        if (approvals >= _config.threshold) {
             warrant.status = WarrantStatus.Approved;
             warrant.executionTime = block.timestamp + _config.executionDelay;
         } else {
             warrant.status = WarrantStatus.Rejected;
         }
 
-        emit VotingConcluded(warrantId, warrant.status, warrant.approvalsCount, warrant.rejectionsCount);
+        emit VotingConcluded(warrantId, warrant.status, approvals, rejections);
     }
 
     /// @inheritdoc IComplianceCouncil
@@ -484,6 +498,10 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         );
 
         WarrantStatus oldStatus = warrant.status;
+        // The vote tally is stored when voting closes (see getWarrant), also when it is cut short
+        if (oldStatus == WarrantStatus.Pending) {
+            (warrant.approvalsCount, warrant.rejectionsCount) = _tallyVotes(warrantId);
+        }
         warrant.status = WarrantStatus.Rejected;
 
         emit WarrantCancelled(warrantId, oldStatus, msg.sender, reason);
@@ -495,8 +513,14 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
     );
 
     /// @inheritdoc IComplianceCouncil
-    function getWarrant(uint256 warrantId) external view override returns (WarrantRequest memory) {
-        return _warrants[warrantId];
+    function getWarrant(uint256 warrantId) external view override returns (WarrantRequest memory warrant) {
+        warrant = _warrants[warrantId];
+        // The tally is stored when voting closes: while it is open, count the votes that count now.
+        // An enum compare, not a timestamp: Slither taints all of _warrants because it also stores timestamps
+        // slither-disable-next-line incorrect-equality
+        if (warrant.status == WarrantStatus.Pending) {
+            (warrant.approvalsCount, warrant.rejectionsCount) = _tallyVotes(warrantId);
+        }
     }
 
     /// @inheritdoc IComplianceCouncil
@@ -593,6 +617,8 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         }
         (bool ok, bytes memory sum) = BLS12381.g2Msm(pairs);
         require(ok, "Invalid signature");
+        // Valid elements can still cancel out (P + -P): infinity is rejected as a result as it is as an element
+        require(!BLS12381.isZero(sum), "Infinity aggregate");
         return abi.decode(sum, (BLSSignature));
     }
 
@@ -661,6 +687,22 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         return _warrantSignatures[warrantId];
     }
 
+    /// @inheritdoc IComplianceCouncil
+    function getCurrentSignatures(uint256 warrantId)
+        external
+        view
+        override
+        returns (SignatureSubmission[] memory current)
+    {
+        SignatureSubmission[] storage subs = _warrantSignatures[warrantId];
+        current = new SignatureSubmission[](_currentSignatureCount(warrantId));
+        uint256 n = 0;
+        // Stops at the last current submission, so i stays below subs.length
+        for (uint256 i = 0; n < current.length; i++) {
+            if (_isCurrent(subs[i])) current[n++] = subs[i];
+        }
+    }
+
     // ============ View Functions ============
 
     /// @inheritdoc IComplianceCouncil
@@ -690,7 +732,10 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
 
     /// @inheritdoc IComplianceCouncil
     function hasVoted(uint256 warrantId, address member) external view override returns (bool) {
-        return _hasVoted[warrantId][member];
+        uint256 membershipId = _votedMembershipId[warrantId][member];
+        // Membership ids are counters, not timestamps: Slither taints all of _members because it stores joinedAt
+        // slither-disable-next-line incorrect-equality
+        return membershipId != 0 && membershipId == _members[member].membershipId;
     }
 
     /// @inheritdoc IComplianceCouncil
@@ -813,6 +858,25 @@ contract ComplianceCouncil is IComplianceCouncil, AccessControl, ReentrancyGuard
         // Key ids are counters, not timestamps: Slither taints all of _members because it also stores joinedAt
         // slither-disable-next-line incorrect-equality
         return keyId != 0 && keyId == _members[sub.signer].keyId;
+    }
+
+    /**
+     * @dev Approvals and rejections among the votes that count: a vote counts while its voter is still a member
+     *      under the membership it was cast in (removal zeroes CouncilMember.membershipId, a re-add replaces it,
+     *      a key rotation keeps it). At most one vote per active member counts: one vote per membership.
+     */
+    function _tallyVotes(uint256 warrantId) private view returns (uint256 approvals, uint256 rejections) {
+        Vote[] storage votes = _warrantVotes[warrantId];
+        for (uint256 i = 0; i < votes.length; i++) {
+            Vote storage v = votes[i];
+            uint256 membershipId = v.membershipId;
+            // Membership ids are counters, not timestamps: Slither taints _members because it stores joinedAt
+            // slither-disable-next-line incorrect-equality
+            if (membershipId != 0 && membershipId == _members[v.voter].membershipId) {
+                if (v.approved) approvals++;
+                else rejections++;
+            }
+        }
     }
 
     /// @dev Number of submissions that currently count toward the threshold (at most one per member)
