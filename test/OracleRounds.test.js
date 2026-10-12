@@ -3,7 +3,7 @@
  *
  * The Oracle admits one proposal per negotiation round (ILRM counterCount). Every round opened by
  * counterPropose takes a new proposal without owner intervention; the owner's resetProposal voids the
- * current round's live proposal and allows exactly one replacement.
+ * current round's live proposal (in ILRM too, in the same transaction) and allows exactly one replacement.
  *
  * Signatures use the same EIP-712 typed data as scripts/interact.js, so these tests also guard the
  * off-chain signing format.
@@ -143,7 +143,7 @@ describe("Oracle Proposal Rounds", function () {
     expect(dispute.llmProposal).to.equal('{"round":3}');
   });
 
-  it("reset plus replacement emits ProposalRoundReopened and ProposalSuperseded and voids the acceptance", async function () {
+  it("reset voids the proposal and its acceptance in ILRM; the replacement lands without superseding", async function () {
     const { oracle, ilrm, operator, initiator, counterparty, domain } = await loadFixture(deployFixture);
 
     const bad = '{"terms":"bad"}';
@@ -156,12 +156,18 @@ describe("Oracle Proposal Rounds", function () {
 
     await expect(oracle.resetProposal(0, "incorrect proposal"))
       .to.emit(oracle, "ProposalRoundReopened").withArgs(0, 0, badHash)
-      .and.to.emit(oracle, "ProposalReset").withArgs(0, badHash, "incorrect proposal");
-
-    await expect(submit(oracle, operator, domain, 0, fixed))
-      .to.emit(ilrm, "ProposalSuperseded").withArgs(0, 0, badHash, fixedHash);
+      .and.to.emit(oracle, "ProposalReset").withArgs(0, badHash, "incorrect proposal")
+      .and.to.emit(ilrm, "ProposalVoided").withArgs(0, 0, badHash);
 
     let dispute = await ilrm.disputes(0);
+    expect(dispute.llmProposal).to.equal("");
+    expect(dispute.initiatorAccepted).to.be.false;
+
+    const replacement = await submit(oracle, operator, domain, 0, fixed);
+    await expect(replacement).to.emit(oracle, "ProposalRoundFilled").withArgs(0, 0, fixedHash, 2);
+    await expect(replacement).not.to.emit(ilrm, "ProposalSuperseded");
+
+    dispute = await ilrm.disputes(0);
     expect(dispute.llmProposal).to.equal(fixed);
     expect(dispute.initiatorAccepted).to.be.false;
 

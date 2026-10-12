@@ -10,19 +10,26 @@
 
 | Contract | File | Lines | Purpose |
 |----------|------|-------|---------|
-| `ILRM` | `contracts/ILRM.sol` | 538 | Core dispute resolution (stakes, proposals, timeouts) |
-| `NatLangChainTreasury` | `contracts/Treasury.sol` | 494 | Burns, fees, defensive subsidies, harassment scores |
-| `NatLangChainOracle` | `contracts/Oracle.sol` | 367 | EIP-712 signature verification, LLM proposal relay |
-| `NatLangChainAssetRegistry` | `contracts/AssetRegistry.sol` | 390 | IP asset registration, dispute freezes, fallback licenses |
-| **Total** | | **~1,789** | |
+| `ILRM` | `contracts/ILRM.sol` | 729 | Core dispute resolution (stakes, proposals, timeouts), oracle consumer |
+| `NatLangChainTreasury` | `contracts/Treasury.sol` | 472 | Burns, fees, defensive subsidies, harassment scores |
+| `NatLangChainOracle` | `contracts/Oracle.sol` | 496 | EIP-712 signature verification, LLM proposal relay, owner recovery |
+| `NatLangChainAssetRegistry` | `contracts/AssetRegistry.sol` | 384 | IP asset registration, dispute freezes, fallback licenses |
+| **Total** | | **2,081** | |
 
 ### Interfaces in Scope
 
 | Interface | File | Lines |
 |-----------|------|-------|
-| `IILRM` | `contracts/interfaces/IILRM.sol` | 225 |
-| `IOracle` | `contracts/interfaces/IOracle.sol` | 89 |
-| `IAssetRegistry` | `contracts/interfaces/IAssetRegistry.sol` | ~150 |
+| `IILRM` | `contracts/interfaces/IILRM.sol` | 239 |
+| `IOracle`, `IOracleConsumer` | `contracts/interfaces/IOracle.sol` | 125 |
+| `IAssetRegistry` | `contracts/interfaces/IAssetRegistry.sol` | 162 |
+
+Line counts are `wc -l` on the oracle-recovery branch. The `ILRM`, `IILRM` and `Treasury` rows must be
+recounted after the core-treasury branch is merged.
+
+`IOracle.sol` also defines `IOracleConsumer`, the lean interface through which `NatLangChainOracle` reads and
+writes the dispute contract it serves (`oracleContext`, `submitLLMProposal`, `voidLLMProposal`). It is
+implemented by `ILRM` and by the deferred `MultiPartyILRM`.
 
 ### Dependencies
 
@@ -35,7 +42,8 @@
 
 The following contracts exist in the codebase but are **deferred to later phases** and should NOT be audited now:
 
-- `contracts/modules/` (7 contracts: identity, compliance, governance)
+- `contracts/modules/` (7 contracts: identity, compliance, governance; `MultiPartyILRM` implements
+  `IOracleConsumer` so the same Oracle can serve it)
 - `contracts/scaling/` (5 contracts: L3 bridge, privacy batching)
 - `sdk/` (TypeScript SDK modules)
 - `subgraph/`, `monitoring/`
@@ -60,12 +68,21 @@ ILRM is a non-adjudicative dispute resolution protocol for IP licensing. Parties
 
 ```
 Initiator -> ILRM.initiateBreachDispute() [stakes tokens]
-Counterparty -> ILRM.depositStake() [matches stake]
-  (off-chain LLM run; ILRM does not call Oracle.requestProposal)
-Oracle -> ILRM.submitLLMProposal() [EIP-712 signature over (disputeId, round, evidenceHash, proposalHash, nonce); one per round]
-Both parties -> ILRM.acceptProposal() [if both accept, dispute resolves]
+Counterparty -> ILRM.depositStake() / depositStakeWithSubsidy() [matches stake]
+  ILRM -> Oracle.requestProposal() [advisory, last statement: code check, gas floor, 100k gas cap,
+                                     try/catch; OracleRequestFailed on failure; never blocks staking]
+Oracle operator -> Oracle.submitProposal()
+  Oracle -> ILRM.oracleContext() [STATICCALL: round, evidenceHash, resolved, deadline]
+  Oracle -> ILRM.submitLLMProposal() [EIP-712 signature over (disputeId, round, evidenceHash, proposalHash, nonce); one per round]
+    ILRM -> Oracle.verifySignature() [STATICCALL; re-reads ILRM.oracleContext]
+Both parties -> ILRM.acceptProposalWithHash(id, keccak256(text)) [or legacy acceptProposal; if both accept, dispute resolves]
   or
-Party -> ILRM.counterPropose() [burns ETH fee, opens a new oracle proposal round]
+Party -> ILRM.counterPropose() [only before the deadline; burns ETH fee, opens a new oracle proposal round,
+                               requests a proposal (same advisory call as above)]
+  or
+Oracle owner -> Oracle.resetProposal() / resetProposalExact()
+  Oracle -> ILRM.voidLLMProposal() [last statement; atomic compare-and-clear of the text and both acceptances;
+                                    only before the deadline; works while ILRM is paused]
   or
 Anyone -> ILRM.enforceTimeout() [50% burn + fallback license]
 
@@ -97,7 +114,21 @@ Counterparty -> ILRM.depositStakeWithSubsidy() -> Treasury.fundStakeSubsidy() [o
    - Chain fork detection must work correctly
    - Empty signatures must revert (FIX C-02 applied)
 
-4. **Treasury drain vectors** (Treasury.sol)
+4. **Oracle recovery and proposal binding** (Oracle.sol, ILRM.sol)
+   - Reset/void atomicity: `resetProposal` / `resetProposalExact` call `ILRM.voidLLMProposal` as their last
+     statement, so for every unresolved dispute the Oracle's current-round slot is empty iff ILRM holds no
+     live proposal (invariant I5); a revert in the hook rolls the whole reset back
+   - Compare-and-clear: the hook voids only the named proposal (no-op if nothing is live, revert on mismatch);
+     `resetProposalExact` cannot void a proposal that landed after it was queued behind the timelock
+   - Hash-bound acceptance: `acceptProposalWithHash` never records an acceptance of text other than the one
+     the party named; an acceptance flag always refers to the live proposal
+   - `_requestOracleProposal` never blocks staking or countering (no code, revert, gas exhaustion, wrong
+     consumer), and its gas floor guarantees a successful stake gave the Oracle its full 100k allowance
+   - Deadlines: `counterPropose` and the reset reject calls after `startTime + RESOLUTION_TIMEOUT`, so a late
+     counter cannot revive a timed-out dispute or front-run `enforceTimeout`
+   - `voidLLMProposal` is deliberately not pausable (recovery while paused); oracle-only and nonReentrant
+
+5. **Treasury drain vectors** (Treasury.sol)
    - Double-subsidy per dispute (one-time flag)
    - Rolling window cap evasion
    - `fundStakeSubsidy` caller restriction (`onlyILRM`; only reachable from `ILRM.depositStakeWithSubsidy`)
@@ -106,7 +137,7 @@ Counterparty -> ILRM.depositStakeWithSubsidy() -> Treasury.fundStakeSubsidy() [o
      resolution liveness (no Treasury call during resolution; works with the Treasury paused or the pointer rotated)
    - Harassment score manipulation
 
-5. **Timeout/cooldown enforcement accuracy** (ILRM.sol)
+6. **Timeout/cooldown enforcement accuracy** (ILRM.sol)
    - `STAKE_WINDOW` (3 days) enforcement
    - `RESOLUTION_TIMEOUT` (7 days) enforcement
    - `COOLDOWN_PERIOD` (30 days) enforcement
@@ -114,31 +145,34 @@ Counterparty -> ILRM.depositStakeWithSubsidy() -> Treasury.fundStakeSubsidy() [o
 
 ### High Priority
 
-6. **Access control consistency**
+7. **Access control consistency**
    - `onlyOwner` on admin functions (all contracts use `Ownable2Step`)
    - `onlyILRM` on Treasury burn deposits and harassment score updates
    - `onlyOracle` on Oracle proposal submission
    - Oracle `onlyILRM` for proposal requests
+   - ILRM `voidLLMProposal` and `submitLLMProposal` callable only by the oracle
 
-7. **Integer overflow/underflow** (Solidity 0.8.20 has built-in checks, but verify edge cases)
+8. **Integer overflow/underflow** (Solidity 0.8.20 has built-in checks, but verify edge cases)
    - Escalation multiplier: `stakeAmount * (ESCALATION_MULTIPLIER ** disputes)`
    - Counter fee: `COUNTER_FEE_BASE * (2 ** counterCount)`
    - Harassment score delta arithmetic
 
-8. **Front-running risks**
+9. **Front-running risks**
    - Can an attacker front-run `acceptProposal` to manipulate resolution?
+   - Can an acceptance land on a proposal other than the one the party reviewed (reset, replacement, new round)?
+     `acceptProposalWithHash` must revert "Proposal changed" in every such case
    - Can an attacker front-run `depositStake` to deny counterparty participation?
    - Can anyone but the counterparty reach the subsidy? (`depositStakeWithSubsidy` is counterparty-only; `fundStakeSubsidy` is `onlyILRM`)
    - Is `subsidy <= stake` always enforced, and is the pro-rata repayment correct and live on every resolution path?
 
 ### Medium Priority
 
-9. **AssetRegistry freeze/unfreeze correctness**
+10. **AssetRegistry freeze/unfreeze correctness**
    - Assets frozen during dispute must be unfrozen on resolution
    - Fallback license application on timeout
    - DoS via `MAX_ASSETS_PER_OWNER` limit
 
-10. **ETH handling**
+11. **ETH handling**
     - `receive()` on ILRM and Treasury
     - Counter-proposal ETH fee burns to `0xdead`
     - `emergencyWithdrawETH` in Treasury
@@ -158,6 +192,12 @@ Counterparty -> ILRM.depositStakeWithSubsidy() -> Treasury.fundStakeSubsidy() [o
 | `test/SecurityExploits.t.sol` | Foundry | ~15 | Updated for Phase 1 |
 | `test/E2ESimulation.t.sol` | Foundry | ~20 | Module tests included |
 | `test/GasBenchmarks.t.sol` | Foundry | 8 | Rewritten for Phase 2 |
+| `test/OracleRounds.t.sol` | Foundry | 30 | One proposal per round, signature binding, invariants I1-I4 |
+| `test/OracleRecovery.t.sol` | Foundry | 21 | Atomic reset/void, pinned reset, deadlines, pending lifecycle, invariant I5 |
+| `test/AcceptProposalHash.t.sol` | Foundry | 9 | Hash-bound acceptance |
+| `test/OracleRequestWiring.t.sol` | Foundry | 10 | Advisory proposal requests never block; gas floor |
+| `test/OracleMultiParty.t.sol` | Foundry | 17 | Oracle serving MultiPartyILRM (deferred module) |
+| `test/OracleRecovery.test.js` | Hardhat | 6 | Reviewer PoC, hash-bound acceptance via ethers v6 |
 
 ---
 

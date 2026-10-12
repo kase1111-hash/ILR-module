@@ -272,34 +272,67 @@ registered as `Emergency` (default deployment: `Oracle.revokeOracle`, `Oracle.ca
 
 When the Oracle is owned by the GovernanceTimelock (the production setup), its owner-only calls
 go through the timelock: `revokeOracle` and `cancelPendingRequest` are Emergency-classified (emergency
-path), while `resetProposal` and `registerOracle` are standard proposals by the multi-sig. If the
-oracle must be stopped immediately, pause the protocol first (Action 1).
+path), while `resetProposalExact`, `resetProposal` and `registerOracle` are standard proposals by the
+multi-sig unless governance has classified `resetProposalExact` as Emergency. If the oracle must be
+stopped immediately, pause the protocol first (Action 1), but see step 4 before pausing ILRM.
 
 1. **Revoke the compromised operator** (always before resetting, so it cannot fill the re-opened slot)
    ```solidity
    timelock.executeEmergency(oracle, abi.encodeWithSignature("revokeOracle(address)", compromisedOperator), "reason");
    ```
 
-2. **Block pending requests** (optional, Emergency-classified)
+2. **Withdraw pending requests** (optional, Emergency-classified)
    ```solidity
    timelock.executeEmergency(oracle, abi.encodeWithSignature("cancelPendingRequest(uint256)", disputeId), "reason");
    ```
+   This only withdraws the advisory pending-request flag (event `ProposalRequestCancelled`) that tells
+   operators a proposal is wanted. It does **not** block `submitProposal`; revoking the operator
+   (step 1) is what stops proposals.
 
 3. **Void its live proposals**
    ```solidity
-   // For each unresolved dispute whose CURRENT-round proposal came from the compromised operator
-   Oracle.resetProposal(disputeId, "compromised operator")
+   // For each unresolved dispute whose CURRENT-round proposal came from the compromised operator.
+   // round = Oracle.proposalContext(disputeId).round; proposalHash = Oracle.roundProposals(disputeId, round)
+   bytes memory data = abi.encodeWithSignature(
+       "resetProposalExact(uint256,uint256,bytes32,string)", disputeId, round, proposalHash, "compromised operator"
+   );
+   timelock.schedule(oracle, 0, data, bytes32(0), salt, timelock.getRequiredDelay(oracle, data));
    ```
-   This re-opens the current round's proposal slot for exactly one replacement and bumps the
-   dispute's nonce, so every signature made before the reset is dead. It reverts with
-   `NoProposalToReset` if the current round has no proposal (earlier rounds were already cleared
-   by `counterPropose`) and with `DisputeAlreadyResolved` for resolved disputes.
+   Use the pinned `resetProposalExact` behind the timelock: it voids only the named proposal of the
+   named round. If a counter-proposal or another proposal landed while the call was queued, it reverts
+   `ProposalMismatch` instead of voiding a proposal nobody reviewed. (`resetProposal(disputeId, reason)`
+   acts on whatever is live when it executes.)
+
+   When it executes, the reset:
+   - voids the proposal text **and both acceptances in ILRM in the same transaction** (ILRM emits
+     `ProposalVoided(disputeId, round, proposalHash)`). From then on `acceptProposal` reverts
+     "No proposal yet", and so does `acceptProposalWithHash` with the old hash;
+   - re-opens the current round's proposal slot for exactly one replacement and bumps the
+     dispute's nonce, so every signature made before the reset is dead.
+
+   It reverts with:
+   - `NoProposalToReset` if the current round has no proposal (earlier rounds were already cleared
+     by `counterPropose`);
+   - `DisputeAlreadyResolved` for resolved disputes;
+   - `ProposalMismatch` if the live round or proposal is not the pinned one;
+   - `ResolutionDeadlinePassed` after the dispute's resolution deadline. No replacement could land
+     then: let `enforceTimeout` resolve the dispute.
+
+   Confirm the ILRM `ProposalVoided` log for every reset dispute.
 
 4. **Warn the parties**
 
-   The voided text stays in ILRM, and stays acceptable, until the replacement lands. Tell both
-   parties not to accept it. The new operator should pre-sign the replacement at the bumped
-   nonce (`Oracle.proposalContext` / `Oracle.proposalDigest`) and submit it immediately.
+   The proposal stays acceptable only until the reset **executes** (the standard 2-day timelock delay,
+   unless governance classified `resetProposalExact` as Emergency). Tell both parties not to accept it in
+   the meantime: an acceptance mined before the reset stands only until the reset executes, when it is
+   cleared, but if both parties accept first the dispute resolves on that proposal. Parties should
+   accept only with `acceptProposalWithHash(disputeId, proposalHash)`, which reverts "Proposal changed"
+   if the text they reviewed is no longer the live one.
+
+   `counterPropose` is `whenNotPaused` while `acceptProposal` is not, so pausing ILRM removes the
+   parties' own escape (a counter-proposal opens a new round and clears the proposal) without stopping
+   acceptances. Recovery itself (the reset, the void in ILRM and the replacement) works while ILRM is
+   paused.
 
 5. **Register the new operator and submit the corrected proposal**
    ```solidity
@@ -307,8 +340,9 @@ oracle must be stopped immediately, pause the protocol first (Action 1).
    timelock.schedule(oracle, 0, data, bytes32(0), salt, timelock.getRequiredDelay(oracle, data));
    Oracle.submitProposal(disputeId, correctedProposal, signature) // from newOperator
    ```
-   ILRM emits `ProposalSuperseded` and clears both acceptance flags, so any acceptance of the
-   voided proposal no longer counts.
+   The replacement is signed at the bumped nonce (`Oracle.proposalContext` / `Oracle.proposalDigest`).
+   ILRM emits `ProposalSubmitted` (no `ProposalSuperseded`: the old proposal was already voided). If no
+   replacement lands, the parties can still `counterPropose` (new round) or the dispute times out.
 
 ### Action 4: Governance Attack Response
 

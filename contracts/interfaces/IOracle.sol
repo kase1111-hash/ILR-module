@@ -23,7 +23,9 @@ interface IOracle {
 
     /**
      * @notice Request proposal generation for a dispute
-     * @dev Called by ILRM contract when dispute enters Active state
+     * @dev Called by ILRM (best effort, gas-capped, never blocks the caller) when a dispute becomes fully staked
+     *      and whenever counterPropose opens a new round. Advisory: submitProposal does not require a pending
+     *      request. MultiPartyILRM does not call it.
      * @param disputeId The dispute requiring a proposal
      * @param evidenceHash Hash of canonicalized evidence bundle
      */
@@ -56,8 +58,8 @@ interface IOracle {
     // ============ View Functions ============
 
     /**
-     * @notice Get the ILRM contract this oracle serves
-     * @return The ILRM contract address
+     * @notice Get the dispute contract this oracle serves
+     * @return The IOracleConsumer (ILRM or MultiPartyILRM) this oracle serves
      */
     function ilrmContract() external view returns (address);
 
@@ -74,4 +76,50 @@ interface IOracle {
      * @return Public key hash
      */
     function oraclePublicKeyHash(address oracle) external view returns (bytes32);
+}
+
+/**
+ * @title IOracleConsumer - Dispute contract served by NatLangChainOracle
+ * @notice Implemented by ILRM and MultiPartyILRM. NatLangChainOracle reads and writes its consumer only through
+ *         this interface, so one Oracle implementation serves both.
+ */
+interface IOracleConsumer {
+    /// @notice Emitted when the oracle voids the live proposal; every acceptance (or vote) of it is cleared
+    event ProposalVoided(uint256 indexed disputeId, uint256 indexed round, bytes32 proposalHash);
+
+    /// @notice Emitted when the advisory Oracle.requestProposal call could not be made or reverted
+    event OracleRequestFailed(uint256 indexed disputeId, uint256 indexed round);
+
+    /**
+     * @notice The signing and recovery context of a dispute
+     * @dev MUST NOT be nonReentrant: the Oracle STATICCALLs it while the consumer is inside submitLLMProposal.
+     * @param disputeId The dispute ID
+     * @return round The dispute's counterCount (negotiation round)
+     * @return evidenceHash The dispute's current evidence hash
+     * @return resolved True once the dispute is resolved
+     * @return deadline Last timestamp (inclusive) at which proposals, acceptances, counters and resets are allowed
+     */
+    function oracleContext(uint256 disputeId)
+        external
+        view
+        returns (uint256 round, bytes32 evidenceHash, bool resolved, uint256 deadline);
+
+    /**
+     * @notice Oracle relays a signed LLM proposal
+     * @dev Only callable by the oracle; the consumer re-verifies the signature via IOracle.verifySignature
+     * @param disputeId The dispute receiving the proposal
+     * @param proposal The proposal text
+     * @param signature Oracle operator signature over the dispute's live context
+     */
+    function submitLLMProposal(uint256 disputeId, string calldata proposal, bytes calldata signature) external;
+
+    /**
+     * @notice Oracle recovery hook: void the live proposal
+     * @dev Oracle-only, for unresolved disputes at or before the deadline. No-op if no proposal is live. Reverts if
+     *      the live proposal's hash differs from proposalHash (compare-and-clear); otherwise clears it and every
+     *      acceptance or vote, and emits ProposalVoided.
+     * @param disputeId The dispute ID
+     * @param proposalHash keccak256 of the proposal text being voided
+     */
+    function voidLLMProposal(uint256 disputeId, bytes32 proposalHash) external;
 }

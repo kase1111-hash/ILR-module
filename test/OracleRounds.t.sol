@@ -152,10 +152,11 @@ contract OracleRoundsTest is OracleRoundsBase {
     event ProposalRoundReopened(uint256 indexed disputeId, uint256 indexed round, bytes32 voidedProposalHash);
     event ProposalReset(uint256 indexed disputeId, bytes32 oldProposalHash, string reason);
     event DisputeProcessed(uint256 indexed disputeId, bytes32 evidenceHash, bytes32 proposalHash);
-    // ILRM event
+    // ILRM events
     event ProposalSuperseded(
         uint256 indexed disputeId, uint256 indexed round, bytes32 previousProposalHash, bytes32 newProposalHash
     );
+    event ProposalVoided(uint256 indexed disputeId, uint256 indexed round, bytes32 proposalHash);
 
     string constant P1 = '{"terms":"P1"}';
     string constant P2 = '{"terms":"P2"}';
@@ -415,17 +416,18 @@ contract OracleRoundsTest is OracleRoundsBase {
         emit ProposalReset(id, _hash(P1), "incorrect proposal");
         vm.expectEmit(true, true, false, true, address(oracle));
         emit ProposalRoundReopened(id, 0, _hash(P1));
+        vm.expectEmit(true, true, false, true, address(ilrm));
+        emit ProposalVoided(id, 0, _hash(P1));
         oracle.resetProposal(id, "incorrect proposal");
 
-        // The voided text stays in ILRM until the replacement lands
-        assertEq(ilrm.disputes(id).llmProposal, P1);
+        // The reset voids the text and the acceptance in ILRM in the same transaction
+        assertEq(ilrm.disputes(id).llmProposal, "");
+        assertFalse(ilrm.disputes(id).initiatorAccepted, "acceptance of the voided proposal survived the reset");
         (,, uint256 nonce, bool open) = oracle.proposalContext(id);
         assertTrue(open);
         assertEq(nonce, 2);
 
         bytes memory sig2 = _signCurrent(operatorKey, id, P2);
-        vm.expectEmit(true, true, false, true, address(ilrm));
-        emit ProposalSuperseded(id, 0, _hash(P1), _hash(P2));
         vm.expectEmit(true, true, false, true, address(oracle));
         emit ProposalRoundFilled(id, 0, _hash(P2), 2);
         vm.prank(operator);
