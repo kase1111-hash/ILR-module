@@ -16,7 +16,10 @@
  * - The signed message is the 32-byte warrant hash from createWarrantMessage, which equals
  *   ComplianceCouncil.getSigningMessage(warrantId)
  * - Contract structs use the EIP-2537 encoding: every Fp element is 64 bytes big-endian
- *   (16 zero bytes followed by the 48-byte value), split into two 32-byte words
+ *   (16 zero bytes followed by the 48-byte value), split into two 32-byte words; the decoders accept
+ *   only canonical encodings, as the contract does
+ * - A warrant's decryptedKeyHash is keccak256 of the 256-byte encoding of its threshold signature
+ *   (computeDecryptedKeyHash); any valid t-subset of partial signatures aggregates to the same value
  *
  * Dependencies:
  * - @noble/curves for BLS12-381
@@ -106,6 +109,8 @@ const BLS_SCALAR_SIZE = 32;
 const BLS_G1_SIZE = 48;
 const BLS_G2_SIZE = 96;
 const UINT256_MAX = (1n << 256n) - 1n;
+/** BLS12-381 base field modulus p */
+const FP_ORDER = bls.fields.Fp.ORDER;
 
 // ============ Distributed Key Generation ============
 
@@ -638,7 +643,8 @@ export function encodeBLSSignatureForSolidity(sig: Uint8Array): BLSSignature {
  * Decode a ComplianceCouncil BLSPublicKey struct (e.g. from getMember or getAggregatedPublicKey)
  * @param pk Struct with 32-byte words as bytes or 0x-hex strings
  * @returns 48-byte compressed G1 point
- * @throws if the point is not a valid, non-infinity G1 point
+ * @throws if a coordinate is not a canonical Fp encoding, or the point is not a valid, non-infinity
+ *         G1 point
  */
 export function decodeBLSPublicKeyFromSolidity(pk: {
   x: ArrayLike<SolidityWord>;
@@ -657,12 +663,14 @@ export function decodeBLSPublicKeyFromSolidity(pk: {
  * Decode a ComplianceCouncil BLSSignature struct (e.g. from getSignatures or aggregateSignatures)
  * @param sig Struct with 32-byte words as bytes or 0x-hex strings
  * @returns 96-byte compressed G2 point
- * @throws if the point is not a valid, non-infinity G2 point
+ * @throws if a coordinate limb is not a canonical Fp encoding, or the point is not a valid,
+ *         non-infinity G2 point
  */
 export function decodeBLSSignatureFromSolidity(sig: {
   x: ArrayLike<SolidityWord>;
   y: ArrayLike<SolidityWord>;
 }): Uint8Array {
+  // decodeFpWords rejects non-canonical limbs, so fromBigTuple's reduction mod p never changes a value
   const [x, y] = decodeFpWords([sig.x, sig.y], 4);
   const Fp2 = bls.fields.Fp2;
   const point = bls.G2.ProjectivePoint.fromAffine({
@@ -674,6 +682,25 @@ export function decodeBLSSignatureFromSolidity(sig: {
     throw new Error("Signature is the point at infinity");
   }
   return point.toRawBytes(true);
+}
+
+/**
+ * The warrant's decryptedKeyHash for a threshold signature: keccak256 of its 256-byte EIP-2537
+ * encoding (abi.encode of the BLSSignature struct).
+ *
+ * ComplianceCouncil.executeReconstruction computes this on chain in STRICT_ONCHAIN mode; in
+ * HYBRID_ATTESTED mode the operator passes it to attestHybridVerification after verifying the
+ * signature off chain. BLS signatures are unique, so every valid t-subset of partial signatures
+ * aggregates to the same signature and hash.
+ *
+ * @param signature 96-byte compressed or 192-byte uncompressed G2 threshold signature
+ *        (aggregateSignatures(...).aggregatedSignature)
+ * @returns 32-byte hash
+ * @throws if the signature is not a valid, non-infinity G2 point
+ */
+export function computeDecryptedKeyHash(signature: Uint8Array): Uint8Array {
+  const enc = encodeBLSSignatureForSolidity(signature);
+  return keccak_256(concatBytes(...enc.x, ...enc.y));
 }
 
 /**
@@ -742,6 +769,8 @@ function wordToBytes(word: SolidityWord): Uint8Array {
  * Decode coordinates made of [hi, lo] word pairs into Fp values
  * @param coords Coordinate word arrays (x, y)
  * @param wordsPerCoord 2 for Fp (G1), 4 for Fp2 (G2)
+ * @throws unless every 64-byte element is canonical (16 zero pad bytes and a value below p), the
+ *         encoding the contract accepts; anything else would otherwise be silently reduced mod p
  */
 function decodeFpWords(coords: ArrayLike<SolidityWord>[], wordsPerCoord: number): bigint[][] {
   return coords.map((coord) => {
@@ -750,7 +779,12 @@ function decodeFpWords(coords: ArrayLike<SolidityWord>[], wordsPerCoord: number)
     }
     const values: bigint[] = [];
     for (let i = 0; i < wordsPerCoord; i += 2) {
-      values.push(bytesToBigInt(concatBytes(wordToBytes(coord[i]), wordToBytes(coord[i + 1]))));
+      const value = bytesToBigInt(concatBytes(wordToBytes(coord[i]), wordToBytes(coord[i + 1])));
+      // p < 2^384, so value < p also means the 16 pad bytes are zero
+      if (value >= FP_ORDER) {
+        throw new Error("Non-canonical field element encoding");
+      }
+      values.push(value);
     }
     return values;
   });

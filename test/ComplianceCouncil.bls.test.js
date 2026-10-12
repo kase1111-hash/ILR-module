@@ -8,6 +8,9 @@
  * - member and group key validation, key index uniqueness, no duplicate members on re-add
  * - signing message agreement (chain id and council address binding)
  * - SDK DKG -> partial signatures -> Lagrange aggregate -> on-chain verification
+ * - follow-ups: only current partials count (removal / rotation), on-chain reconstruction and
+ *   decryptedKeyHash, key index bound, duplicate keys, aggregateSignatures validation, updateConfig,
+ *   the unknown-warrant guard, canonical SDK decoding
  */
 
 const { expect } = require("chai");
@@ -626,6 +629,345 @@ describe("ComplianceCouncil BLS12-381 (EIP-2537)", function () {
       await expect(
         council.verifyThresholdSignature(1, { aggregatedSig: sig, signerIndices: [1, 2, 5], signatureCount: 3 })
       ).to.be.revertedWith("Unknown signer");
+    });
+  });
+
+  // ============ Follow-up fixes ============
+
+  const R = bls.fields.Fr.ORDER;
+
+  /** Member `index` (1-based share index) submits its partial signature on `message` for `warrantId` */
+  async function signAs(council, members, dkg, message, warrantId, index) {
+    const partial = await sdk.signPartial(dkg.shares[index - 1], message);
+    await council.connect(members[index - 1]).submitSignature(warrantId, sdkSig(partial.signature));
+  }
+
+  /** SDK decryptedKeyHash for the threshold signature of `indices` on `message` */
+  async function expectedKeyHash(dkg, message, indices) {
+    const partials = await Promise.all(indices.map((i) => sdk.signPartial(dkg.shares[i - 1], message)));
+    return ethers.hexlify(sdk.computeDecryptedKeyHash(sdk.aggregateSignatures(partials).aggregatedSignature));
+  }
+
+  /** A fresh BLS key pair outside the DKG */
+  function freshKey() {
+    const sk = bls.utils.randomPrivateKey();
+    return { sk, pk: sdkPk(bls.getPublicKey(sk)) };
+  }
+
+  describe("Only current partial signatures count (STRICT_ONCHAIN)", function () {
+    it("a removed member's partial no longer counts toward the threshold", async function () {
+      const { council, members, dkg, message } = await loadFixture(warrantFixture);
+      for (const i of [1, 2, 3]) await signAs(council, members, dkg, message, 1, i);
+      expect(await council.hasSubmittedSignature(1, members[2].address)).to.equal(true);
+
+      await council.removeMember(members[2].address);
+      expect(await council.hasSubmittedSignature(1, members[2].address)).to.equal(false);
+      const subs = await council.getSignatures(1);
+      expect(subs.map((s) => s.signer)).to.deep.equal(members.slice(0, 3).map((m) => m.address));
+
+      await expect(council.executeReconstruction(1)).to.be.revertedWith("Insufficient signatures");
+
+      await signAs(council, members, dkg, message, 1, 4);
+      await expect(council.executeReconstruction(1)).to.emit(council, "KeyReconstructed");
+    });
+
+    it("a re-added member's old partial stays void until it signs again", async function () {
+      const { council, members, dkg, message } = await loadFixture(warrantFixture);
+      for (const i of [1, 2, 3]) await signAs(council, members, dkg, message, 1, i);
+      await council.removeMember(members[2].address);
+      await council.addMember(members[2].address, 0, sdkPk(dkg.shares[2].publicKey), 3);
+
+      expect(await council.hasSubmittedSignature(1, members[2].address)).to.equal(false);
+      await expect(council.executeReconstruction(1)).to.be.revertedWith("Insufficient signatures");
+
+      await signAs(council, members, dkg, message, 1, 3);
+      const again = await sdk.signPartial(dkg.shares[2], message);
+      await expect(council.connect(members[2]).submitSignature(1, sdkSig(again.signature))).to.be.revertedWith(
+        "Already submitted"
+      );
+      await expect(council.executeReconstruction(1)).to.emit(council, "KeyReconstructed");
+    });
+
+    it("a rotated key voids the partial; the member may sign again", async function () {
+      const { council, members, dkg, message } = await loadFixture(warrantFixture);
+      for (const i of [1, 2, 4]) await signAs(council, members, dkg, message, 1, i);
+
+      // Rotate member 2 away from its DKG share: its partial stops counting
+      const other = freshKey();
+      await expect(council.rotateMemberKey(members[1].address, other.pk)).to.emit(council, "MemberKeyRotated");
+      expect(await council.hasSubmittedSignature(1, members[1].address)).to.equal(false);
+      await expect(council.executeReconstruction(1)).to.be.revertedWith("Insufficient signatures");
+
+      // A partial under the new key verifies, but that key is not a share of the group key
+      const wrong = bls.sign(message, other.sk, { DST });
+      await council.connect(members[1]).submitSignature(1, sdkSig(wrong));
+      await expect(council.executeReconstruction(1)).to.be.revertedWith("Invalid threshold signature");
+
+      // Back on the DKG share (a new registration): sign once more and execute
+      await council.rotateMemberKey(members[1].address, sdkPk(dkg.shares[1].publicKey));
+      await expect(council.executeReconstruction(1)).to.be.revertedWith("Insufficient signatures");
+      await signAs(council, members, dkg, message, 1, 2);
+
+      const subs = await council.getSignatures(1);
+      expect(subs.length).to.equal(5);
+      await council.executeReconstruction(1);
+      expect((await council.getWarrant(1)).decryptedKeyHash).to.equal(await expectedKeyHash(dkg, message, [3, 4, 5]));
+    });
+
+    it("a member key that is not a share blocks execution until the member is removed", async function () {
+      const { council, members, dkg, message } = await loadFixture(warrantFixture);
+      const outsider = freshKey();
+      await council.addMember(members[5].address, 0, outsider.pk, 6);
+
+      await council.connect(members[5]).submitSignature(1, sdkSig(bls.sign(message, outsider.sk, { DST })));
+      for (const i of [1, 2]) await signAs(council, members, dkg, message, 1, i);
+      await expect(council.executeReconstruction(1)).to.be.revertedWith("Invalid threshold signature");
+
+      await council.removeMember(members[5].address);
+      await expect(council.executeReconstruction(1)).to.be.revertedWith("Insufficient signatures");
+      await signAs(council, members, dkg, message, 1, 3);
+      await expect(council.executeReconstruction(1)).to.emit(council, "KeyReconstructed");
+    });
+  });
+
+  describe("decryptedKeyHash", function () {
+    it("is keccak256 of the group signature, whichever threshold subset signs", async function () {
+      const { council, members, dkg, message, requester } = await loadFixture(warrantFixture);
+      const message2 = ethers.getBytes(await council.getSigningMessage(2));
+      for (const i of [1, 2, 4]) await signAs(council, members, dkg, message, 1, i);
+      for (const i of [3, 4, 5]) await signAs(council, members, dkg, message2, 2, i);
+
+      // Aggregated by the SDK from other subsets than the ones that signed on chain
+      const h1 = await expectedKeyHash(dkg, message, [3, 5, 2]);
+      const h2 = await expectedKeyHash(dkg, message2, [1, 2, 3]);
+      expect(h1).to.not.equal(h2);
+
+      // Equals keccak256 of the BLSSignature struct encoding of the threshold signature
+      const partials = await Promise.all([1, 2, 3].map((i) => sdk.signPartial(dkg.shares[i - 1], message)));
+      const agg = sdk.aggregateSignatures(partials);
+      expect(ethers.keccak256(structHex(sdkSig(agg.aggregatedSignature)))).to.equal(h1);
+
+      expect(await council.executeReconstruction.staticCall(1)).to.equal(h1);
+      await expect(council.executeReconstruction(1))
+        .to.emit(council, "KeyReconstructed")
+        .withArgs(1, h1, requester.address);
+      await council.executeReconstruction(2);
+      expect((await council.getWarrant(1)).decryptedKeyHash).to.equal(h1);
+      expect((await council.getWarrant(2)).decryptedKeyHash).to.equal(h2);
+    });
+
+    it("STRICT_ONCHAIN execution requires the group key", async function () {
+      const { council, members, dkg, message } = await loadFixture(warrantNoGroupKeyFixture);
+      for (const i of [1, 2, 3]) await signAs(council, members, dkg, message, 1, i);
+      await expect(council.executeReconstruction(1)).to.be.revertedWith("Invalid threshold signature");
+
+      await council.setAggregatedPublicKey(sdkPk(dkg.aggregatedPublicKey));
+      await council.executeReconstruction(1);
+      expect((await council.getWarrant(1)).decryptedKeyHash).to.equal(await expectedKeyHash(dkg, message, [1, 2, 3]));
+    });
+
+    it("HYBRID_ATTESTED records the operator-attested hash", async function () {
+      const { council, members, dkg, message, operator } = await loadFixture(warrantFixture);
+      await council.setExecutionMode(MODE.HYBRID_ATTESTED, "test");
+      await council.grantRole(await council.OPERATOR_ROLE(), operator.address);
+      for (const i of [1, 2, 3]) await signAs(council, members, dkg, message, 1, i);
+
+      await expect(council.executeReconstruction(1)).to.be.revertedWith("Hybrid attestation required");
+      await expect(council.connect(operator).attestHybridVerification(1, ethers.ZeroHash, "sdk")).to.be.revertedWith(
+        "Invalid attestation"
+      );
+      const h = await expectedKeyHash(dkg, message, [1, 2, 3]);
+      await council.connect(operator).attestHybridVerification(1, h, "sdk computeDecryptedKeyHash");
+      await council.executeReconstruction(1);
+      expect((await council.getWarrant(1)).decryptedKeyHash).to.equal(h);
+    });
+  });
+
+  describe("Key index bound", function () {
+    /** 3-of-7 council: indices 1..7 (the old bound keyIndex <= 2 * threshold allowed only 1..6) */
+    async function sevenFixture() {
+      const signers = await ethers.getSigners();
+      const [admin, requester] = signers;
+      const members = signers.slice(4, 11);
+      const council = await (await ethers.getContractFactory("ComplianceCouncil")).deploy(3, 3600, 3600, 3600, admin.address);
+      const dkg = sdk.generateKeyShares(3, 7);
+      for (let i = 0; i < 7; i++) {
+        await council.addMember(members[i].address, 0, sdkPk(dkg.shares[i].publicKey), i + 1);
+      }
+      await council.setAggregatedPublicKey(sdkPk(dkg.aggregatedPublicKey));
+      await council.setAuthorizedRequester(requester.address, true);
+      await council.connect(requester).submitWarrantRequest(0, 42, ethers.keccak256("0x01"), "US");
+      for (let i = 0; i < 3; i++) await council.connect(members[i]).castVote(1, true, "");
+      await time.increase(3601);
+      await council.concludeVoting(1);
+      await time.increaseTo((await council.getWarrant(1)).executionTime);
+      const message = ethers.getBytes(await council.getSigningMessage(1));
+      return { council, members, dkg, message };
+    }
+
+    it("a 3-of-7 council can be configured and executes with the top three indices", async function () {
+      const { council, members, dkg, message } = await loadFixture(sevenFixture);
+      expect((await council.getConfig()).totalMembers).to.equal(7n);
+      for (const i of [7, 5, 6]) await signAs(council, members, dkg, message, 1, i);
+      await council.executeReconstruction(1);
+      expect((await council.getWarrant(1)).decryptedKeyHash).to.equal(await expectedKeyHash(dkg, message, [1, 2, 3]));
+    });
+
+    it("accepts any index in [1, r) and rejects 0 and r", async function () {
+      const { council, members } = await loadFixture(deployFixture);
+      await expect(council.addMember(members[0].address, 0, freshKey().pk, 0)).to.be.revertedWith("Invalid key index");
+      await expect(council.addMember(members[0].address, 0, freshKey().pk, R)).to.be.revertedWith("Invalid key index");
+      await council.addMember(members[0].address, 0, freshKey().pk, R - 1n);
+      await council.addMember(members[1].address, 0, freshKey().pk, 1000n);
+      expect((await council.getMember(members[0].address)).keyIndex).to.equal(R - 1n);
+    });
+  });
+
+  describe("Duplicate keys", function () {
+    it("rejects a key held by another active member, and the current key on rotation", async function () {
+      const { council, members, dkg } = await loadFixture(membersFixture);
+      await expect(council.addMember(members[5].address, 0, sdkPk(dkg.shares[0].publicKey), 6)).to.be.revertedWith(
+        "BLS key in use"
+      );
+      await expect(council.rotateMemberKey(members[0].address, sdkPk(dkg.shares[1].publicKey))).to.be.revertedWith(
+        "BLS key in use"
+      );
+      await expect(council.rotateMemberKey(members[0].address, sdkPk(dkg.shares[0].publicKey))).to.be.revertedWith(
+        "BLS key in use"
+      );
+    });
+
+    it("keeps member keys and the group key apart", async function () {
+      const { council, members, dkg } = await loadFixture(membersFixture);
+      const group = sdkPk(dkg.aggregatedPublicKey);
+      await expect(council.setAggregatedPublicKey(sdkPk(dkg.shares[3].publicKey))).to.be.revertedWith(
+        "BLS key in use"
+      );
+      await council.setAggregatedPublicKey(group);
+      await council.setAggregatedPublicKey(group);
+      await expect(council.addMember(members[5].address, 0, group, 6)).to.be.revertedWith("BLS key in use");
+      await expect(council.rotateMemberKey(members[0].address, group)).to.be.revertedWith("BLS key in use");
+    });
+  });
+
+  describe("aggregateSignatures validates every element", function () {
+    it("validates a single element like several", async function () {
+      const { council, partial } = await loadFixture(deployFixture);
+      const good = structHex(sdkSig(partial.signature));
+      const a = bls.G2.ProjectivePoint.fromHex(partial.signature).toAffine();
+      const bad = {
+        offSubgroup: g2OffSubgroup(),
+        offCurve: "0x" + fp(a.x.c0) + fp(a.x.c1) + fp(Fp.add(a.y.c0, 1n)) + fp(a.y.c1),
+        nonCanonical: "0x" + fp(a.x.c0 + P) + fp(a.x.c1) + fp(a.y.c0) + fp(a.y.c1),
+        dirtyPadding: "0x01" + good.slice(4),
+        infinity: ZERO_SIG,
+      };
+
+      expect(structHex(await council.aggregateSignatures([sigStruct(good)]))).to.equal(good);
+      for (const [name, b] of Object.entries(bad)) {
+        await expect(council.aggregateSignatures([sigStruct(b)], GAS), name).to.be.revertedWith("Invalid signature");
+      }
+      // G2ADD does not check the subgroup: a pair with an off-subgroup point used to be summed
+      await expect(council.aggregateSignatures([sigStruct(good), sigStruct(bad.offSubgroup)], GAS)).to.be.revertedWith(
+        "Invalid signature"
+      );
+    });
+  });
+
+  describe("Lagrange interpolation (library)", function () {
+    it("interpolateG2AtZero matches the SDK aggregate and rejects repeated or out-of-range points", async function () {
+      const { dkg, msg } = await loadFixture(deployFixture);
+      const th = await (await ethers.getContractFactory("BLS12381ThresholdHarness")).deploy();
+      const indices = [5, 1, 3];
+      const partials = await Promise.all(indices.map((i) => sdk.signPartial(dkg.shares[i - 1], msg)));
+      const pairs = ethers.concat(partials.map((p) => ethers.concat([structHex(sdkSig(p.signature)), ethers.ZeroHash])));
+
+      const [ok, sum] = await th.interpolateG2AtZero(pairs, indices);
+      expect(ok).to.equal(true);
+      expect(sum).to.equal(structHex(sdkSig(sdk.aggregateSignatures(partials).aggregatedSignature)));
+
+      for (const xs of [[5, 1, 5], [5, 0, 3], [5, 1, R], [5, 1]]) {
+        const [bad] = await th.interpolateG2AtZero(pairs, xs);
+        expect(bad, xs.join(",")).to.equal(false);
+      }
+    });
+  });
+
+  describe("updateConfig keeps the member count", function () {
+    it("ignores config.totalMembers", async function () {
+      const { council, members, requester } = await loadFixture(membersFixture);
+      const cfg = await council.getConfig();
+      const next = { ...cfg.toObject(), totalMembers: 1n };
+      await expect(council.updateConfig(next)).to.emit(council, "ConfigUpdated").withArgs(3, 5, cfg.votingPeriod);
+      expect((await council.getConfig()).totalMembers).to.equal(5n);
+      expect((await council.getActiveMembers()).length).to.equal(5);
+
+      // A corrupted count of 1 would conclude a warrant on its first vote
+      await council.setAuthorizedRequester(requester.address, true);
+      await council.connect(requester).submitWarrantRequest(0, 1, ethers.keccak256("0x02"), "US");
+      await council.connect(members[0]).castVote(1, true, "");
+      expect((await council.getWarrant(1)).status).to.equal(STATUS.Pending);
+
+      await expect(council.updateConfig({ ...next, threshold: 6n, totalMembers: 100n })).to.be.revertedWith(
+        "Threshold > members"
+      );
+    });
+  });
+
+  describe("verifyThresholdSignature on an unknown warrant", function () {
+    it("returns false even for a valid group signature over the unknown warrant's message", async function () {
+      const { council, dkg } = await loadFixture(warrantFixture);
+      const groupKey = sdkPk(dkg.aggregatedPublicKey);
+      for (const id of [0n, 99n]) {
+        const message = ethers.getBytes(await council.getSigningMessage(id));
+        expect(ethers.hexlify(message)).to.equal(
+          ethers.hexlify(
+            sdk.createWarrantMessage({
+              chainId: 31337n,
+              council: await council.getAddress(),
+              warrantId: id,
+              targetDisputeId: 0n,
+              documentHash: new Uint8Array(32),
+              executionTime: 0n,
+            })
+          )
+        );
+        const ts = await thresholdSig(dkg, message, [1, 2, 3]);
+        // The signature is valid for that message under the group key: only the warrant guard rejects it
+        expect(await council.verifySignature(message, ts.aggregatedSig, groupKey)).to.equal(true);
+        expect(await council.verifyThresholdSignature(id, ts)).to.equal(false);
+      }
+    });
+  });
+
+  describe("SDK decoders reject non-canonical encodings", function () {
+    it("decodeBLSSignatureFromSolidity", async function () {
+      const { partial } = await loadFixture(deployFixture);
+      const good = structHex(sdkSig(partial.signature));
+      const a = bls.G2.ProjectivePoint.fromHex(partial.signature).toAffine();
+      const yOffset = 2 + 128 * 2; // hex offset of y.c0
+      expect(sdk.decodeBLSSignatureFromSolidity(sigStruct(good))).to.deep.equal(
+        bls.G2.ProjectivePoint.fromHex(partial.signature).toRawBytes(true)
+      );
+      const bad = {
+        xc0PlusP: "0x" + fp(a.x.c0 + P) + fp(a.x.c1) + fp(a.y.c0) + fp(a.y.c1),
+        yc1PlusP: "0x" + fp(a.x.c0) + fp(a.x.c1) + fp(a.y.c0) + fp(a.y.c1 + P),
+        dirtyPadding: "0x01" + good.slice(4),
+        dirtyPaddingY: good.slice(0, yOffset) + "01" + good.slice(yOffset + 2),
+      };
+      for (const [name, b] of Object.entries(bad)) {
+        expect(() => sdk.decodeBLSSignatureFromSolidity(sigStruct(b)), name).to.throw(/Non-canonical/);
+      }
+    });
+
+    it("decodeBLSPublicKeyFromSolidity", async function () {
+      const { share } = await loadFixture(deployFixture);
+      const a = bls.G1.ProjectivePoint.fromHex(share.publicKey).toAffine();
+      const good = "0x" + fp(a.x) + fp(a.y);
+      expect(sdk.decodeBLSPublicKeyFromSolidity(pkStruct(good))).to.deep.equal(share.publicKey);
+      for (const b of ["0x" + fp(a.x + P) + fp(a.y), "0x01" + good.slice(4)]) {
+        expect(() => sdk.decodeBLSPublicKeyFromSolidity(pkStruct(b))).to.throw(/Non-canonical/);
+      }
     });
   });
 });
