@@ -92,7 +92,7 @@ The NatLangChain ILRM Protocol uses a multi-signature wallet (Gnosis Safe) combi
 |------------|----------|------------|
 | Standard (minDelay) | 2 days | Default for every call not listed below |
 | Long (longDelay) | 4 days | Ownership/role/upgrade/multicall selectors (`transferOwnership`, `renounceOwnership`, `grantRole`, `revokeRole`, `renounceRole`, `beginDefaultAdminTransfer`, `upgradeTo`, `upgradeToAndCall`, `upgradeAndCall`, `upgrade`, `changeAdmin`, `changeProxyAdmin`, `multicall`), **any call whose target is the timelock itself**, and every (target, selector) pair registered as `LongDelay` |
-| Emergency (emergencyDelay) | 12 hours | Only `EMERGENCY_ROLE` via `executeEmergency`, and only for single, zero-value calls whose (target, selector) governance registered as `Emergency` (default-deny) |
+| Emergency (emergencyDelay) | 12 hours | Only `EMERGENCY_ROLE` via `executeEmergency`, and only for single, zero-value calls whose (target, selector) governance registered as `Emergency` (default-deny). `unpause()` can never be registered `Emergency` |
 
 The required delay is derived from what the call does, on every scheduling path (including the
 inherited OpenZeppelin `schedule`/`scheduleBatch`, which revert with `TimelockInsufficientDelay`
@@ -114,20 +114,36 @@ change is a timelock self-call and therefore needs the long delay.
 |-------|----------|----------|
 | LongDelay | Oracle | `setILRM(address)` |
 | LongDelay | Treasury | `setILRM(address)`, `emergencyWithdraw(address,uint256)`, `emergencyWithdrawETH(address,uint256)` |
-| LongDelay | ILRM | `withdrawTreasury(address,uint256)` |
+| LongDelay | ILRM | `withdrawTreasury(address,uint256)`, `setSubsidyTreasury(address)` |
 | LongDelay | AssetRegistry | `authorizeILRM(address)` |
-| LongDelay | ComplianceCouncil (if deployed) | `setGovernanceTimelock(address)` |
+| LongDelay | ComplianceCouncil (if deployed) | `setGovernanceTimelock(address)`, `setComplianceEscrow(address)` |
+| LongDelay | MultiPartyILRM / DummyTransactionGenerator (if deployed) | `withdrawTreasury(address,uint256)` |
+| LongDelay | BatchQueue (if deployed) | `emergencyWithdraw(address,uint256,bool)` |
 | Emergency | Oracle | `revokeOracle(address)`, `cancelPendingRequest(uint256)` |
 | Emergency | AssetRegistry | `revokeILRM(address)` |
+
+Everything else stays Standard (minDelay), including parameter setters, `pause()`/`unpause()` and
+`Oracle.registerOracle`/`updateOracleKey`/`resetProposal`. `Treasury.fundStakeSubsidy` is
+`onlyILRM` and never called by the timelock, so it needs no class.
+
+Entries name contracts by fully qualified artifact name (`contracts/ILRM.sol:ILRM`), so a second
+contract with the same name cannot make a lookup ambiguous. If a required (core LongDelay) selector
+cannot be resolved, the script aborts before deploying anything; an optional one (modules and every
+Emergency entry) prints a warning and is skipped. Check the policy against the current build at any
+time (no deployment; `test/GovernanceCallPolicy.test.js` runs the same check in CI):
+
+```bash
+GOVERNANCE_POLICY_CHECK=1 npx hardhat run scripts/deploy-governance.ts
+```
 
 ### Roles Granted
 
 | Role | Address | Purpose |
 |------|---------|---------|
 | PROPOSER_ROLE | Multi-sig | Can schedule operations |
-| EXECUTOR_ROLE | Open (anyone) | Can execute after delay |
-| CANCELLER_ROLE | Multi-sig | Can cancel pending ops |
-| EMERGENCY_ROLE | Multi-sig (explicit grant; the deployer does not receive it) | `emergencyPauseAll`/`emergencyUnpauseAll`; queue Emergency-classified calls via `executeEmergency` (not a proposer) |
+| EXECUTOR_ROLE | Open (anyone) | Can execute after delay. Never left without a holder: closing open execution (`setOpenExecutor(false)`), `revokeRole` and `renounceRole` revert with `LastExecutor` if no other holder would remain |
+| CANCELLER_ROLE | Multi-sig | Can cancel pending ops, including everything `EMERGENCY_ROLE` queues |
+| EMERGENCY_ROLE | Multi-sig (explicit grant; the deployer does not receive it) | `emergencyPauseAll` (instant); `emergencyUnpauseAll` (only queues the unpause, at minDelay); queue Emergency-classified calls via `executeEmergency` (not a proposer) |
 | DEFAULT_ADMIN_ROLE | Renounced | No admin after setup (afterwards only long-delay timelock self-operations) |
 
 ---
@@ -253,13 +269,36 @@ timelock.renounceRole(DEFAULT_ADMIN_ROLE, deployerAddress);
    - Anyone can call `timelock.execute(...)` after delay
    - Or execute via multi-sig for extra security
 
-### Emergency Pause
+### Emergency Pause and Unpause
+
+Pausing is instant; unpausing always waits and can be vetoed.
 
 For contracts registered with the timelock, `EMERGENCY_ROLE` pauses instantly:
 
 ```solidity
 timelock.emergencyPauseAll("reason");
 ```
+
+Each `emergencyPauseAll` starts a new pause epoch (`timelock.pauseEpoch()`).
+
+To unpause, `EMERGENCY_ROLE` **queues** the unpause; it does not take effect immediately:
+
+1. `bytes32 id = timelock.emergencyUnpauseAll();` queues the call `emergencyUnpauseAll()` on the
+   timelock itself at **minDelay** (2 days), with a salt from the reserved emergency namespace. It
+   emits `EmergencyActionScheduled(id, guardian, timelock, salt, readyAt, reason)`.
+2. During the delay, `CANCELLER_ROLE` can veto it with `timelock.cancel(id)`.
+3. After the delay, any executor runs
+   `timelock.execute(timelock, 0, abi.encodeCall(IGovernanceTimelock.emergencyUnpauseAll, ()), bytes32(0), salt)`
+   (salt from `getOperation(id).salt` or the event). The timelock then calls itself and unpauses every
+   registered contract (`EmergencyActionExecuted` with reason `"Emergency unpause all"`).
+
+Every operation that unpauses (`unpause()` on any target, or `emergencyUnpauseAll` on the timelock,
+whether a guardian or a proposer queued it) is bound to the pause epoch it was scheduled in. A later
+`emergencyPauseAll` makes it unexecutable (`StaleUnpause`), so an unpause queued before a pause can
+never undo it. Queue a new one once the new incident is resolved, and cancel the stale one to clean up.
+
+Governance can also unpause through ordinary proposals: `unpause()` on a contract (Standard,
+minDelay) or `emergencyUnpauseAll()` on the timelock (self-call, longDelay).
 
 ### Emergency Defensive Call
 
@@ -316,7 +355,9 @@ timelock.cancel(operationId);
 | Wait 12-hour delay | ⬜ | | |
 | Execute emergency call | ⬜ | | |
 | Execute emergency pause (`emergencyPauseAll`) | ⬜ | | |
-| Execute emergency unpause (`emergencyUnpauseAll`) | ⬜ | | |
+| Queue emergency unpause (`emergencyUnpauseAll`) | ⬜ | | |
+| Wait 2-day delay, execute the queued unpause | ⬜ | | |
+| Re-pause, confirm an earlier queued unpause reverts (`StaleUnpause`) | ⬜ | | |
 | Cancel pending operation | ⬜ | | |
 | Attempt with insufficient signatures | ⬜ | | |
 | Attempt early execution (should fail) | ⬜ | | |
@@ -344,6 +385,18 @@ There is no emergency ownership transfer: ownership and role changes always need
    long delay (4 days) and keep watching for hostile operations to cancel
 5. Post-incident review
 
+### If a Guardian (EMERGENCY_ROLE Holder) Is Rogue or Compromised
+
+A guardian can only pause (reversible) and queue operations that cancellers can veto. It cannot
+unpause instantly, and nothing it queues runs before its delay.
+
+1. Watch `EmergencyActionScheduled` events and cancel every operation the guardian queues
+   (`timelock.cancel(id)`, `CANCELLER_ROLE`)
+2. Schedule `revokeRole(EMERGENCY_ROLE, guardian)` on the timelock: it is a self-call, so it needs the
+   long delay (4 days). Until it executes, the guardian can keep re-pausing the protocol and can
+   invalidate queued unpauses by pausing again (a liveness attack, see Residual Design Limits)
+3. After the revocation executes, unpause through a fresh `emergencyUnpauseAll` or a proposal
+
 ### If Timelock Has Bug
 
 1. Use multi-sig to pause protocol contracts directly (if possible)
@@ -359,6 +412,51 @@ There is no emergency ownership transfer: ownership and role changes always need
 | Signer 2 Recovery | ⬜ | ⬜ |
 | Signer 3 Recovery | ⬜ | ⬜ |
 | Master Recovery | ⬜ | ⬜ |
+
+---
+
+## Residual Design Limits
+
+The call policy and the emergency path have limits that configuration and operations have to cover.
+
+**Per-selector classification**
+- Delay classes attach to a (target, selector) pair, not to arguments. An Emergency-classified
+  selector can be queued by a guardian with any arguments (`revokeOracle(anyOracle)`), and a
+  LongDelay selector needs the long delay even for a harmless argument (for example
+  `setSubsidyTreasury(address(0))`, which only disables subsidies).
+- Only the 13 locked ownership/role/upgrade/multicall selectors and calls to the timelock itself are
+  forced to LongDelay. A privileged function reachable through any other selector (other ownership
+  helpers, overloads, a generic `execute(bytes)` or batching entry point, a proxy fallback) is
+  Standard until governance classifies it.
+- Classes follow addresses: a redeployed contract at a new address starts unclassified, and a proxy
+  keeps its classes when its implementation changes (re-check them after every upgrade).
+- Pause epochs only recognise `unpause()` and the timelock's `emergencyUnpauseAll()`. A contract with
+  a differently named unpause function (for example `setPaused(false)`) is not covered: classify it
+  LongDelay and cancel stale proposals by hand. Only `emergencyPauseAll` starts a new epoch; pausing
+  a single contract through a proposal or `executeEmergency` does not.
+- OpenZeppelin operations never expire: anything that matured stays executable until it runs or is
+  cancelled. Cancel every pending or ready operation that is no longer wanted, especially after an
+  incident.
+
+**Guardian revocation path**
+- `EMERGENCY_ROLE` is revoked with `revokeRole`, a timelock self-call that needs the long delay once
+  the bootstrap admin has renounced. There is no fast path: until the revocation executes, a rogue
+  guardian can keep the protocol paused (pausing is instant and repeatable), invalidate honest
+  unpauses by pausing again, and spam operations that cancellers must cancel one by one. It cannot
+  unpause, move funds or change roles.
+- Keep the guardian set small, make each guardian a Safe rather than a single key, and have the
+  cancellers monitor `EmergencyActionScheduled`. A guardian can step down at once with
+  `renounceRole(EMERGENCY_ROLE, self)`.
+
+**Metadata and execution**
+- `getOperation` metadata exists only for operations scheduled through `scheduleOperation`,
+  `scheduleBatch` (7 arguments), `scheduleLongDelay`, `executeEmergency` and `emergencyUnpauseAll`.
+  Raw OZ `schedule`/`scheduleBatch` operations return an empty record (status None), also when the id
+  was tracked by an earlier, cancelled scheduling; use `getOperationState` for them. A batch record
+  shows only its first call.
+- `EXECUTOR_ROLE` always keeps at least one holder, but the timelock cannot tell whether an explicit
+  executor can still act (a lost key, a dead contract). With closed execution, keep at least two live
+  executors.
 
 ---
 

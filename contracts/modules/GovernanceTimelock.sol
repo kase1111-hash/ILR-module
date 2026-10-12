@@ -28,16 +28,28 @@ interface IPausable {
  * - Every OZ scheduling entry point is overridden, so the inherited schedule/scheduleBatch enforce the
  *   same floor (reverting with OZ's TimelockInsufficientDelay).
  *
- * Emergency path:
- * - Only EMERGENCY_ROLE, through executeEmergency, can use emergencyDelay. It works only for single,
- *   zero-value calls whose (target, selector) governance classified Emergency (default-deny).
- * - The call is queued in the normal OZ queue with a salt from a reserved namespace plus a nonce, so
- *   cancellers can still veto it during the emergency delay.
+ * Emergency path (EMERGENCY_ROLE, never a proposer):
+ * - executeEmergency queues single, zero-value calls whose (target, selector) governance classified
+ *   Emergency (default-deny) at emergencyDelay.
+ * - emergencyPauseAll pauses every registered contract at once; emergencyUnpauseAll only queues the
+ *   unpause, at minDelay.
+ * - Guardian operations use the normal OZ queue with a salt from a reserved namespace plus a nonce,
+ *   so cancellers can veto them during their delay.
+ *
+ * Pause epochs:
+ * - emergencyPauseAll increments pauseEpoch. Every operation that calls unpause() (any target) or the
+ *   timelock's emergencyUnpauseAll is bound to the epoch it was scheduled in and reverts with
+ *   StaleUnpause in any later epoch, so no unpause queued before an emergency pause can undo it.
  *
  * Invariants:
  * - OZ's operation-state views (getTimestamp, isOperation*, getOperationState, hashOperation*) are not
  *   overridden; executed operations are marked done and cannot be replayed.
- * - _config is the single source of delay configuration; getMinDelay() reads it.
+ * - _config is the single source of delay configuration; getMinDelay() reads it. Whether execution is
+ *   open is not stored: it is EXECUTOR_ROLE of address(0).
+ * - EXECUTOR_ROLE always has at least one holder.
+ * - Metadata: an id is in the pending list iff its record is Pending iff it was scheduled through a
+ *   metadata path and OZ still reports it pending. A non-empty record always describes the id's
+ *   latest scheduling; a raw OZ schedule clears the record of an earlier, cancelled scheduling.
  */
 contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     // ============ Constants ============
@@ -60,7 +72,7 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     /// @dev Upper 96 bits of a salt; the lower 160 bits carry the emergency nonce
     bytes32 private constant _SALT_PREFIX_MASK = ~bytes32(uint256(type(uint160).max));
 
-    /// @dev Salt namespace reserved for executeEmergency
+    /// @dev Salt namespace reserved for operations queued by EMERGENCY_ROLE
     bytes32 private constant _EMERGENCY_SALT_PREFIX =
         keccak256("ILRM.GovernanceTimelock.emergency-salt") & _SALT_PREFIX_MASK;
 
@@ -79,10 +91,26 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     bytes4 private constant _SEL_CHANGE_PROXY_ADMIN = bytes4(keccak256("changeProxyAdmin(address,address)"));
     bytes4 private constant _SEL_MULTICALL = bytes4(keccak256("multicall(bytes[])"));
 
+    // Unpause selectors bound to the pause epoch they were scheduled in
+    bytes4 private constant _SEL_UNPAUSE = bytes4(keccak256("unpause()"));
+    bytes4 private constant _SEL_EMERGENCY_UNPAUSE_ALL = IGovernanceTimelock.emergencyUnpauseAll.selector;
+
+    /// @dev Description recorded for queued emergencyUnpauseAll operations
+    string private constant _UNPAUSE_ALL_REASON = "Emergency unpause all";
+
+    // ============ Types ============
+
+    /// @dev Stored delay configuration (TimelockConfig without the derived openExecutor flag)
+    struct DelayConfig {
+        uint256 minDelay;
+        uint256 emergencyDelay;
+        uint256 longDelay;
+    }
+
     // ============ State Variables ============
 
-    /// @notice Timelock configuration (single source of delay configuration)
-    TimelockConfig private _config;
+    /// @notice Delay configuration (single source of delay configuration)
+    DelayConfig private _config;
 
     /// @notice Protocol contract registry
     ProtocolContracts private _protocolContracts;
@@ -96,16 +124,25 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     /// @notice List of pending operation IDs
     bytes32[] private _pendingOperations;
 
-    /// @notice Index of operation in pending array
+    /// @notice Index of operation in pending array (1-based; 0 = not pending)
     mapping(bytes32 => uint256) private _pendingIndex;
 
     /// @notice Registered delay class per (target, selector)
     mapping(address => mapping(bytes4 => CallClass)) private _callClass;
 
-    /// @notice Number of emergency operations queued so far (low bits of the emergency salt)
+    /// @notice Number of operations EMERGENCY_ROLE queued so far (low bits of the emergency salt)
     uint256 public emergencyNonce;
 
-    /// @dev True only inside executeEmergency while it calls TimelockController.schedule
+    /// @inheritdoc IGovernanceTimelock
+    uint256 public pauseEpoch;
+
+    /// @dev pauseEpoch + 1 at scheduling time for operations that unpause (0 = not an unpause)
+    mapping(bytes32 => uint256) private _unpauseEpochTag;
+
+    /// @dev Number of EXECUTOR_ROLE holders, address(0) included
+    uint256 private _executorCount;
+
+    /// @dev True only while _queueGuardianOperation calls TimelockController.schedule
     bool private _emergencyScheduling;
 
     // ============ Constructor ============
@@ -124,11 +161,10 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
         require(minDelay <= MAX_ALLOWED_DELAY, "Delay too long");
 
         // Defaults always satisfy the delay bounds: 15m <= min/4 <= min <= 2*min <= 60d
-        _config = TimelockConfig({
+        _config = DelayConfig({
             minDelay: minDelay,
             emergencyDelay: minDelay / 4, // 25% of normal delay
-            longDelay: minDelay * 2, // 200% of normal delay
-            openExecutor: executors.length == 0
+            longDelay: minDelay * 2 // 200% of normal delay
         });
 
         // An empty executor list means anyone may execute after the delay
@@ -142,7 +178,8 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     /**
      * @notice Schedule a single call (OZ entry point)
      * @dev Enforces the content-derived delay floor and rejects the reserved emergency salt namespace.
-     *      Records no governance metadata.
+     *      Records no governance metadata, and clears the record a cancelled earlier scheduling of the
+     *      same id left behind (the metadata paths re-record it).
      */
     function schedule(
         address target,
@@ -156,12 +193,14 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
         uint256 required = _requiredDelay(target, data);
         if (delay < required) revert TimelockInsufficientDelay(delay, required);
         super.schedule(target, value, data, predecessor, salt, delay);
+        _afterProposerSchedule(hashOperation(target, value, data, predecessor, salt), _isUnpauseCall(target, data));
     }
 
     /**
      * @notice Schedule a batch of calls (OZ entry point)
      * @dev Enforces the strictest call's content-derived delay floor and rejects the reserved emergency
-     *      salt namespace. Records no governance metadata.
+     *      salt namespace. Records no governance metadata, and clears the record a cancelled earlier
+     *      scheduling of the same id left behind (the metadata paths re-record it).
      */
     function scheduleBatch(
         address[] calldata targets,
@@ -175,6 +214,9 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
         uint256 required = _requiredDelayBatch(targets, values, payloads);
         if (delay < required) revert TimelockInsufficientDelay(delay, required);
         super.scheduleBatch(targets, values, payloads, predecessor, salt, delay);
+        _afterProposerSchedule(
+            hashOperationBatch(targets, values, payloads, predecessor, salt), _containsUnpause(targets, payloads)
+        );
     }
 
     // ============ Scheduling Functions ============
@@ -189,18 +231,9 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
         OperationType opType,
         string calldata description
     ) external override onlyRole(PROPOSER_ROLE) returns (bytes32 id) {
-        id = hashOperation(target, value, data, predecessor, salt);
-
         // The label can only lengthen the content-derived delay
         uint256 delay = _withLabelFloor(_requiredDelay(target, data), opType);
-
-        // Schedule via the policy checkpoint
-        schedule(target, value, data, predecessor, salt, delay);
-
-        // Store metadata
-        _storeOperationMetadata(id, opType, target, value, data, predecessor, salt, delay, description);
-
-        emit OperationScheduled(id, opType, target, value, data, block.timestamp + delay, description);
+        id = _scheduleTracked(target, value, data, predecessor, salt, opType, delay, description);
     }
 
     /// @inheritdoc IGovernanceTimelock
@@ -213,29 +246,22 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
         OperationType opType,
         string calldata description
     ) external override onlyRole(PROPOSER_ROLE) returns (bytes32 id) {
-        id = hashOperationBatch(targets, values, datas, predecessor, salt);
-
+        // Validates the array lengths before anything else, then applies the label floor
         uint256 delay = _withLabelFloor(_requiredDelayBatch(targets, values, datas), opType);
 
         // Schedule batch via the policy checkpoint
         scheduleBatch(targets, values, datas, predecessor, salt, delay);
+        id = hashOperationBatch(targets, values, datas, predecessor, salt);
 
-        // Store metadata (use first call for simplicity). Built in memory to stay within stack limits.
-        GovernanceOperation memory op;
-        op.id = id;
-        op.opType = opType;
-        if (targets.length > 0) op.target = targets[0];
-        if (values.length > 0) op.value = values[0];
-        if (datas.length > 0) op.data = datas[0];
-        op.predecessor = predecessor;
-        op.salt = salt;
-        op.scheduledAt = block.timestamp;
-        op.readyAt = block.timestamp + delay;
-        op.status = OperationStatus.Pending;
-        op.description = description;
-        _storeOperation(op);
+        // Metadata records the first call of the batch
+        GovernanceOperation storage op = _track(id, opType, predecessor, salt, block.timestamp + delay, description);
+        if (targets.length > 0) {
+            op.target = targets[0];
+            op.value = values[0];
+            op.data = datas[0];
+        }
 
-        emit OperationScheduled(id, op.opType, op.target, op.value, op.data, op.readyAt, op.description);
+        emit OperationScheduled(id, opType, op.target, op.value, op.data, op.readyAt, description);
     }
 
     /// @inheritdoc IGovernanceTimelock
@@ -250,31 +276,25 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     ) external override onlyRole(PROPOSER_ROLE) returns (bytes32 id) {
         if (opType == OperationType.EmergencyAction) revert EmergencyActionLabelReserved();
 
-        id = hashOperation(target, value, data, predecessor, salt);
-
         // longDelay satisfies every content requirement
-        uint256 delay = _config.longDelay;
-
-        schedule(target, value, data, predecessor, salt, delay);
-
-        _storeOperationMetadata(id, opType, target, value, data, predecessor, salt, delay, description);
-
-        emit OperationScheduled(id, opType, target, value, data, block.timestamp + delay, description);
+        id = _scheduleTracked(target, value, data, predecessor, salt, opType, _config.longDelay, description);
     }
 
     // ============ Execution Functions ============
 
     /**
      * @notice Execute a ready single-call operation (OZ entry point)
-     * @dev Keeps governance metadata in sync with OZ state
+     * @dev Rejects unpause operations from an earlier pause epoch and keeps governance metadata in sync
      */
     function execute(address target, uint256 value, bytes calldata payload, bytes32 predecessor, bytes32 salt)
         public
         payable
         override
     {
+        bytes32 id = hashOperation(target, value, payload, predecessor, salt);
+        _requireCurrentPauseEpoch(id);
         super.execute(target, value, payload, predecessor, salt);
-        _markExecuted(hashOperation(target, value, payload, predecessor, salt), target);
+        _markExecuted(id, target);
     }
 
     /// @inheritdoc IGovernanceTimelock
@@ -294,12 +314,13 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
         bytes32 predecessor,
         bytes32 salt
     ) public payable override(TimelockController, IGovernanceTimelock) {
-        // Execute batch via parent (enforces EXECUTOR_ROLE and readiness)
+        bytes32 id = hashOperationBatch(targets, values, datas, predecessor, salt);
+        _requireCurrentPauseEpoch(id);
+
+        // Execute batch via parent (enforces EXECUTOR_ROLE, array lengths and readiness)
         super.executeBatch(targets, values, datas, predecessor, salt);
 
-        _markExecuted(
-            hashOperationBatch(targets, values, datas, predecessor, salt), targets.length > 0 ? targets[0] : address(0)
-        );
+        _markExecuted(id, targets.length > 0 ? targets[0] : address(0));
     }
 
     /**
@@ -325,29 +346,20 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
         onlyRole(EMERGENCY_ROLE)
         returns (bytes32 id)
     {
-        bytes32 salt;
-        uint256 readyAt;
-        (id, salt, readyAt) = _scheduleEmergency(target, data);
+        bytes4 sel = _selectorOf(data);
+        if (data.length < 4 || _effectiveClass(target, sel) != CallClass.Emergency) {
+            revert NotEmergencyCall(target, sel);
+        }
 
-        GovernanceOperation memory op;
-        op.id = id;
-        op.opType = OperationType.EmergencyAction;
-        op.target = target;
-        op.data = data;
-        op.salt = salt;
-        op.scheduledAt = block.timestamp;
-        op.readyAt = readyAt;
-        op.status = OperationStatus.Pending;
-        op.description = reason;
-        _storeOperation(op);
-
-        emit OperationScheduled(id, OperationType.EmergencyAction, target, 0, data, readyAt, reason);
-        // Legacy event, kept for compatibility. The operation is queued, not executed.
-        emit EmergencyActionExecuted(id, msg.sender, reason);
+        // Queued, not executed: the event says so (EmergencyActionScheduled)
+        id = _queueGuardianOperation(target, data, _config.emergencyDelay, OperationType.EmergencyAction, reason);
     }
 
     /// @inheritdoc IGovernanceTimelock
     function emergencyPauseAll(string calldata reason) external override onlyRole(EMERGENCY_ROLE) {
+        // A new epoch: every unpause scheduled before this point can no longer execute
+        ++pauseEpoch;
+
         // Pause all registered protocol contracts
         if (_protocolContracts.ilrm != address(0)) {
             _pauseContract(_protocolContracts.ilrm);
@@ -372,29 +384,19 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     }
 
     /// @inheritdoc IGovernanceTimelock
-    function emergencyUnpauseAll() external override onlyRole(EMERGENCY_ROLE) {
-        if (_protocolContracts.ilrm != address(0)) {
-            _unpauseContract(_protocolContracts.ilrm);
-        }
-        if (_protocolContracts.treasury != address(0)) {
-            _unpauseContract(_protocolContracts.treasury);
-        }
-        if (_protocolContracts.multiPartyILRM != address(0)) {
-            _unpauseContract(_protocolContracts.multiPartyILRM);
-        }
-        if (_protocolContracts.complianceCouncil != address(0)) {
-            _unpauseContract(_protocolContracts.complianceCouncil);
-        }
-        if (_protocolContracts.batchQueue != address(0)) {
-            _unpauseContract(_protocolContracts.batchQueue);
-        }
-        if (_protocolContracts.dummyGenerator != address(0)) {
-            _unpauseContract(_protocolContracts.dummyGenerator);
+    function emergencyUnpauseAll() external override returns (bytes32 id) {
+        if (msg.sender == address(this)) {
+            // A queued unpause is executing (its pause epoch was checked by execute/executeBatch)
+            _unpauseAll();
+            return bytes32(0);
         }
 
-        emit EmergencyActionExecuted(
-            keccak256(abi.encodePacked("UNPAUSE_ALL", block.timestamp)), msg.sender, "Emergency unpause all"
+        // A guardian queues this very call (target = the timelock, data = its selector) at minDelay
+        _checkRole(EMERGENCY_ROLE);
+        id = _queueGuardianOperation(
+            address(this), msg.data[:4], _config.minDelay, OperationType.ProtocolPause, _UNPAUSE_ALL_REASON
         );
+        _unpauseEpochTag[id] = pauseEpoch + 1;
     }
 
     // ============ Protocol Management ============
@@ -451,16 +453,20 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     /// @inheritdoc IGovernanceTimelock
     function getOperation(bytes32 id) external view override returns (GovernanceOperation memory op) {
         op = _operations[id];
-        // Overlay OZ readiness: metadata stores Pending, OZ knows when the delay has passed
-        if (op.status == OperationStatus.Pending && isOperationReady(id)) {
+        // Overlay OZ readiness: a pending record stores Pending, OZ knows when the delay has passed
+        if (_pendingIndex[id] != 0 && isOperationReady(id)) {
             op.status = OperationStatus.Ready;
         }
     }
 
     /// @inheritdoc IGovernanceTimelock
-    function getTimelockConfig() external view override returns (TimelockConfig memory config) {
-        config = _config;
-        config.openExecutor = hasRole(EXECUTOR_ROLE, address(0));
+    function getTimelockConfig() external view override returns (TimelockConfig memory) {
+        return TimelockConfig({
+            minDelay: _config.minDelay,
+            emergencyDelay: _config.emergencyDelay,
+            longDelay: _config.longDelay,
+            openExecutor: hasRole(EXECUTOR_ROLE, address(0))
+        });
     }
 
     /// @inheritdoc IGovernanceTimelock
@@ -470,8 +476,9 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
 
     /**
      * @notice Minimum delay for operations
-     * @dev Reads _config (the single source of delay configuration). Inside the executeEmergency frame
-     *      it returns emergencyDelay so TimelockController accepts the emergency delay.
+     * @dev Reads _config (the single source of delay configuration). Inside the frame in which
+     *      EMERGENCY_ROLE queues an operation it returns emergencyDelay, so TimelockController accepts
+     *      the emergency delay.
      */
     function getMinDelay() public view override returns (uint256) {
         return _emergencyScheduling ? _config.emergencyDelay : _config.minDelay;
@@ -485,6 +492,14 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     /// @inheritdoc IGovernanceTimelock
     function getRequiredDelay(address target, bytes calldata data) external view override returns (uint256) {
         return _requiredDelay(target, data);
+    }
+
+    /**
+     * @notice Number of EXECUTOR_ROLE holders, address(0) (open execution) included
+     * @dev Never drops to zero: revoking or renouncing the last holder reverts with LastExecutor
+     */
+    function getExecutorCount() external view returns (uint256) {
+        return _executorCount;
     }
 
     // ============ Configuration Functions ============
@@ -510,12 +525,11 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
 
     /// @inheritdoc IGovernanceTimelock
     function setOpenExecutor(bool open) external override onlyRole(DEFAULT_ADMIN_ROLE) {
-        _config.openExecutor = open;
-
         if (open) {
             // Grant executor role to zero address (anyone)
             _grantRole(EXECUTOR_ROLE, address(0));
         } else {
+            // Reverts with LastExecutor when no explicit executor would be left
             _revokeRole(EXECUTOR_ROLE, address(0));
         }
     }
@@ -528,6 +542,10 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     {
         if (target == address(0) || target == address(this)) revert InvalidCallClassTarget(target);
         if (_isLockedSelector(selector)) revert CallClassLocked(selector);
+        // Unpausing is never a defensive call: no unpause path may use emergencyDelay
+        if (callClass == CallClass.Emergency && selector == _SEL_UNPAUSE) {
+            revert InvalidCallClass(target, selector, callClass);
+        }
 
         _callClass[target][selector] = callClass;
 
@@ -537,8 +555,9 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     // ============ Internal Functions ============
 
     /**
-     * @dev Inside the executeEmergency frame, TimelockController.schedule's PROPOSER_ROLE check is
-     *      satisfied by EMERGENCY_ROLE instead. Outside that frame PROPOSER_ROLE is never substituted.
+     * @dev Inside the frame in which EMERGENCY_ROLE queues an operation, TimelockController.schedule's
+     *      PROPOSER_ROLE check is satisfied by EMERGENCY_ROLE instead. Outside that frame PROPOSER_ROLE
+     *      is never substituted.
      */
     function _checkRole(bytes32 role) internal view override {
         if (_emergencyScheduling && role == PROPOSER_ROLE) {
@@ -548,30 +567,129 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     }
 
     /**
-     * @dev Queue an Emergency-classified call at emergencyDelay through TimelockController.schedule
-     * @return id Operation ID
-     * @return salt Salt from the reserved emergency namespace
-     * @return readyAt Timestamp at which the operation becomes executable
+     * @dev Counts EXECUTOR_ROLE holders (address(0) included)
      */
-    function _scheduleEmergency(address target, bytes calldata data)
-        private
-        returns (bytes32 id, bytes32 salt, uint256 readyAt)
-    {
-        bytes4 sel = _selectorOf(data);
-        if (data.length < 4 || _effectiveClass(target, sel) != CallClass.Emergency) {
-            revert NotEmergencyCall(target, sel);
+    function _grantRole(bytes32 role, address account) internal override returns (bool granted) {
+        granted = super._grantRole(role, account);
+        if (granted && role == EXECUTOR_ROLE) {
+            ++_executorCount;
         }
+    }
 
-        salt = _EMERGENCY_SALT_PREFIX | bytes32(++emergencyNonce);
-        uint256 delay = _config.emergencyDelay;
+    /**
+     * @dev No path (setOpenExecutor, revokeRole, renounceRole) may remove the last EXECUTOR_ROLE holder:
+     *      without one no operation could execute, including the one that would grant a new executor.
+     */
+    function _revokeRole(bytes32 role, address account) internal override returns (bool revoked) {
+        revoked = super._revokeRole(role, account);
+        if (revoked && role == EXECUTOR_ROLE) {
+            if (_executorCount < 2) revert LastExecutor(account);
+            --_executorCount;
+        }
+    }
+
+    /**
+     * @dev Queue an operation on behalf of EMERGENCY_ROLE through TimelockController.schedule, with a
+     *      salt from the reserved namespace, and record its metadata
+     * @param target Call target
+     * @param data Calldata (value and predecessor are always 0)
+     * @param delay emergencyDelay (executeEmergency) or minDelay (emergencyUnpauseAll)
+     * @param opType Label recorded in the metadata
+     * @param reason Description recorded in the metadata
+     * @return id Operation ID
+     */
+    function _queueGuardianOperation(
+        address target,
+        bytes calldata data,
+        uint256 delay,
+        OperationType opType,
+        string memory reason
+    ) private returns (bytes32 id) {
+        bytes32 salt = _EMERGENCY_SALT_PREFIX | bytes32(++emergencyNonce);
         id = hashOperation(target, 0, data, bytes32(0), salt);
 
-        // No external call happens while the flag is set
+        // TimelockController.schedule reads the flag (in _checkRole and getMinDelay) and makes no
+        // external call, so the flag is never observable outside this frame.
+        // slither-disable-next-line write-after-write
         _emergencyScheduling = true;
         super.schedule(target, 0, data, bytes32(0), salt, delay);
         _emergencyScheduling = false;
 
-        readyAt = block.timestamp + delay;
+        uint256 readyAt = block.timestamp + delay;
+        GovernanceOperation storage op = _track(id, opType, bytes32(0), salt, readyAt, reason);
+        op.target = target;
+        op.data = data;
+
+        emit OperationScheduled(id, opType, target, 0, data, readyAt, reason);
+        emit EmergencyActionScheduled(id, msg.sender, target, salt, readyAt, reason);
+    }
+
+    /**
+     * @dev Schedule a single call through the policy checkpoint and record its metadata
+     */
+    function _scheduleTracked(
+        address target,
+        uint256 value,
+        bytes calldata data,
+        bytes32 predecessor,
+        bytes32 salt,
+        OperationType opType,
+        uint256 delay,
+        string calldata description
+    ) private returns (bytes32 id) {
+        schedule(target, value, data, predecessor, salt, delay);
+        id = hashOperation(target, value, data, predecessor, salt);
+
+        GovernanceOperation storage op = _track(id, opType, predecessor, salt, block.timestamp + delay, description);
+        op.target = target;
+        op.value = value;
+        op.data = data;
+
+        emit OperationScheduled(id, opType, target, value, data, op.readyAt, description);
+    }
+
+    /**
+     * @dev After a proposer-path schedule: drop a stale record and bind unpause operations to the epoch
+     * @param id Operation ID just scheduled
+     * @param unpauses Whether the operation calls unpause() or the timelock's emergencyUnpauseAll
+     */
+    function _afterProposerSchedule(bytes32 id, bool unpauses) private {
+        // OZ only re-schedules an id that is unset, so any record left here belongs to an earlier,
+        // cancelled scheduling. Raw schedules record nothing; metadata paths re-record right after.
+        // scheduledAt is only tested against the zero sentinel (record exists), never against time.
+        // slither-disable-next-line timestamp
+        if (_operations[id].scheduledAt != 0) {
+            delete _operations[id];
+        }
+        if (unpauses) {
+            _unpauseEpochTag[id] = pauseEpoch + 1;
+        }
+    }
+
+    /**
+     * @dev Revert if the operation unpauses and an emergencyPauseAll happened after it was scheduled
+     */
+    function _requireCurrentPauseEpoch(bytes32 id) private view {
+        uint256 tag = _unpauseEpochTag[id];
+        if (tag != 0 && tag != pauseEpoch + 1) revert StaleUnpause(id, tag - 1, pauseEpoch);
+    }
+
+    /**
+     * @dev Whether a call unpauses: unpause() on any target, or the timelock's own emergencyUnpauseAll
+     */
+    function _isUnpauseCall(address target, bytes calldata data) private view returns (bool) {
+        bytes4 sel = _selectorOf(data);
+        return sel == _SEL_UNPAUSE || (target == address(this) && sel == _SEL_EMERGENCY_UNPAUSE_ALL);
+    }
+
+    /**
+     * @dev Whether any call of a (length-checked) batch unpauses
+     */
+    function _containsUnpause(address[] calldata targets, bytes[] calldata payloads) private view returns (bool) {
+        for (uint256 i = 0; i < targets.length; ++i) {
+            if (_isUnpauseCall(targets[i], payloads[i])) return true;
+        }
+        return false;
     }
 
     /**
@@ -628,7 +746,8 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     }
 
     /**
-     * @dev Proposer-path delay floor for a batch: the strictest call wins
+     * @dev Proposer-path delay floor for a batch: the strictest call wins. Checks the array lengths
+     *      first (OZ's error), before any element is read.
      */
     function _requiredDelayBatch(address[] calldata targets, uint256[] calldata values, bytes[] calldata payloads)
         internal
@@ -668,88 +787,71 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     }
 
     /**
-     * @dev Proposer paths may not use salts in the namespace reserved for executeEmergency
+     * @dev Proposer paths may not use salts in the namespace reserved for EMERGENCY_ROLE operations
      */
     function _rejectReservedSalt(bytes32 salt) internal pure {
         if ((salt & _SALT_PREFIX_MASK) == _EMERGENCY_SALT_PREFIX) revert ReservedEmergencySalt(salt);
     }
 
     /**
-     * @dev Mark an operation executed (no-op for raw-scheduled operations without metadata)
+     * @dev Record the metadata of a freshly scheduled operation and add it to the pending list. The
+     *      record is empty here (never tracked, or cleared by _afterProposerSchedule) and the id is not
+     *      in the pending list: OZ only schedules unset ids, and every pending id is removed from the
+     *      list when it is executed or cancelled. Callers fill target, value and data.
+     * @return op Storage pointer to the record
+     */
+    function _track(
+        bytes32 id,
+        OperationType opType,
+        bytes32 predecessor,
+        bytes32 salt,
+        uint256 readyAt,
+        string memory description
+    ) private returns (GovernanceOperation storage op) {
+        op = _operations[id];
+        op.id = id;
+        op.opType = opType;
+        op.predecessor = predecessor;
+        op.salt = salt;
+        op.scheduledAt = block.timestamp;
+        op.readyAt = readyAt;
+        op.status = OperationStatus.Pending;
+        op.description = description;
+
+        _pendingOperations.push(id);
+        _pendingIndex[id] = _pendingOperations.length; // 1-indexed
+    }
+
+    /**
+     * @dev Mark an operation executed (no-op for operations scheduled through a raw OZ entry point)
      */
     function _markExecuted(bytes32 id, address target) private {
-        GovernanceOperation storage op = _operations[id];
-        if (op.scheduledAt == 0) return;
+        if (!_removePendingOperation(id)) return;
 
+        GovernanceOperation storage op = _operations[id];
         op.status = OperationStatus.Executed;
-        _removePendingOperation(id);
 
         emit OperationExecuted(id, op.opType, target, true);
     }
 
     /**
-     * @dev Mark an operation cancelled (no-op for raw-scheduled operations without metadata)
+     * @dev Mark an operation cancelled (no-op for operations scheduled through a raw OZ entry point)
      */
     function _markCancelled(bytes32 id) private {
-        GovernanceOperation storage op = _operations[id];
-        if (op.scheduledAt == 0) return;
+        if (!_removePendingOperation(id)) return;
 
-        op.status = OperationStatus.Cancelled;
-        _removePendingOperation(id);
+        _operations[id].status = OperationStatus.Cancelled;
 
         emit OperationCancelled(id, msg.sender);
     }
 
     /**
-     * @notice Store operation metadata
+     * @dev Remove an operation from the pending list
+     * @return removed False if the id was not pending (untracked raw-scheduled operation)
      */
-    function _storeOperationMetadata(
-        bytes32 id,
-        OperationType opType,
-        address target,
-        uint256 value,
-        bytes memory data,
-        bytes32 predecessor,
-        bytes32 salt,
-        uint256 delay,
-        string memory description
-    ) internal {
-        _storeOperation(
-            GovernanceOperation({
-                id: id,
-                opType: opType,
-                target: target,
-                value: value,
-                data: data,
-                predecessor: predecessor,
-                salt: salt,
-                scheduledAt: block.timestamp,
-                readyAt: block.timestamp + delay,
-                status: OperationStatus.Pending,
-                description: description
-            })
-        );
-    }
-
-    /**
-     * @notice Store operation metadata and track it as pending
-     */
-    function _storeOperation(GovernanceOperation memory op) internal {
-        _operations[op.id] = op;
-
-        // Re-scheduling a cancelled id must not create a duplicate pending entry
-        if (_pendingIndex[op.id] == 0) {
-            _pendingOperations.push(op.id);
-            _pendingIndex[op.id] = _pendingOperations.length; // 1-indexed
-        }
-    }
-
-    /**
-     * @notice Remove operation from pending list
-     */
-    function _removePendingOperation(bytes32 id) internal {
+    function _removePendingOperation(bytes32 id) private returns (bool removed) {
         uint256 index = _pendingIndex[id];
-        if (index == 0) return; // Not in list
+        if (index == 0) return false; // Not in list
 
         uint256 lastIndex = _pendingOperations.length;
         if (index < lastIndex) {
@@ -761,10 +863,39 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
 
         _pendingOperations.pop();
         delete _pendingIndex[id];
+        return true;
     }
 
     /// @notice Emitted when a contract pause operation completes
     event ContractPauseResult(address indexed target, bool success, bool isPause);
+
+    /**
+     * @dev Unpause every registered protocol contract (only reached through a queued operation)
+     */
+    function _unpauseAll() private {
+        if (_protocolContracts.ilrm != address(0)) {
+            _unpauseContract(_protocolContracts.ilrm);
+        }
+        if (_protocolContracts.treasury != address(0)) {
+            _unpauseContract(_protocolContracts.treasury);
+        }
+        if (_protocolContracts.multiPartyILRM != address(0)) {
+            _unpauseContract(_protocolContracts.multiPartyILRM);
+        }
+        if (_protocolContracts.complianceCouncil != address(0)) {
+            _unpauseContract(_protocolContracts.complianceCouncil);
+        }
+        if (_protocolContracts.batchQueue != address(0)) {
+            _unpauseContract(_protocolContracts.batchQueue);
+        }
+        if (_protocolContracts.dummyGenerator != address(0)) {
+            _unpauseContract(_protocolContracts.dummyGenerator);
+        }
+
+        emit EmergencyActionExecuted(
+            keccak256(abi.encodePacked("UNPAUSE_ALL", block.timestamp)), msg.sender, _UNPAUSE_ALL_REASON
+        );
+    }
 
     /**
      * @notice Pause a contract

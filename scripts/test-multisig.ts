@@ -8,6 +8,8 @@
  * 4. Operation cancellation
  * 5. Access control verification
  * 6. Emergency drill (EMERGENCY_ROLE queues an Emergency-classified call)
+ * 7. Pause / unpause drill (instant pause, queued unpause bound to the pause epoch)
+ * 8. Executor guard (the last EXECUTOR_ROLE holder cannot be removed)
  *
  * Prerequisites:
  * - GovernanceTimelock deployed
@@ -295,6 +297,60 @@ async function runLocalSimulation() {
   await expectRevert(
     timelock.connect(signer3).executeEmergency(registryAddress, authorizeData, "not an emergency call"),
     "Emergency path correctly rejects non-Emergency calls"
+  );
+
+  // Test 7: Pause instantly, unpause only through the queue
+  console.log("\n--- Test 7: Pause / Unpause Drill ---");
+
+  const unpauseData = timelock.interface.encodeFunctionData("emergencyUnpauseAll", []);
+  const queueUnpause = async () => {
+    const id = await timelock.connect(signer3).emergencyUnpauseAll.staticCall();
+    await (await timelock.connect(signer3).emergencyUnpauseAll()).wait();
+    return { id, salt: (await timelock.getOperation(id)).salt };
+  };
+
+  await (await timelock.connect(signer3).emergencyPauseAll("drill")).wait();
+  const epoch = await timelock.pauseEpoch();
+  check(epoch === 1n, "emergencyPauseAll is instant and starts pause epoch 1");
+
+  const first = await queueUnpause();
+  const minDelayNow = (await timelock.getTimelockConfig()).minDelay;
+  const queuedAt = BigInt(await time.latest());
+  check(
+    (await timelock.getTimestamp(first.id)) === queuedAt + minDelayNow,
+    "emergencyUnpauseAll only queues the unpause, at minDelay"
+  );
+  await expectRevert(
+    timelock.connect(executor).execute(target, 0, unpauseData, ethers.ZeroHash, first.salt),
+    "Early unpause correctly rejected"
+  );
+
+  // A second incident: pausing again invalidates the unpause queued before it
+  await (await timelock.connect(signer3).emergencyPauseAll("second incident")).wait();
+  await time.increase(Number(minDelayNow) + 1);
+  await expectRevert(
+    timelock.connect(executor).execute(target, 0, unpauseData, ethers.ZeroHash, first.salt),
+    "Unpause queued before the latest pause correctly rejected (StaleUnpause)"
+  );
+
+  const second = await queueUnpause();
+  await time.increase(Number(minDelayNow) + 1);
+  await (await timelock.connect(executor).execute(target, 0, unpauseData, ethers.ZeroHash, second.salt)).wait();
+  check(await timelock.isOperationDone(second.id), "Unpause queued in the current epoch executed after minDelay");
+  await (await timelock.connect(proposer).cancel(first.id)).wait();
+  check(!(await timelock.isOperation(first.id)), "Stale unpause cleaned up by a canceller");
+
+  // Test 8: Execution can never be bricked
+  console.log("\n--- Test 8: Executor Guard ---");
+  const EXECUTOR_ROLE = await timelock.EXECUTOR_ROLE();
+  check((await timelock.getExecutorCount()) === 1n, "One executor holds EXECUTOR_ROLE");
+  await expectRevert(
+    timelock.connect(deployer).revokeRole(EXECUTOR_ROLE, executor.address),
+    "Revoking the last executor correctly rejected (LastExecutor)"
+  );
+  await expectRevert(
+    timelock.connect(executor).renounceRole(EXECUTOR_ROLE, executor.address),
+    "Renouncing as the last executor correctly rejected (LastExecutor)"
   );
 
   console.log("\n" + "=".repeat(60));
