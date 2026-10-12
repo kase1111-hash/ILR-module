@@ -19,7 +19,7 @@ This directory contains monitoring configurations and queries for:
    - `disputes_overview.sql` - Core dispute metrics
    - `financial_metrics.sql` - TVL, burns, subsidies
    - `participant_analytics.sql` - User behavior
-   - `l3_bridge_metrics.sql` - L3 scaling metrics
+   - `l3_bridge_metrics.sql` - L3 scaling metrics (testnet/research only: L3 must not be deployed)
 
 4. Replace placeholder addresses:
    ```sql
@@ -84,6 +84,11 @@ User behavior insights:
 - DID and ZK mode adoption
 
 ### L3 Bridge Metrics
+> ⚠️ **L3 is not production-ready and must not be deployed** (known-unsound fraud proofs, no sequencer bond,
+> settlements not tied to finalized roots, bridged disputes not validated against the ILRM; see
+> [SPEC.md 4.3](../SPEC.md#43-l3app-specific-rollups-natlangchain-roadmapmd)). These queries and the L3 alerts in
+> `alerts/alert-config.yaml` are for testnet/research setups only; a production deployment has no L3 contract.
+
 Layer 3 scaling performance:
 - Batch submission rate
 - Finalization rate
@@ -132,6 +137,7 @@ Layer 3 scaling performance:
 - [ ] Contract pause events
 
 ### L3 Performance
+Testnet/research only: L3 is not production-ready and must not be deployed.
 - [ ] Batch finalization rate
 - [ ] Challenge frequency
 - [ ] Average disputes per batch

@@ -273,7 +273,7 @@ contract L3DisputeBatcherTest is L3TestBase {
         emit AutoBatchFailed(6, _notAuthorized(address(batcher)));
         batcher.queueDisputeInitiation(_message(6));
 
-        // Later queue calls succeed too; during the backoff they do not retry (see L3BatcherBackoff.t.sol)
+        // Later queue calls succeed too; during the backoff they do not retry (see L3BatcherResilience.t.sol)
         _queue(_messages(7, 2));
         assertEq(batcher.getPendingInitiationsCount(), 8);
 

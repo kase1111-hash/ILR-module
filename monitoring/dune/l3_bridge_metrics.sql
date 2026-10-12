@@ -3,6 +3,11 @@
 -- =============================================================================
 -- Platform: Dune Analytics
 -- Network: Optimism (change to your deployed network)
+--
+-- WARNING: L3 IS NOT PRODUCTION-READY AND MUST NOT BE DEPLOYED (known-unsound
+-- fraud proofs, no sequencer bond, settlements not tied to finalized roots,
+-- bridged disputes not validated against the ILRM; see SPEC.md section 4.3).
+-- These queries are for testnet/research deployments only.
 -- =============================================================================
 
 -- L3 Batch Submissions Over Time

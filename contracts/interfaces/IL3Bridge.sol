@@ -325,6 +325,14 @@ interface IL3Bridge {
      */
     function isStateFinalized(bytes32 stateRoot) external view returns (bool);
 
+    /**
+     * @notice Whether a state root is on the current canonical chain (finalized roots included)
+     * @dev A canonical root that is not finalized yet can still finalize; a non-canonical root never can
+     * @param stateRoot The state root to query
+     * @return False if never committed, or orphaned by a rejected ancestor (or rejected itself)
+     */
+    function isStateCanonical(bytes32 stateRoot) external view returns (bool);
+
     // ============ Fraud Proofs (Commit-Reveal for MEV Protection) ============
 
     /**
@@ -441,6 +449,13 @@ interface IL3Bridge {
      * @return True if bridged
      */
     function isDisputeBridged(uint256 l2DisputeId) external view returns (bool);
+
+    /**
+     * @notice Check if dispute is settled
+     * @param l2DisputeId The L2 dispute ID to check
+     * @return True if the dispute has been settled
+     */
+    function isDisputeSettled(uint256 l2DisputeId) external view returns (bool);
 
     /**
      * @notice Get pending settlements count
