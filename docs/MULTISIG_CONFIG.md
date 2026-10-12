@@ -118,8 +118,8 @@ change is a timelock self-call and therefore needs the long delay.
 | LongDelay | AssetRegistry | `authorizeILRM(address)` |
 | LongDelay | ComplianceCouncil (if deployed) | `setGovernanceTimelock(address)`, `setComplianceEscrow(address)`, `setAuthorizedRequester(address,bool)`, `removeMember(address)` |
 | LongDelay | MultiPartyILRM (if deployed) | `withdrawTreasury(address,uint256)` |
-| LongDelay | DummyTransactionGenerator (if deployed) | `withdrawTreasury(address,uint256)`, `setTargetContracts(address,address)` |
-| LongDelay | BatchQueue (if deployed) | `emergencyWithdraw(address,uint256,bool)` |
+| LongDelay | DummyTransactionGenerator (if deployed) | `withdrawTreasury(address,uint256)`, `setTargetContracts(address,address)`, `setKeeper(address)` |
+| LongDelay | BatchQueue (if deployed) | `emergencyWithdraw(address,uint256,bool)`, `setRelayEnabled(bool)` |
 | Emergency | Oracle | `revokeOracle(address)`, `cancelPendingRequest(uint256)`, `resetProposalExact(uint256,uint256,bytes32,string)` |
 | Emergency | AssetRegistry | `revokeILRM(address)` |
 
@@ -135,6 +135,9 @@ Module wiring and module access control get the long delay, like the wiring of t
 - **Access control:** `ComplianceCouncil.setAuthorizedRequester(address,bool)` decides who may request
   compliance warrants, and `ComplianceCouncil.removeMember(address)` evicts a council member (and voids
   the partial signatures it already submitted), changing who can reach the signing threshold.
+  `DummyTransactionGenerator.setKeeper(address)` decides who may trigger (and spend treasury ETH on)
+  dummy generation, and `BatchQueue.setRelayEnabled(bool)` turns on relaying of queued users' actions
+  (relaying ships disabled; see docs/KNOWN_LIMITATIONS.md).
 
 These module entries are **optional**: a module is classified only when its address is configured
 (`COMPLIANCE_COUNCIL_ADDRESS`, `DUMMY_GENERATOR_ADDRESS`, ...), and an entry that no longer resolves

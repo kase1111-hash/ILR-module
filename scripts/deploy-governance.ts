@@ -154,9 +154,13 @@ export function buildCallPolicy(config: PolicyAddresses): CallPolicyEntry[] {
     longDelay(COMPLIANCE_COUNCIL, config.complianceCouncilAddress, "removeMember(address)", false),
     longDelay(MULTI_PARTY_ILRM, config.multiPartyILRMAddress, "withdrawTreasury(address,uint256)", false),
     longDelay(BATCH_QUEUE, config.batchQueueAddress, "emergencyWithdraw(address,uint256,bool)", false),
+    // Turning relaying on lets BatchQueue act on ILRM for queued users (relaying ships disabled)
+    longDelay(BATCH_QUEUE, config.batchQueueAddress, "setRelayEnabled(bool)", false),
     longDelay(DUMMY_GENERATOR, config.dummyGeneratorAddress, "withdrawTreasury(address,uint256)", false),
     // Wiring: the ILRM and BatchQueue the generator submits dummy transactions to
     longDelay(DUMMY_GENERATOR, config.dummyGeneratorAddress, "setTargetContracts(address,address)", false),
+    // Who may trigger (and spend treasury ETH on) dummy generation
+    longDelay(DUMMY_GENERATOR, config.dummyGeneratorAddress, "setKeeper(address)", false),
 
     // Emergency: defensive calls EMERGENCY_ROLE may queue at the emergency delay
     emergency(ORACLE, config.oracleAddress, "revokeOracle(address)"),
