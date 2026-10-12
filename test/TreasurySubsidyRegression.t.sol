@@ -172,10 +172,20 @@ contract TreasurySubsidyRegressionTest is Test {
         );
     }
 
-    /// @dev New entry point (added by the fix)
+    /// @dev New entry point (added by the fix). Uses the 3-argument form with no top-up bound, falling back
+    ///      to the original 2-argument form only when the selector is missing (empty revert data)
     function _tryDepositStakeWithSubsidy(address caller, uint256 id, uint256 maxSubsidy) internal {
         vm.prank(caller);
-        _tryCall(address(ilrm), abi.encodeWithSignature("depositStakeWithSubsidy(uint256,uint256)", id, maxSubsidy));
+        (bool ok, bytes memory ret) = address(ilrm)
+            .call(
+                abi.encodeWithSignature(
+                    "depositStakeWithSubsidy(uint256,uint256,uint256)", id, maxSubsidy, type(uint256).max
+                )
+            );
+        if (!ok && ret.length == 0) {
+            vm.prank(caller);
+            _tryCall(address(ilrm), abi.encodeWithSignature("depositStakeWithSubsidy(uint256,uint256)", id, maxSubsidy));
+        }
     }
 
     /// @dev Low-level call whose result is deliberately ignored

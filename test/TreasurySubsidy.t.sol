@@ -63,7 +63,7 @@ contract ReentrantTreasury is ISubsidyTreasury {
         if (mode == Mode.DepositStake) {
             ilrm.depositStake(disputeId);
         } else if (mode == Mode.DepositStakeWithSubsidy) {
-            ilrm.depositStakeWithSubsidy(disputeId, maxAmount);
+            ilrm.depositStakeWithSubsidy(disputeId, maxAmount, type(uint256).max);
         } else if (mode == Mode.AcceptProposal) {
             ilrm.acceptProposal(disputeId);
         } else {
@@ -97,6 +97,7 @@ contract TreasurySubsidyTest is Test {
     uint256 internal constant WINDOW = 30 days;
     uint256 internal constant TREASURY_FUNDS = 10_000 ether;
     uint256 internal constant STAKE = 10 ether;
+    uint256 internal constant ANY_TOP_UP = type(uint256).max; // no slippage bound on the caller's top-up
 
     IILRM.FallbackLicense internal fallbackLicense = IILRM.FallbackLicense({
         termsHash: keccak256("fallback"), termDuration: 365 days, royaltyCapBps: 500, nonExclusive: true
@@ -150,7 +151,7 @@ contract TreasurySubsidyTest is Test {
         emit StakeDeposited(id, defender, STAKE);
 
         vm.prank(defender);
-        ilrm.depositStakeWithSubsidy(id, type(uint256).max);
+        ilrm.depositStakeWithSubsidy(id, type(uint256).max, ANY_TOP_UP);
 
         assertEq(token.balanceOf(defender), 0, "wallet must stay empty");
         assertEq(ilrm.disputes(id).counterpartyStake, STAKE, "stake not symmetric");
@@ -171,7 +172,7 @@ contract TreasurySubsidyTest is Test {
         uint256 id = _open(defender, stake);
 
         vm.prank(defender);
-        ilrm.depositStakeWithSubsidy(id, type(uint256).max);
+        ilrm.depositStakeWithSubsidy(id, type(uint256).max, ANY_TOP_UP);
 
         _assertSubsidy(id, address(treasury), MAX_PER_DISPUTE);
         assertEq(token.balanceOf(defender), 0, "defender must pay exactly stake - maxPerDispute");
@@ -186,7 +187,7 @@ contract TreasurySubsidyTest is Test {
         uint256 id = _open(defender, STAKE);
 
         vm.prank(defender);
-        ilrm.depositStakeWithSubsidy(id, maxSubsidy);
+        ilrm.depositStakeWithSubsidy(id, maxSubsidy, ANY_TOP_UP);
 
         _assertSubsidy(id, address(treasury), maxSubsidy);
         assertEq(treasury.participantSubsidyUsed(defender), maxSubsidy);
@@ -198,7 +199,7 @@ contract TreasurySubsidyTest is Test {
         uint256 id = _open(defender, 1);
 
         vm.prank(defender);
-        ilrm.depositStakeWithSubsidy(id, type(uint256).max);
+        ilrm.depositStakeWithSubsidy(id, type(uint256).max, ANY_TOP_UP);
 
         _assertSubsidy(id, address(treasury), 1);
         assertEq(treasury.participantSubsidyUsed(defender), 1);
@@ -227,7 +228,7 @@ contract TreasurySubsidyTest is Test {
         assertEq(ilrm.disputes(id).initiatorStake, escalated);
 
         vm.prank(defender);
-        ilrm.depositStakeWithSubsidy(id, type(uint256).max);
+        ilrm.depositStakeWithSubsidy(id, type(uint256).max, ANY_TOP_UP);
 
         IILRM.Dispute memory d = ilrm.disputes(id);
         assertEq(d.counterpartyStake, d.initiatorStake, "stakes must stay symmetric");
@@ -248,7 +249,7 @@ contract TreasurySubsidyTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(IERC20Errors.ERC20InsufficientAllowance.selector, address(ilrm), 0, 50 ether)
         );
-        ilrm.depositStakeWithSubsidy(id, type(uint256).max);
+        ilrm.depositStakeWithSubsidy(id, type(uint256).max, ANY_TOP_UP);
 
         _assertNothingReserved(id, escrowBefore);
         assertEq(token.balanceOf(defender), 50 ether);
@@ -264,7 +265,7 @@ contract TreasurySubsidyTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(IERC20Errors.ERC20InsufficientBalance.selector, defender, 49 ether, 50 ether)
         );
-        ilrm.depositStakeWithSubsidy(id, type(uint256).max);
+        ilrm.depositStakeWithSubsidy(id, type(uint256).max, ANY_TOP_UP);
 
         _assertNothingReserved(id, escrowBefore);
         assertEq(token.balanceOf(defender), 49 ether);
@@ -279,11 +280,11 @@ contract TreasurySubsidyTest is Test {
 
         vm.prank(initiator);
         vm.expectRevert("Not counterparty");
-        ilrm.depositStakeWithSubsidy(id, STAKE);
+        ilrm.depositStakeWithSubsidy(id, STAKE, ANY_TOP_UP);
 
         vm.prank(attacker);
         vm.expectRevert("Not counterparty");
-        ilrm.depositStakeWithSubsidy(id, STAKE);
+        ilrm.depositStakeWithSubsidy(id, STAKE, ANY_TOP_UP);
 
         assertFalse(treasury.disputeSubsidized(id));
     }
@@ -296,14 +297,14 @@ contract TreasurySubsidyTest is Test {
 
         vm.prank(defender);
         vm.expectRevert("Already staked");
-        ilrm.depositStakeWithSubsidy(id, STAKE);
+        ilrm.depositStakeWithSubsidy(id, STAKE, ANY_TOP_UP);
     }
 
     function test_Revert_AlreadyStaked_AfterSubsidizedStake() public {
         token.mint(defender, STAKE);
         uint256 id = _open(defender, STAKE);
         vm.prank(defender);
-        ilrm.depositStakeWithSubsidy(id, STAKE);
+        ilrm.depositStakeWithSubsidy(id, STAKE, ANY_TOP_UP);
 
         vm.prank(defender);
         vm.expectRevert("Already staked");
@@ -311,7 +312,7 @@ contract TreasurySubsidyTest is Test {
 
         vm.prank(defender);
         vm.expectRevert("Already staked");
-        ilrm.depositStakeWithSubsidy(id, STAKE);
+        ilrm.depositStakeWithSubsidy(id, STAKE, ANY_TOP_UP);
     }
 
     function test_Revert_StakeWindowClosed() public {
@@ -320,7 +321,7 @@ contract TreasurySubsidyTest is Test {
 
         vm.prank(defender);
         vm.expectRevert("Stake window closed");
-        ilrm.depositStakeWithSubsidy(id, STAKE);
+        ilrm.depositStakeWithSubsidy(id, STAKE, ANY_TOP_UP);
     }
 
     function test_Revert_ResolvedDispute() public {
@@ -330,7 +331,7 @@ contract TreasurySubsidyTest is Test {
 
         vm.prank(defender);
         vm.expectRevert("Dispute resolved");
-        ilrm.depositStakeWithSubsidy(id, STAKE);
+        ilrm.depositStakeWithSubsidy(id, STAKE, ANY_TOP_UP);
     }
 
     function test_Revert_SubsidiesDisabled_PlainStakeStillWorks() public {
@@ -348,7 +349,7 @@ contract TreasurySubsidyTest is Test {
 
         vm.prank(defender);
         vm.expectRevert("Subsidies disabled");
-        fresh.depositStakeWithSubsidy(freshId, STAKE);
+        fresh.depositStakeWithSubsidy(freshId, STAKE, ANY_TOP_UP);
         vm.prank(defender);
         fresh.depositStake(freshId);
         assertEq(fresh.disputes(freshId).counterpartyStake, STAKE);
@@ -358,7 +359,7 @@ contract TreasurySubsidyTest is Test {
         uint256 id = _open(defender, STAKE);
         vm.prank(defender);
         vm.expectRevert("Subsidies disabled");
-        ilrm.depositStakeWithSubsidy(id, STAKE);
+        ilrm.depositStakeWithSubsidy(id, STAKE, ANY_TOP_UP);
         vm.prank(defender);
         ilrm.depositStake(id);
         assertEq(ilrm.disputes(id).counterpartyStake, STAKE);
@@ -369,7 +370,7 @@ contract TreasurySubsidyTest is Test {
         uint256 id = _open(defender, STAKE);
         vm.prank(defender);
         vm.expectRevert("Zero subsidy");
-        ilrm.depositStakeWithSubsidy(id, 0);
+        ilrm.depositStakeWithSubsidy(id, 0, ANY_TOP_UP);
     }
 
     function test_Revert_IlrmPaused() public {
@@ -378,7 +379,7 @@ contract TreasurySubsidyTest is Test {
 
         vm.prank(defender);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        ilrm.depositStakeWithSubsidy(id, STAKE);
+        ilrm.depositStakeWithSubsidy(id, STAKE, ANY_TOP_UP);
     }
 
     function test_Revert_TreasuryPaused_PlainStakeStillWorks() public {
@@ -388,7 +389,7 @@ contract TreasurySubsidyTest is Test {
 
         vm.prank(defender);
         vm.expectRevert(Pausable.EnforcedPause.selector);
-        ilrm.depositStakeWithSubsidy(id, STAKE);
+        ilrm.depositStakeWithSubsidy(id, STAKE, ANY_TOP_UP);
 
         vm.prank(defender);
         ilrm.depositStake(id);
@@ -402,14 +403,14 @@ contract TreasurySubsidyTest is Test {
 
         vm.prank(defender);
         vm.expectRevert(abi.encodeWithSelector(NatLangChainTreasury.ParticipantFlaggedForAbuse.selector, defender, 50));
-        ilrm.depositStakeWithSubsidy(id, STAKE);
+        ilrm.depositStakeWithSubsidy(id, STAKE, ANY_TOP_UP);
     }
 
     function test_Revert_RollingCapExhausted() public {
         treasury.updateCaps(MAX_PER_DISPUTE, STAKE, WINDOW);
         uint256 first = _open(defender, STAKE);
         vm.prank(defender);
-        ilrm.depositStakeWithSubsidy(first, STAKE);
+        ilrm.depositStakeWithSubsidy(first, STAKE, ANY_TOP_UP);
         assertEq(treasury.getRemainingAllowance(defender), 0);
 
         address otherInitiator = makeAddr("otherInitiator");
@@ -421,7 +422,7 @@ contract TreasurySubsidyTest is Test {
 
         vm.prank(defender);
         vm.expectRevert(NatLangChainTreasury.NoSubsidyAvailable.selector);
-        ilrm.depositStakeWithSubsidy(second, STAKE);
+        ilrm.depositStakeWithSubsidy(second, STAKE, ANY_TOP_UP);
     }
 
     function test_Revert_DirectFundStakeSubsidy_NotILRM() public {
@@ -447,7 +448,7 @@ contract TreasurySubsidyTest is Test {
     function test_Revert_FundStakeSubsidy_AlreadySubsidized() public {
         uint256 id = _open(defender, STAKE);
         vm.prank(defender);
-        ilrm.depositStakeWithSubsidy(id, STAKE);
+        ilrm.depositStakeWithSubsidy(id, STAKE, ANY_TOP_UP);
 
         vm.prank(address(ilrm));
         vm.expectRevert(abi.encodeWithSelector(NatLangChainTreasury.DisputeAlreadySubsidized.selector, id));
@@ -510,7 +511,7 @@ contract TreasurySubsidyTest is Test {
         uint256 initiatorAfterStake = token.balanceOf(initiator);
 
         vm.prank(defender);
-        ilrm.depositStakeWithSubsidy(id, type(uint256).max);
+        ilrm.depositStakeWithSubsidy(id, type(uint256).max, ANY_TOP_UP);
         assertEq(token.balanceOf(address(treasury)), TREASURY_FUNDS - MAX_PER_DISPUTE);
 
         _propose(id);
@@ -537,7 +538,7 @@ contract TreasurySubsidyTest is Test {
         uint256 initiatorAfterStake = token.balanceOf(initiator);
 
         vm.prank(defender);
-        ilrm.depositStakeWithSubsidy(id, subsidy);
+        ilrm.depositStakeWithSubsidy(id, subsidy, ANY_TOP_UP);
         assertEq(token.balanceOf(defender), 0);
 
         vm.warp(block.timestamp + ilrm.RESOLUTION_TIMEOUT() + 1);
@@ -557,7 +558,7 @@ contract TreasurySubsidyTest is Test {
         uint256 initiatorAfterStake = token.balanceOf(initiator);
 
         vm.prank(defender);
-        ilrm.depositStakeWithSubsidy(id, STAKE);
+        ilrm.depositStakeWithSubsidy(id, STAKE, ANY_TOP_UP);
 
         vm.warp(block.timestamp + ilrm.RESOLUTION_TIMEOUT() + 1);
         ilrm.enforceTimeout(id);
@@ -585,7 +586,7 @@ contract TreasurySubsidyTest is Test {
             uint256 initiatorAfterStake = token.balanceOf(initiator);
 
             vm.prank(defender);
-            ilrm.depositStakeWithSubsidy(id, subsidy);
+            ilrm.depositStakeWithSubsidy(id, subsidy, ANY_TOP_UP);
             _assertSubsidy(id, address(treasury), subsidy);
 
             vm.warp(block.timestamp + ilrm.RESOLUTION_TIMEOUT() + 1);
@@ -676,10 +677,10 @@ contract TreasurySubsidyTest is Test {
 
         uint256 acceptId = _open(defender, STAKE);
         vm.prank(defender);
-        ilrm.depositStakeWithSubsidy(acceptId, STAKE);
+        ilrm.depositStakeWithSubsidy(acceptId, STAKE, ANY_TOP_UP);
         uint256 timeoutId = _open(defender2, STAKE);
         vm.prank(defender2);
-        ilrm.depositStakeWithSubsidy(timeoutId, STAKE);
+        ilrm.depositStakeWithSubsidy(timeoutId, STAKE, ANY_TOP_UP);
         _propose(acceptId);
 
         // Everything that could block a treasury call is switched off
@@ -702,7 +703,7 @@ contract TreasurySubsidyTest is Test {
     function test_RepaymentGoesToRecordedFunderAfterRotation() public {
         uint256 id = _open(defender, STAKE);
         vm.prank(defender);
-        ilrm.depositStakeWithSubsidy(id, STAKE);
+        ilrm.depositStakeWithSubsidy(id, STAKE, ANY_TOP_UP);
 
         NatLangChainTreasury treasuryB =
             new NatLangChainTreasury(IERC20(address(token)), MAX_PER_DISPUTE, MAX_PER_PARTICIPANT, WINDOW);
@@ -725,7 +726,7 @@ contract TreasurySubsidyTest is Test {
         token.approve(address(ilrm), type(uint256).max);
         uint256 id2 = _open(defender2, STAKE);
         vm.prank(defender2);
-        ilrm.depositStakeWithSubsidy(id2, STAKE);
+        ilrm.depositStakeWithSubsidy(id2, STAKE, ANY_TOP_UP);
         _assertSubsidy(id2, address(treasuryB), STAKE);
         assertEq(token.balanceOf(address(treasuryB)), TREASURY_FUNDS - STAKE);
     }
@@ -745,7 +746,7 @@ contract TreasurySubsidyTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(IERC20Errors.ERC20InsufficientAllowance.selector, address(ilrm), 0, STAKE)
         );
-        ilrm.depositStakeWithSubsidy(id, STAKE);
+        ilrm.depositStakeWithSubsidy(id, STAKE, ANY_TOP_UP);
 
         assertEq(token.balanceOf(address(ilrm)), escrowBefore, "escrow touched");
         assertEq(ilrm.disputes(id).counterpartyStake, 0);
@@ -760,7 +761,7 @@ contract TreasurySubsidyTest is Test {
 
         vm.prank(defender);
         vm.expectRevert("Invalid subsidy");
-        ilrm.depositStakeWithSubsidy(id, STAKE);
+        ilrm.depositStakeWithSubsidy(id, STAKE, ANY_TOP_UP);
     }
 
     function test_ZeroGrantTreasury_InvalidSubsidy() public {
@@ -769,7 +770,7 @@ contract TreasurySubsidyTest is Test {
 
         vm.prank(defender);
         vm.expectRevert("Invalid subsidy");
-        ilrm.depositStakeWithSubsidy(id, STAKE);
+        ilrm.depositStakeWithSubsidy(id, STAKE, ANY_TOP_UP);
     }
 
     function test_ReentrantTreasury_Blocked() public {
@@ -781,7 +782,7 @@ contract TreasurySubsidyTest is Test {
             bad.setMode(ReentrantTreasury.Mode(m));
             vm.prank(defender);
             vm.expectRevert(ReentrancyGuard.ReentrancyGuardReentrantCall.selector);
-            ilrm.depositStakeWithSubsidy(id, STAKE);
+            ilrm.depositStakeWithSubsidy(id, STAKE, ANY_TOP_UP);
         }
         assertEq(ilrm.disputes(id).counterpartyStake, 0);
     }
@@ -829,11 +830,11 @@ contract TreasurySubsidyTest is Test {
             vm.warp(block.timestamp + ilrm.STAKE_WINDOW() + 1);
             vm.prank(sybil);
             vm.expectRevert("Stake window closed");
-            ilrm.depositStakeWithSubsidy(id, maxSubsidy);
+            ilrm.depositStakeWithSubsidy(id, maxSubsidy, ANY_TOP_UP);
             ilrm.enforceTimeout(id);
         } else {
             vm.prank(sybil);
-            ilrm.depositStakeWithSubsidy(id, maxSubsidy);
+            ilrm.depositStakeWithSubsidy(id, maxSubsidy, ANY_TOP_UP);
             (, uint256 granted) = ilrm.stakeSubsidy(id);
             assertGt(granted, 0);
             assertLe(granted, stake);

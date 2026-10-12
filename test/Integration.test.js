@@ -391,7 +391,7 @@ describe("Integration Tests", function () {
 
       console.log("\n  📋 Step 3: Counterparty stakes with a treasury subsidy");
       const treasuryBefore = await token.balanceOf(treasury.target);
-      await ilrm.connect(counterparty).depositStakeWithSubsidy(0, ethers.MaxUint256);
+      await ilrm.connect(counterparty).depositStakeWithSubsidy(0, ethers.MaxUint256, ethers.MaxUint256);
 
       const dispute = await ilrm.disputes(0);
       expect(dispute.initiatorStake).to.equal(STAKE);
