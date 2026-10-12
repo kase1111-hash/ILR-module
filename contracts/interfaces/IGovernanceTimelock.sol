@@ -15,7 +15,8 @@ pragma solidity ^0.8.20;
  * Roles:
  * - PROPOSER_ROLE: Can schedule operations (multi-sig)
  * - EXECUTOR_ROLE: Can execute after delay (open when granted to address(0)). The role can never lose
- *   its last holder, so execution cannot be bricked.
+ *   its last live holder (any account but the timelock itself, which cannot initiate an execution),
+ *   so execution cannot be bricked.
  * - CANCELLER_ROLE: Can cancel pending operations, including the ones EMERGENCY_ROLE queues
  * - EMERGENCY_ROLE: Not a proposer. May pause all registered contracts instantly (emergencyPauseAll),
  *   queue an unpause of all of them at minDelay (emergencyUnpauseAll), and queue Emergency-classified
@@ -30,6 +31,9 @@ pragma solidity ^0.8.20;
  * - An operation that calls unpause() or emergencyUnpauseAll is bound to the pause epoch in which it
  *   was scheduled: once emergencyPauseAll starts a new epoch it can no longer execute (StaleUnpause),
  *   so no unpause queued before the latest emergency pause can undo it.
+ * - OZ's state views keep reporting such a stale unpause pending (and ready once its delay passed)
+ *   until a canceller cancels it. The governance views report it: isOperationStale, status Stale in
+ *   getOperation, left out of getPendingOperations/getPendingOperationsCount (getStaleOperations).
  *
  * Delay policy (the required delay comes from what a call does, not from its label):
  * - LongDelay: any call whose target is the timelock itself, any call whose selector is one of the
@@ -63,7 +67,8 @@ interface IGovernanceTimelock {
         Pending, // Scheduled, waiting for delay
         Ready, // Delay passed, ready to execute
         Executed, // Successfully executed
-        Cancelled // Cancelled before execution
+        Cancelled, // Cancelled before execution
+        Stale // Unpause scheduled before the latest emergencyPauseAll: never executable, cancel it
     }
 
     /// @notice Delay class of a (target, selector) pair
@@ -185,7 +190,9 @@ interface IGovernanceTimelock {
     /// @notice The unpause operation was scheduled before the latest emergencyPauseAll
     error StaleUnpause(bytes32 id, uint256 scheduledEpoch, uint256 currentEpoch);
 
-    /// @notice Revoking the last EXECUTOR_ROLE holder would make every operation unexecutable
+    /// @notice Revoking the last live EXECUTOR_ROLE holder (any account but the timelock itself) would
+    ///         make every operation unexecutable. Also raised, with the timelock's address, by a
+    ///         constructor whose executor list names only the timelock itself.
     error LastExecutor(address account);
 
     // ============ Scheduling Functions ============
@@ -371,11 +378,23 @@ interface IGovernanceTimelock {
      *      even when the same id was tracked by an earlier, cancelled scheduling; use OZ's
      *      getOperationState for them. A non-empty record always describes the id's latest
      *      scheduling: Pending/Ready while OZ reports it pending, Executed once done, Cancelled once
-     *      cancelled.
+     *      cancelled. An unpause scheduled before the latest emergencyPauseAll reports Stale instead
+     *      of Pending/Ready, although OZ still reports it pending (see isOperationStale).
      * @param id Operation ID
      * @return operation Operation details
      */
     function getOperation(bytes32 id) external view returns (GovernanceOperation memory operation);
+
+    /**
+     * @notice Whether an operation is a stale unpause
+     * @dev True iff OZ reports the id pending (waiting or ready) and it calls unpause() or the timelock's
+     *      emergencyUnpauseAll but was scheduled before the latest emergencyPauseAll, so execute reverts
+     *      with StaleUnpause. Covers every scheduling path, raw OZ schedules included. Only cancelling
+     *      clears it; OZ's isOperationReady is unchanged and reports it ready once its delay passed.
+     * @param id Operation ID
+     * @return stale Whether the operation is pending but can never execute
+     */
+    function isOperationStale(bytes32 id) external view returns (bool stale);
 
     // isOperationPending, isOperationReady, isOperationDone, getTimestamp and hashOperation
     // are inherited from OpenZeppelin's TimelockController, which is the source of truth for
@@ -389,6 +408,8 @@ interface IGovernanceTimelock {
 
     /**
      * @notice Get pending operations count
+     * @dev Operations with metadata that OZ reports pending and that can still execute: stale unpauses
+     *      are not counted
      * @return count Number of pending operations
      */
     function getPendingOperationsCount() external view returns (uint256 count);
@@ -409,7 +430,8 @@ interface IGovernanceTimelock {
     /**
      * @notice Set whether executor role is open to anyone
      * @dev Grants or revokes EXECUTOR_ROLE for address(0). Closing reverts with LastExecutor unless at
-     *      least one explicit executor holds EXECUTOR_ROLE (no role change may leave it without holders).
+     *      least one explicit executor other than the timelock itself holds EXECUTOR_ROLE (no role
+     *      change may leave it without a live holder).
      * @param open True to allow anyone to execute
      */
     function setOpenExecutor(bool open) external;

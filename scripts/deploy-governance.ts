@@ -149,9 +149,14 @@ export function buildCallPolicy(config: PolicyAddresses): CallPolicyEntry[] {
     // LongDelay: optional modules, classified when deployed (warn if missing)
     longDelay(COMPLIANCE_COUNCIL, config.complianceCouncilAddress, "setGovernanceTimelock(address)", false),
     longDelay(COMPLIANCE_COUNCIL, config.complianceCouncilAddress, "setComplianceEscrow(address)", false),
+    // Access control: who may request warrants, and evicting council members (signers of the threshold set)
+    longDelay(COMPLIANCE_COUNCIL, config.complianceCouncilAddress, "setAuthorizedRequester(address,bool)", false),
+    longDelay(COMPLIANCE_COUNCIL, config.complianceCouncilAddress, "removeMember(address)", false),
     longDelay(MULTI_PARTY_ILRM, config.multiPartyILRMAddress, "withdrawTreasury(address,uint256)", false),
     longDelay(BATCH_QUEUE, config.batchQueueAddress, "emergencyWithdraw(address,uint256,bool)", false),
     longDelay(DUMMY_GENERATOR, config.dummyGeneratorAddress, "withdrawTreasury(address,uint256)", false),
+    // Wiring: the ILRM and BatchQueue the generator submits dummy transactions to
+    longDelay(DUMMY_GENERATOR, config.dummyGeneratorAddress, "setTargetContracts(address,address)", false),
 
     // Emergency: defensive calls EMERGENCY_ROLE may queue at the emergency delay
     emergency(ORACLE, config.oracleAddress, "revokeOracle(address)"),
@@ -295,7 +300,7 @@ async function main() {
     dummyGeneratorAddress: process.env.DUMMY_GENERATOR_ADDRESS,
 
     // Anyone can execute after delay. With false, the multi-sig is the only executor, and the timelock
-    // refuses any role change that would leave EXECUTOR_ROLE without a holder.
+    // refuses any role change that would leave EXECUTOR_ROLE without a holder other than itself.
     openExecutor: true,
   };
 

@@ -3,10 +3,11 @@
  * - every policy selector resolves in the CURRENT contracts (catches renamed/removed functions)
  * - the GovernanceTimelock accepts every entry through setCallClass
  * - an unresolvable optional entry (missing or ambiguous artifact, missing function) only warns,
- *   an unresolvable required entry aborts before any class is written
+ *   an unresolvable required entry aborts before any class is written (applyCallPolicy) or before
+ *   anything is deployed (checkCallPolicy)
  */
 const { expect } = require("chai");
-const { ethers } = require("hardhat");
+const { artifacts, ethers } = require("hardhat");
 
 // The deploy script is TypeScript; load it with ts-node unless another test already registered it
 if (!process[Symbol.for("ts-node.register.instance")]) {
@@ -15,6 +16,24 @@ if (!process[Symbol.for("ts-node.register.instance")]) {
 const policy = require("../scripts/deploy-governance.ts");
 
 const CORE_ILRM = "contracts/ILRM.sol:ILRM";
+const COMPLIANCE_COUNCIL = "contracts/modules/ComplianceCouncil.sol:ComplianceCouncil";
+const DUMMY_GENERATOR = "contracts/scaling/DummyTransactionGenerator.sol:DummyTransactionGenerator";
+
+/** Artifact reader that serves the real artifacts, minus one entry's function (as if it were renamed) */
+function withoutFunction(entry) {
+  return async (name) => {
+    const artifact = await artifacts.readArtifact(name);
+    if (name !== entry.contractName) return artifact;
+    const abi = artifact.abi.filter(
+      (f) => f.type !== "function" || ethers.FunctionFragment.from(f).format("sighash") !== entry.signature
+    );
+    return { ...artifact, abi };
+  };
+}
+
+function escapeRegExp(text) {
+  return text.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+}
 
 function quietly(fn) {
   return async (...args) => {
@@ -69,6 +88,60 @@ describe("Governance call policy (scripts/deploy-governance.ts)", function () {
     // Wiring added by the subsidy work is covered
     const signatures = entries.map((e) => `${e.contractName}.${e.signature}`);
     expect(signatures).to.include(`${CORE_ILRM}.setSubsidyTreasury(address)`);
+  });
+
+  it("classifies module wiring and access-control setters as optional LongDelay entries", async function () {
+    const entries = policy.buildCallPolicy(allAddresses());
+    const expected = [
+      [COMPLIANCE_COUNCIL, "setAuthorizedRequester(address,bool)", allAddresses().complianceCouncilAddress],
+      [COMPLIANCE_COUNCIL, "removeMember(address)", allAddresses().complianceCouncilAddress],
+      [DUMMY_GENERATOR, "setTargetContracts(address,address)", allAddresses().dummyGeneratorAddress],
+    ];
+    for (const [contractName, signature, address] of expected) {
+      const matches = entries.filter((e) => e.contractName === contractName && e.signature === signature);
+      expect(matches, `${contractName}.${signature}`).to.have.length(1);
+      expect(matches[0].callClass).to.equal(policy.CallClass.LongDelay);
+      expect(matches[0].required).to.equal(false);
+      expect(matches[0].address).to.equal(address);
+    }
+  });
+
+  it("checkCallPolicy aborts when a required entry no longer resolves", async function () {
+    const required = policy.buildCallPolicy({}).filter((e) => e.required);
+    expect(required).to.not.be.empty;
+
+    for (const entry of required) {
+      const label = `${entry.contractName}.${entry.signature}`;
+      await expect(quietly(policy.checkCallPolicy)(withoutFunction(entry)), label).to.be.rejectedWith(
+        new RegExp(
+          `^Required call-policy entries not resolvable:\\n${escapeRegExp(label)} not found in the compiled artifact$`
+        )
+      );
+    }
+
+    // The whole contract missing (HH700) aborts as well
+    const missingArtifact = async (name) => {
+      if (name === CORE_ILRM) throw new Error(`HH700: Artifact for contract "${name}" not found.`);
+      return artifacts.readArtifact(name);
+    };
+    await expect(quietly(policy.checkCallPolicy)(missingArtifact)).to.be.rejectedWith(
+      /Required call-policy entries not resolvable:\ncontracts\/ILRM.sol:ILRM\.\S+ could not be resolved: HH700/
+    );
+  });
+
+  it("checkCallPolicy reports an unresolvable optional entry without aborting", async function () {
+    const entries = policy.buildCallPolicy({});
+    const optional = entries.filter((e) => !e.required);
+    expect(optional).to.not.be.empty;
+
+    for (const entry of optional) {
+      const { result: report } = await quietly(policy.checkCallPolicy)(withoutFunction(entry));
+      expect(report).to.have.length(entries.length);
+      const broken = report.filter(({ resolution }) => resolution.error !== undefined);
+      expect(broken).to.have.length(1);
+      expect(broken[0].entry).to.deep.equal(entry);
+      expect(broken[0].resolution.error).to.match(/not found in the compiled artifact/);
+    }
   });
 
   it("is accepted by GovernanceTimelock.setCallClass", async function () {

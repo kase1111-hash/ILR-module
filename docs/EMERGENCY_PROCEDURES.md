@@ -163,7 +163,7 @@
 
 ```
 11. RESTORE NORMAL OPERATIONS
-    ├─ Unpause contracts (if paused)
+    ├─ Unpause contracts (if paused; queued, executable after minDelay)
     ├─ Resume normal monitoring
     └─ Communicate resolution
 
@@ -187,6 +187,10 @@ Once the timelock owns the protocol contracts, the multi-sig can no longer call 
 directly (they are `onlyOwner`). Pausing goes through the timelock, which pauses every registered
 pausable contract (ILRM, Treasury, MultiPartyILRM, ComplianceCouncil, BatchQueue,
 DummyTransactionGenerator) in one instant call. AssetRegistry has no pause function.
+
+Pausing is instant, unpausing is not: it is always queued and can be vetoed (see "Unpausing After
+Incident"). Each `emergencyPauseAll` starts a new pause epoch (`timelock.pauseEpoch()`), which makes
+every unpause queued before it unexecutable, so pausing again also invalidates pending unpauses.
 
 **Steps:**
 
@@ -240,7 +244,8 @@ timelock.schedule(treasury, 0, data, bytes32(0), salt, timelock.getRequiredDelay
 
 **When to Use:** A defensive call that cannot wait for the standard delay and that governance
 registered as `Emergency` (default deployment: `Oracle.revokeOracle`, `Oracle.cancelPendingRequest`,
-`AssetRegistry.revokeILRM`). Check with `timelock.getCallClass(target, selector)` (2 = Emergency).
+`Oracle.resetProposalExact`, `AssetRegistry.revokeILRM`). Check with
+`timelock.getCallClass(target, selector)` (2 = Emergency).
 
 **Who Can Execute:** EMERGENCY_ROLE (PROPOSER_ROLE is not needed)
 
@@ -251,7 +256,9 @@ registered as `Emergency` (default deployment: `Oracle.revokeOracle`, `Oracle.ca
    bytes32 id = timelock.executeEmergency(target, data, "reason");
    ```
    This only **schedules** the call (value 0, predecessor 0) at the emergency delay (12 hours by
-   default). Anything not classified Emergency reverts with `NotEmergencyCall`.
+   default) and emits `EmergencyActionScheduled`. `EmergencyActionExecuted` is only emitted when an
+   action takes effect (a pause, or a queued unpause when it executes). Anything not classified
+   Emergency reverts with `NotEmergencyCall`.
 
 2. **Veto window** - during the emergency delay any `CANCELLER_ROLE` holder can stop it:
    ```solidity
@@ -354,7 +361,10 @@ stopped immediately, pause the protocol first (Action 1), but see step 4 before 
    ```solidity
    GovernanceTimelock.cancel(proposalId)            // or cancelOperation(proposalId)
    ```
-   This also applies to operations queued through `executeEmergency`.
+   This also applies to operations queued through `executeEmergency` and `emergencyUnpauseAll`.
+   A guardian that queues an unexpected unpause (`EmergencyActionScheduled` with the timelock as
+   target) is a governance attack: cancel it and follow "If a Guardian (EMERGENCY_ROLE Holder) Is
+   Rogue or Compromised" in `docs/MULTISIG_CONFIG.md`.
 
 2. **If Past Cancellation Window:**
    - Emergency pause all contracts
@@ -381,17 +391,47 @@ stopped immediately, pause the protocol first (Action 1), but see step 4 before 
    cast logs --from-block $PAUSE_BLOCK --to-block latest --address $ILRM_ADDRESS
    ```
 
-2. **Unpause Contracts**
+2. **Queue the Unpause** (it does NOT take effect immediately)
+
+   Unpausing through the timelock that owns the contracts is always queued, at the standard delay
+   (minDelay, 2 days by default), and cancellers can veto it. Plan for that delay: the contracts stay
+   paused until step 4.
    ```solidity
-   // EMERGENCY_ROLE, via the timelock that owns the contracts
-   timelock.emergencyUnpauseAll()
+   // EMERGENCY_ROLE: queues the call emergencyUnpauseAll() on the timelock itself and returns its id.
+   // Emits EmergencyActionScheduled(id, guardian, timelock, salt, readyAt, "Emergency unpause all").
+   bytes32 id = timelock.emergencyUnpauseAll();
+   ```
+   Governance can queue an unpause through an ordinary proposal instead: `unpause()` on a contract
+   (Standard, minDelay) or `emergencyUnpauseAll()` on the timelock (a self-call, longDelay).
+
+3. **Veto Window** - during the delay any `CANCELLER_ROLE` holder can stop it:
+   ```solidity
+   timelock.cancel(id);            // or timelock.cancelOperation(id)
    ```
 
-3. **Monitor Intensively**
+4. **Execute the Unpause After the Delay** (any executor)
+   ```solidity
+   bytes32 salt = timelock.getOperation(id).salt;   // also in EmergencyActionScheduled / OZ CallSalt
+   timelock.execute(timelock, 0, abi.encodeCall(IGovernanceTimelock.emergencyUnpauseAll, ()), bytes32(0), salt);
+   ```
+   The timelock then calls itself and unpauses every registered contract: one `ContractPauseResult`
+   event per contract (with `success`) and `EmergencyActionExecuted(..., "Emergency unpause all")`.
+   Confirm with `cast call $ILRM_ADDRESS "paused()" --rpc-url $RPC_URL` (should return `false`).
+
+   **If the protocol was paused again in the meantime**, the queued unpause can no longer execute.
+   Every operation that unpauses (`unpause()` on any contract, or `emergencyUnpauseAll` on the
+   timelock, queued by a guardian or a proposer) is bound to the pause epoch it was scheduled in, and
+   each `emergencyPauseAll` starts a new epoch: executing an earlier unpause reverts with
+   `StaleUnpause`. OpenZeppelin's views (`isOperationReady`) still report it ready, but
+   `timelock.isOperationStale(id)` is true and `getOperation(id).status` is `Stale`; it is left out of
+   `getPendingOperations()` and listed by `getStaleOperations()`. Once the new incident is resolved,
+   queue a fresh unpause (step 2) and cancel the stale ones (`timelock.cancel(id)`).
+
+5. **Monitor Intensively**
    - Watch for 24 hours post-unpause
    - Lower alert thresholds temporarily
 
-4. **Announce Recovery**
+6. **Announce Recovery**
    - Post on official channels
    - Include brief incident summary
    - Share timeline for full post-mortem
@@ -551,31 +591,3 @@ Full post-mortem: [Link]
 ---
 
 *This document contains sensitive operational information. Handle appropriately.*
-
----
-
-## Addendum: Unpausing Through the GovernanceTimelock Is Queued
-
-This updates step 2 of "Unpausing After Incident" and the guardian procedures above.
-
-- `timelock.emergencyPauseAll(reason)` is still instant (EMERGENCY_ROLE). Each call starts a new
-  pause epoch (`timelock.pauseEpoch()`).
-- `timelock.emergencyUnpauseAll()` no longer unpauses. Called by EMERGENCY_ROLE it **queues** the
-  unpause at the standard delay (minDelay, 2 days by default) and returns the operation id:
-  ```solidity
-  bytes32 id = timelock.emergencyUnpauseAll();               // emits EmergencyActionScheduled
-  // ... CANCELLER_ROLE can veto it with timelock.cancel(id) during the delay ...
-  bytes32 salt = timelock.getOperation(id).salt;
-  timelock.execute(timelock, 0, abi.encodeCall(IGovernanceTimelock.emergencyUnpauseAll, ()), bytes32(0), salt);
-  ```
-  The final `execute` (any executor, after the delay) makes the timelock call itself, which unpauses
-  every registered contract and emits `EmergencyActionExecuted(..., "Emergency unpause all")`.
-- Any operation that unpauses (`unpause()` on any contract, or `emergencyUnpauseAll` on the timelock,
-  queued by a guardian or a proposer) can only execute in the pause epoch it was scheduled in. If you
-  pause again, every earlier unpause reverts with `StaleUnpause`: queue a new one once the new
-  incident is resolved, and cancel the stale ones (`timelock.cancel(id)`).
-- `executeEmergency` only queues its call too; it now emits `EmergencyActionScheduled`, and
-  `EmergencyActionExecuted` is only emitted when an action takes effect (a pause, or a queued unpause
-  when it executes).
-- A guardian that queues an unexpected unpause is a governance attack: cancel it (Action 4) and see
-  "If a Guardian (EMERGENCY_ROLE Holder) Is Rogue or Compromised" in `docs/MULTISIG_CONFIG.md`.

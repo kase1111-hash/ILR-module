@@ -40,16 +40,22 @@ interface IPausable {
  * - emergencyPauseAll increments pauseEpoch. Every operation that calls unpause() (any target) or the
  *   timelock's emergencyUnpauseAll is bound to the epoch it was scheduled in and reverts with
  *   StaleUnpause in any later epoch, so no unpause queued before an emergency pause can undo it.
+ * - Such a stale unpause stays pending (and becomes ready) in OZ's state views until a canceller
+ *   cancels it. isOperationStale reports it, getOperation reports it Stale, and
+ *   getPendingOperations(Count) leave it out (getStaleOperations lists it).
  *
  * Invariants:
  * - OZ's operation-state views (getTimestamp, isOperation*, getOperationState, hashOperation*) are not
  *   overridden; executed operations are marked done and cannot be replayed.
  * - _config is the single source of delay configuration; getMinDelay() reads it. Whether execution is
  *   open is not stored: it is EXECUTOR_ROLE of address(0).
- * - EXECUTOR_ROLE always has at least one holder.
+ * - EXECUTOR_ROLE always has at least one live holder: an account other than the timelock itself
+ *   (address(0), open execution, counts). The timelock can only call execute from inside an execution
+ *   someone else started, so as the only holder it could never initiate one.
  * - Metadata: an id is in the pending list iff its record is Pending iff it was scheduled through a
  *   metadata path and OZ still reports it pending. A non-empty record always describes the id's
- *   latest scheduling; a raw OZ schedule clears the record of an earlier, cancelled scheduling.
+ *   latest scheduling; a raw OZ schedule clears the record of an earlier, cancelled scheduling. The
+ *   views derive Ready (from OZ) and Stale (from the pause epoch) from a Pending record.
  */
 contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     // ============ Constants ============
@@ -139,7 +145,7 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     /// @dev pauseEpoch + 1 at scheduling time for operations that unpause (0 = not an unpause)
     mapping(bytes32 => uint256) private _unpauseEpochTag;
 
-    /// @dev Number of EXECUTOR_ROLE holders, address(0) included
+    /// @dev Number of live EXECUTOR_ROLE holders: address(0) included, the timelock itself excluded
     uint256 private _executorCount;
 
     /// @dev True only while _queueGuardianOperation calls TimelockController.schedule
@@ -150,7 +156,8 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     /**
      * @param minDelay Minimum delay for standard operations (e.g., 2 days)
      * @param proposers Addresses with proposer role (multi-sig)
-     * @param executors Addresses with executor role (or empty for open execution)
+     * @param executors Addresses with executor role (or empty for open execution). A list naming only
+     *        the timelock itself reverts with LastExecutor: the timelock cannot initiate an execution.
      * @param admin Admin address for initial setup (should renounce later). It is NOT granted
      *        EMERGENCY_ROLE; grant that role explicitly.
      */
@@ -171,6 +178,8 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
         if (executors.length == 0) {
             _grantRole(EXECUTOR_ROLE, address(0));
         }
+        // Only reachable with a list naming nothing but the timelock's own (precomputed) address
+        if (_executorCount == 0) revert LastExecutor(address(this));
     }
 
     // ============ OZ Scheduling Entry Points (policy checkpoint) ============
@@ -453,10 +462,20 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     /// @inheritdoc IGovernanceTimelock
     function getOperation(bytes32 id) external view override returns (GovernanceOperation memory op) {
         op = _operations[id];
-        // Overlay OZ readiness: a pending record stores Pending, OZ knows when the delay has passed
-        if (_pendingIndex[id] != 0 && isOperationReady(id)) {
-            op.status = OperationStatus.Ready;
+        // A pending record stores Pending. Overlay what it cannot store: a stale unpause can never
+        // execute (whatever OZ reports); otherwise OZ knows when the delay has passed.
+        if (_pendingIndex[id] != 0) {
+            if (_hasStaleEpoch(id)) {
+                op.status = OperationStatus.Stale;
+            } else if (isOperationReady(id)) {
+                op.status = OperationStatus.Ready;
+            }
         }
+    }
+
+    /// @inheritdoc IGovernanceTimelock
+    function isOperationStale(bytes32 id) external view override returns (bool) {
+        return _hasStaleEpoch(id) && isOperationPending(id);
     }
 
     /// @inheritdoc IGovernanceTimelock
@@ -471,7 +490,7 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
 
     /// @inheritdoc IGovernanceTimelock
     function getPendingOperationsCount() external view override returns (uint256) {
-        return _pendingOperations.length;
+        return _countPending(false);
     }
 
     /**
@@ -495,8 +514,9 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     }
 
     /**
-     * @notice Number of EXECUTOR_ROLE holders, address(0) (open execution) included
-     * @dev Never drops to zero: revoking or renouncing the last holder reverts with LastExecutor
+     * @notice Number of live EXECUTOR_ROLE holders: address(0) (open execution) included, the timelock
+     *         itself excluded (it cannot initiate an execution)
+     * @dev Never drops to zero: revoking or renouncing the last live holder reverts with LastExecutor
      */
     function getExecutorCount() external view returns (uint256) {
         return _executorCount;
@@ -529,7 +549,7 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
             // Grant executor role to zero address (anyone)
             _grantRole(EXECUTOR_ROLE, address(0));
         } else {
-            // Reverts with LastExecutor when no explicit executor would be left
+            // Reverts with LastExecutor when no explicit executor other than the timelock would be left
             _revokeRole(EXECUTOR_ROLE, address(0));
         }
     }
@@ -567,25 +587,34 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     }
 
     /**
-     * @dev Counts EXECUTOR_ROLE holders (address(0) included)
+     * @dev Counts live EXECUTOR_ROLE holders (address(0) included, the timelock itself excluded)
      */
     function _grantRole(bytes32 role, address account) internal override returns (bool granted) {
         granted = super._grantRole(role, account);
-        if (granted && role == EXECUTOR_ROLE) {
+        if (granted && _isLiveExecutor(role, account)) {
             ++_executorCount;
         }
     }
 
     /**
-     * @dev No path (setOpenExecutor, revokeRole, renounceRole) may remove the last EXECUTOR_ROLE holder:
-     *      without one no operation could execute, including the one that would grant a new executor.
+     * @dev No path (setOpenExecutor, revokeRole, renounceRole) may remove the last live EXECUTOR_ROLE
+     *      holder: without one no operation could execute, including the one that would grant a new
+     *      executor. The timelock's own EXECUTOR_ROLE does not count and can always be removed.
      */
     function _revokeRole(bytes32 role, address account) internal override returns (bool revoked) {
         revoked = super._revokeRole(role, account);
-        if (revoked && role == EXECUTOR_ROLE) {
+        if (revoked && _isLiveExecutor(role, account)) {
             if (_executorCount < 2) revert LastExecutor(account);
             --_executorCount;
         }
+    }
+
+    /**
+     * @dev Whether (role, account) is a live executor: EXECUTOR_ROLE held by anyone but the timelock,
+     *      which can only call execute from inside an execution someone else initiated
+     */
+    function _isLiveExecutor(bytes32 role, address account) private view returns (bool) {
+        return role == EXECUTOR_ROLE && account != address(this);
     }
 
     /**
@@ -670,8 +699,41 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
      * @dev Revert if the operation unpauses and an emergencyPauseAll happened after it was scheduled
      */
     function _requireCurrentPauseEpoch(bytes32 id) private view {
+        if (_hasStaleEpoch(id)) revert StaleUnpause(id, _unpauseEpochTag[id] - 1, pauseEpoch);
+    }
+
+    /**
+     * @dev Whether the id's latest scheduling unpauses and an emergencyPauseAll happened after it. Says
+     *      nothing about OZ state: an executed or cancelled unpause keeps its tag.
+     */
+    function _hasStaleEpoch(bytes32 id) private view returns (bool) {
         uint256 tag = _unpauseEpochTag[id];
-        if (tag != 0 && tag != pauseEpoch + 1) revert StaleUnpause(id, tag - 1, pauseEpoch);
+        return tag != 0 && tag != pauseEpoch + 1;
+    }
+
+    /**
+     * @dev Number of pending-list ids that are (stale = true) or are not (stale = false) stale unpauses.
+     *      Every listed id is pending in OZ, so its pause epoch alone decides.
+     */
+    function _countPending(bool stale) private view returns (uint256 n) {
+        uint256 len = _pendingOperations.length;
+        for (uint256 i = 0; i < len; ++i) {
+            if (_hasStaleEpoch(_pendingOperations[i]) == stale) ++n;
+        }
+    }
+
+    /**
+     * @dev The pending-list ids that are (stale = true) or are not (stale = false) stale unpauses, in
+     *      list order
+     */
+    function _listPending(bool stale) private view returns (bytes32[] memory ids) {
+        ids = new bytes32[](_countPending(stale));
+        uint256 len = _pendingOperations.length;
+        uint256 j = 0;
+        for (uint256 i = 0; i < len; ++i) {
+            bytes32 id = _pendingOperations[i];
+            if (_hasStaleEpoch(id) == stale) ids[j++] = id;
+        }
     }
 
     /**
@@ -951,11 +1013,24 @@ contract GovernanceTimelock is TimelockController, IGovernanceTimelock {
     }
 
     /**
-     * @notice Get pending operation IDs
+     * @notice Get pending operation IDs (operations with metadata that can still execute)
+     * @dev Leaves out stale unpauses (see getStaleOperations): OZ still reports them pending, but they
+     *      can never execute. Matches getPendingOperationsCount.
      * @return ids Array of pending operation IDs
      */
     function getPendingOperations() external view returns (bytes32[] memory) {
-        return _pendingOperations;
+        return _listPending(false);
+    }
+
+    /**
+     * @notice Get the IDs of stale unpause operations with metadata
+     * @dev Unpauses queued before the latest emergencyPauseAll: OZ still reports them pending (waiting or
+     *      ready), but every execution reverts with StaleUnpause. They stay listed until a canceller
+     *      cancels them. Raw-scheduled stale unpauses carry no metadata; check them with isOperationStale.
+     * @return ids Array of stale operation IDs
+     */
+    function getStaleOperations() external view returns (bytes32[] memory) {
+        return _listPending(true);
     }
 
     /**
