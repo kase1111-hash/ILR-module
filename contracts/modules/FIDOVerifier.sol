@@ -223,6 +223,11 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
         if (uint256(r) == 0 || uint256(r) >= P256_N) return false;
         if (uint256(s) == 0 || uint256(s) >= P256_N) return false;
 
+        // Validate the public key on both paths, like the precompile: canonical coordinates on the curve. The
+        // pure-Solidity path encodes infinity as (0,0) and never uses b, so key (0,0) or an off-curve key (e.g. the
+        // order-2 point (1,0)) would make u2*Q vanish and let anyone forge via x(u1*G) == r. (0,0) is off-curve.
+        if (!_isOnCurve(publicKeyX, publicKeyY)) return false;
+
         // Normalize s to low-s form (malleability fix)
         if (uint256(s) > P256_N / 2) {
             s = bytes32(P256_N - uint256(s));
@@ -233,7 +238,7 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
             return _verifyWithPrecompile(messageHash, r, s, publicKeyX, publicKeyY);
         }
 
-        // Fallback to pure Solidity (expensive but works everywhere)
+        // Fallback to pure Solidity (very expensive, see _verifyPureSolidity)
         return _verifyPureSolidity(messageHash, r, s, publicKeyX, publicKeyY);
     }
 
@@ -250,7 +255,10 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
         // Increment nonce to prevent reuse of same challenge parameters
         _nonces[msg.sender] = nonce + 1;
 
-        challenge = keccak256(abi.encodePacked(msg.sender, action, data, nonce, block.timestamp, block.chainid));
+        // abi.encode, not encodePacked: packing the two adjacent dynamic fields made the action/data split
+        // ambiguous (("ab","c") and ("a","bc") hashed alike), so a consumer re-deriving the challenge to bind the
+        // signed action could be shown a different action for the same signature.
+        challenge = keccak256(abi.encode(msg.sender, action, data, nonce, block.timestamp, block.chainid));
         deadline = block.timestamp + challengeDeadline;
 
         emit ChallengeGenerated(msg.sender, challenge, deadline);
@@ -346,7 +354,11 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
 
     /**
      * @dev Verify signature using pure Solidity (fallback)
-     * @notice This is expensive (~1M gas) but works on all chains
+     * @notice Very expensive: about 38M gas per verification (affine double-and-add with one modular inverse
+     *         per point operation), above the per-transaction gas cap on EIP-7825 chains. Practical for
+     *         eth_call checks; deploy on chains with the RIP-7212 / EIP-7951 P256VERIFY precompile.
+     *         Callers must pass inputs validated by verifyP256Signature (r, s in [1, n-1], key on the curve):
+     *         with an unvalidated key such as (0,0) this check is forgeable.
      */
     function _verifyPureSolidity(bytes32 messageHash, bytes32 r, bytes32 s, bytes32 publicKeyX, bytes32 publicKeyY)
         internal
@@ -542,24 +554,29 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
     }
 
     /**
-     * @dev Modular inverse using extended Euclidean algorithm
+     * @dev Modular inverse using the extended Euclidean algorithm, for a prime modulus m and 0 < a < m
+     *      (returns 0 for a == 0). Bezout coefficients are kept reduced mod m with mulmod/addmod: both P-256
+     *      moduli exceed type(int256).max, so the former signed coefficients overflowed (a checked-arithmetic
+     *      revert) for almost every input, and the pure-Solidity verification fallback reverted in practice.
+     *      Invariant: t_i * a == r_i (mod m).
      */
     function _modInverse(uint256 a, uint256 m) internal pure returns (uint256) {
         if (a == 0) return 0;
 
-        int256 t1 = 0;
-        int256 t2 = 1;
+        uint256 t1 = 0;
+        uint256 t2 = 1;
         uint256 r1 = m;
         uint256 r2 = a;
 
         while (r2 != 0) {
+            // Exact Euclidean quotient: the floor is intended, so there is no precision loss to avoid
             uint256 q = r1 / r2;
-            (t1, t2) = (t2, t1 - int256(q) * t2);
-            (r1, r2) = (r2, r1 - q * r2);
+            (t1, t2) = (t2, addmod(t1, m - mulmod(q, t2, m), m));
+            (r1, r2) = (r2, r1 % r2);
         }
 
-        if (t1 < 0) t1 += int256(m);
-        return uint256(t1);
+        // r1 == gcd(a, m) == 1 for prime m, so t1 * a == 1 (mod m)
+        return t1;
     }
 
     /**
@@ -587,14 +604,14 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
     function _scalarMult(uint256 px, uint256 py, uint256 scalar) internal pure returns (uint256, uint256) {
         uint256 rx = 0;
         uint256 ry = 0;
-        uint256 tx = px;
-        uint256 ty = py;
+        uint256 qx = px;
+        uint256 qy = py;
 
         while (scalar > 0) {
             if (scalar & 1 == 1) {
-                (rx, ry) = _ecAdd(rx, ry, tx, ty);
+                (rx, ry) = _ecAdd(rx, ry, qx, qy);
             }
-            (tx, ty) = _ecDouble(tx, ty);
+            (qx, qy) = _ecDouble(qx, qy);
             scalar >>= 1;
         }
 

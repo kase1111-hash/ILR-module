@@ -10,9 +10,17 @@ import "../contracts/modules/DIDRegistry.sol";
  *         DID's credential array, with bounded gas (the M-04 / L-02 caps must hold).
  * @dev The regression tests use only the pre-existing API (the new error's selector is derived from its
  *      signature), so this file compiles against the unfixed contract and the regression tests fail there.
+ *      One issuer may hold at most MAX_CREDENTIALS_PER_ISSUER (10) of a DID's credentials, so hiIssuer, loIssuer
+ *      and midIssuer each name a tier of TIER_SIZE issuers with the same trust level; _issue rotates through the
+ *      tier so a tier can fill the whole array.
  */
 contract DIDRegistrySybilScoreTest is Test {
     bytes4 internal constant TOO_MANY_CREDENTIALS = bytes4(keccak256("TooManyCredentials(bytes32)"));
+    bytes4 internal constant ISSUER_CREDENTIAL_LIMIT = bytes4(keccak256("IssuerCredentialLimit(bytes32,address)"));
+
+    /// @dev Issuers per trust tier: TIER_SIZE * MAX_CREDENTIALS_PER_ISSUER == MAX_CREDENTIALS_FOR_SCORE
+    uint256 internal constant TIER_SIZE = 5;
+    uint256 internal constant PER_ISSUER = 10;
 
     /// @dev Generous bound so the unoptimized `forge coverage` build passes too; unbounded loops would blow it.
     uint256 internal constant GAS_BOUND = 3_000_000;
@@ -23,9 +31,14 @@ contract DIDRegistrySybilScoreTest is Test {
     DIDRegistry internal registry;
 
     address internal controller = makeAddr("controller");
-    address internal hiIssuer = makeAddr("hiIssuer"); // trust 100
-    address internal loIssuer = makeAddr("loIssuer"); // trust 20
-    address internal midIssuer = makeAddr("midIssuer"); // trust 60
+    address internal hiIssuer = makeAddr("hiIssuer"); // tier: trust 100
+    address internal loIssuer = makeAddr("loIssuer"); // tier: trust 20
+    address internal midIssuer = makeAddr("midIssuer"); // tier: trust 60
+
+    /// @dev tier label => members (member 0 is the label itself); rotation cursor per tier
+    mapping(address => address[]) internal tierMembers;
+    mapping(address => uint256) internal tierCursor;
+    mapping(address => uint256) internal tierTrust;
 
     bytes32 internal did;
     uint256 internal cap;
@@ -37,13 +50,37 @@ contract DIDRegistrySybilScoreTest is Test {
 
     function _deploy() internal {
         registry = new DIDRegistry();
-        registry.addTrustedIssuer(hiIssuer, "hi", _identityTypes(), 100);
-        registry.addTrustedIssuer(loIssuer, "lo", _identityTypes(), 20);
-        registry.addTrustedIssuer(midIssuer, "mid", _identityTypes(), 60);
+        _setUpTier(hiIssuer, "hi", 100);
+        _setUpTier(loIssuer, "lo", 20);
+        _setUpTier(midIssuer, "mid", 60);
 
         vm.prank(controller);
         did = registry.registerDID(bytes32(uint256(0xd1d)));
         cap = registry.MAX_CREDENTIALS_FOR_SCORE();
+    }
+
+    function _setUpTier(address label, string memory name, uint256 trust) internal {
+        if (tierMembers[label].length == 0) {
+            tierMembers[label].push(label);
+            for (uint256 i = 1; i < TIER_SIZE; i++) {
+                tierMembers[label].push(makeAddr(string(abi.encodePacked(name, "Issuer", vm.toString(i)))));
+            }
+            tierTrust[label] = trust;
+        }
+        tierCursor[label] = 0;
+        _addTier(label);
+    }
+
+    function _addTier(address label) internal {
+        for (uint256 i = 0; i < TIER_SIZE; i++) {
+            registry.addTrustedIssuer(tierMembers[label][i], "tier", _identityTypes(), tierTrust[label]);
+        }
+    }
+
+    function _removeTier(address label) internal {
+        for (uint256 i = 0; i < TIER_SIZE; i++) {
+            registry.removeTrustedIssuer(tierMembers[label][i]);
+        }
     }
 
     function _identityTypes() internal pure returns (IDIDRegistry.AttestationType[] memory types) {
@@ -51,7 +88,15 @@ contract DIDRegistrySybilScoreTest is Test {
         types[0] = IDIDRegistry.AttestationType.Identity;
     }
 
+    /// @dev Issue from a tier (rotating through its members) or, for any other address, from that issuer
     function _issue(address issuer, uint256 expiresAt, uint256 weight) internal returns (bytes32) {
+        address[] storage members = tierMembers[issuer];
+        if (members.length != 0) issuer = members[tierCursor[issuer]++ % TIER_SIZE];
+        return _issueAs(issuer, expiresAt, weight);
+    }
+
+    /// @dev Issue from exactly this issuer
+    function _issueAs(address issuer, uint256 expiresAt, uint256 weight) internal returns (bytes32) {
         vm.prank(issuer);
         return
             registry.issueCredential(
@@ -169,12 +214,13 @@ contract DIDRegistrySybilScoreTest is Test {
     }
 
     function test_HonestDailyRenewalKeepsScore() public {
-        // An honest issuer renews a short-lived credential every day; the expired ones must never crowd it out.
+        // An honest issuer renews a short-lived credential every day; the expired ones must never crowd it out,
+        // neither at the DID limit nor at the issuer's own MAX_CREDENTIALS_PER_ISSUER limit.
         for (uint256 day = 0; day < 60; day++) {
-            _issue(hiIssuer, block.timestamp + 1 days, 50);
+            _issueAs(hiIssuer, block.timestamp + 1 days, 50);
 
             assertEq(registry.getSybilScore(did), 100); // unfixed: 0 from day 51
-            assertLe(registry.getCredentials(did).length, cap);
+            assertLe(registry.getCredentials(did).length, PER_ISSUER);
 
             vm.warp(block.timestamp + 1 days + 1);
         }
@@ -206,7 +252,7 @@ contract DIDRegistrySybilScoreTest is Test {
         }
         assertEq(registry.getSybilScore(did), 20);
 
-        registry.removeTrustedIssuer(loIssuer);
+        _removeTier(loIssuer);
         assertEq(registry.calculateSybilScore(did), 0);
 
         vm.prank(hiIssuer);
@@ -219,8 +265,8 @@ contract DIDRegistrySybilScoreTest is Test {
         assertEq(registry.getSybilScore(did), 100);
         assertEq(registry.getCredentials(did).length, cap);
 
-        // Pruning never removed the inactive-issuer credentials: re-adding the issuer restores their contribution
-        registry.addTrustedIssuer(loIssuer, "lo", _identityTypes(), 20);
+        // Pruning never removed the inactive-issuer credentials: re-adding the issuers restores their contribution
+        _addTier(loIssuer);
         // (49 * (50 * 20 / 100) + 50 * 100 / 100) * 100 / (50 * 50) = 54000 / 2500 = 21
         assertEq(registry.calculateSybilScore(did), 21);
         bytes32[] memory stored = registry.getCredentials(did);
@@ -282,12 +328,13 @@ contract DIDRegistrySybilScoreTest is Test {
         // (20 * 100 + 10 * 20 + 10 * 60) * 100 / 4000 = 70
         assertEq(registry.getSybilScore(did), 70);
 
-        vm.warp(expiry + 1); // 20 expired; the cached score is stale until recomputed
-        assertEq(registry.getSybilScore(did), 70);
+        vm.warp(expiry + 1); // 20 expired: the live score drops at once, the recorded one waits for a recompute
+        assertEq(registry.getSybilScore(did), 40);
+        assertEq(registry.getActiveCredentialCount(did), 20);
 
         registry.pause();
 
-        // Permissionless, works while paused, and recomputes the score: (10 * 20 + 10 * 60) * 100 / 2000 = 40
+        // Permissionless, works while paused, and records the score: (10 * 20 + 10 * 60) * 100 / 2000 = 40
         address anyone = makeAddr("anyone");
         vm.expectEmit(true, false, false, true, address(registry));
         emit SybilScoreUpdated(did, 70, 40);
@@ -366,77 +413,156 @@ contract DIDRegistrySybilScoreTest is Test {
 
     struct ModelCred {
         bytes32 id;
-        address issuer;
+        uint256 issuerIdx; // index into modelIssuers
         uint256 weight;
         uint256 expiresAt;
         bool revoked;
     }
 
+    uint256 internal constant MODEL_ISSUERS = 8;
+
+    /// @dev hi0..hi2 (trust 100, never removed), lo0..lo1 (20) and mid0..mid2 (60); the lo and mid issuers are
+    ///      removed and re-added along the way. Eight issuers can hold 80 > 50 credentials, so both the DID
+    ///      limit and the per-issuer limit are reached.
+    address[MODEL_ISSUERS] internal modelIssuers;
+
+    /// @dev credential id => issuer index + 1
+    mapping(bytes32 => uint256) internal modelIssuerOf;
+
     uint256 internal modelCapReverts;
+    uint256 internal modelIssuerLimitReverts;
     uint256 internal modelPrunedIssues;
 
     /// @dev Deterministic (not fuzzed) so CI's --fuzz-runs 10000 does not multiply its cost.
     function test_ScoreMatchesReferenceModel() public {
         uint256[4] memory seeds = [uint256(1), 7, 2024, 31_337];
         for (uint256 s = 0; s < seeds.length; s++) {
-            _deploy();
-            _runModel(seeds[s], 160);
+            // External self-call: each run gets fresh memory, so memory-expansion gas does not compound
+            this.runModelSeed(seeds[s]);
         }
-        // Both full-array paths were exercised
+        // Both full-array paths and the per-issuer limit were exercised
         assertGt(modelCapReverts, 0);
+        assertGt(modelIssuerLimitReverts, 0);
         assertGt(modelPrunedIssues, 0);
     }
 
+    function runModelSeed(uint256 seed) external {
+        require(msg.sender == address(this), "self only");
+        _deploy();
+        _runModel(seed, 160);
+    }
+
     function _runModel(uint256 seed, uint256 steps) internal {
+        modelIssuers = [
+            tierMembers[hiIssuer][0],
+            tierMembers[hiIssuer][1],
+            tierMembers[hiIssuer][2],
+            tierMembers[loIssuer][0],
+            tierMembers[loIssuer][1],
+            tierMembers[midIssuer][0],
+            tierMembers[midIssuer][1],
+            tierMembers[midIssuer][2]
+        ];
         ModelCred[] memory creds = new ModelCred[](steps);
         uint256 n;
-        address[3] memory issuers = [hiIssuer, loIssuer, midIssuer];
-        uint256[4] memory weights = [uint256(0), 1, 50, 100];
 
         for (uint256 step = 0; step < steps; step++) {
             uint256 r = uint256(keccak256(abi.encode(seed, step)));
             uint256 op = r % 10;
 
             if (op < 7) {
-                address issuer = issuers[(r >> 8) % 3];
-                if (!registry.isTrustedIssuer(issuer)) issuer = hiIssuer; // hi is never removed
-                uint256 wsel = (r >> 16) % 5;
-                uint256 weight = wsel < 4 ? weights[wsel] : (r >> 48) % 101;
-                uint256 expiresAt = (r >> 24) % 3 == 0 ? block.timestamp + 100 + ((r >> 32) % 500) : 0;
-                uint256 heldBefore = registry.getCredentials(did).length;
-
-                vm.prank(issuer);
-                try registry.issueCredential(
-                    did, IDIDRegistry.AttestationType.Identity, bytes32(++claimNonce), expiresAt, weight
-                ) returns (
-                    bytes32 id
-                ) {
-                    creds[n++] = ModelCred(id, issuer, weight, expiresAt, false);
-                    if (heldBefore == cap) modelPrunedIssues++;
-                } catch (bytes memory reason) {
-                    // Only rejected when the array is full and no held credential is revoked or expired
-                    assertEq(bytes4(reason), TOO_MANY_CREDENTIALS);
-                    assertEq(heldBefore, cap);
-                    assertEq(registry.getCredentials(did).length, cap);
-                    assertEq(registry.getActiveCredentialCount(did), cap);
-                    modelCapReverts++;
-                    _revokeRandom(creds, n, r >> 40);
-                }
+                n = _modelIssue(creds, n, r);
             } else if (op < 8) {
                 _revokeRandom(creds, n, r >> 40);
             } else if (op < 9) {
                 vm.warp(block.timestamp + 50 + ((r >> 8) % 300));
             } else {
-                address issuer = issuers[1 + (r >> 8) % 2];
-                if (registry.isTrustedIssuer(issuer)) {
-                    registry.removeTrustedIssuer(issuer);
+                uint256 k = 3 + (r >> 8) % 5;
+                if (registry.isTrustedIssuer(modelIssuers[k])) {
+                    registry.removeTrustedIssuer(modelIssuers[k]);
                 } else {
-                    registry.addTrustedIssuer(issuer, "re", _identityTypes(), issuer == loIssuer ? 20 : 60);
+                    registry.addTrustedIssuer(modelIssuers[k], "re", _identityTypes(), k < 5 ? 20 : 60);
                 }
             }
 
-            assertEq(registry.calculateSybilScore(did), _referenceScore(creds, n));
-            assertLe(registry.getCredentials(did).length, cap);
+            uint256 expected = _referenceScore(creds, n);
+            // The views are live: no recompute is needed after expiry or issuer changes
+            assertEq(registry.getSybilScore(did), expected);
+            assertEq(registry.getDIDDocument(did).sybilScore, expected);
+            assertEq(registry.calculateSybilScore(did), expected);
+            _assertIssuerCountsMatchArray();
+        }
+    }
+
+    /// @dev One random issuance; checks the outcome the model predicts and returns the new credential count
+    function _modelIssue(ModelCred[] memory creds, uint256 n, uint256 r) internal returns (uint256) {
+        uint256 k = (r >> 8) % MODEL_ISSUERS;
+        if (!registry.isTrustedIssuer(modelIssuers[k])) k = (r >> 56) % 3; // a hi issuer: never removed
+        address issuer = modelIssuers[k];
+        uint256 wsel = (r >> 16) % 5;
+        uint256 weight = wsel < 4 ? [uint256(0), 1, 50, 100][wsel] : (r >> 48) % 101;
+        uint256 expiresAt = (r >> 24) % 3 == 0 ? block.timestamp + 100 + ((r >> 32) % 500) : 0;
+        uint256 heldBefore = registry.getCredentials(did).length;
+        // Slots held = neither revoked nor expired (inactive-issuer credentials keep their slot)
+        (uint256 issuerLive, uint256 totalLive) = _liveSlots(creds, n, k);
+
+        vm.prank(issuer);
+        try registry.issueCredential(
+            did, IDIDRegistry.AttestationType.Identity, bytes32(++claimNonce), expiresAt, weight
+        ) returns (
+            bytes32 id
+        ) {
+            assertLt(issuerLive, PER_ISSUER);
+            assertLt(totalLive, cap);
+            creds[n++] = ModelCred(id, k, weight, expiresAt, false);
+            modelIssuerOf[id] = k + 1;
+            if (heldBefore == cap) modelPrunedIssues++;
+        } catch (bytes memory reason) {
+            assertEq(registry.getCredentials(did).length, heldBefore);
+            if (issuerLive >= PER_ISSUER) {
+                // The issuer's own limit is checked before the DID limit
+                assertEq(reason, abi.encodeWithSelector(ISSUER_CREDENTIAL_LIMIT, did, issuer));
+                modelIssuerLimitReverts++;
+            } else {
+                // Only rejected when the array is full and no held credential is revoked or expired
+                assertEq(reason, abi.encodeWithSelector(TOO_MANY_CREDENTIALS, did));
+                assertEq(totalLive, cap);
+                assertEq(heldBefore, cap);
+                assertEq(registry.getActiveCredentialCount(did), cap);
+                modelCapReverts++;
+                _revokeRandom(creds, n, r >> 40);
+            }
+        }
+        return n;
+    }
+
+    function _liveSlots(ModelCred[] memory creds, uint256 n, uint256 k)
+        internal
+        view
+        returns (uint256 issuerLive, uint256 totalLive)
+    {
+        for (uint256 i = 0; i < n; i++) {
+            ModelCred memory c = creds[i];
+            if (c.revoked || (c.expiresAt != 0 && block.timestamp > c.expiresAt)) continue;
+            totalLive++;
+            if (c.issuerIdx == k) issuerLive++;
+        }
+    }
+
+    /// @dev The array never exceeds the DID limit, and the per-issuer counts equal the number of array entries
+    ///      each issuer holds
+    function _assertIssuerCountsMatchArray() internal view {
+        bytes32[] memory stored = registry.getCredentials(did);
+        assertLe(stored.length, cap);
+        uint256[MODEL_ISSUERS] memory tally;
+        for (uint256 i = 0; i < stored.length; i++) {
+            tally[modelIssuerOf[stored[i]] - 1]++;
+        }
+        for (uint256 k = 0; k < MODEL_ISSUERS; k++) {
+            // Called by signature so this file still compiles against the unfixed contract, which lacks it
+            (bool ok, bytes memory ret) = address(registry)
+                .staticcall(abi.encodeWithSignature("getIssuerCredentialCount(bytes32,address)", did, modelIssuers[k]));
+            if (ok) assertEq(abi.decode(ret, (uint256)), tally[k]);
         }
     }
 
@@ -459,16 +585,23 @@ contract DIDRegistrySybilScoreTest is Test {
     }
 
     /// @dev Contract formula over every credential ever issued: per-credential floor of w * t / 100,
-    ///      then * 100 / sum(w), capped at 100.
+    ///      then * 100 / sum(w), capped at 100. Issuer state is read once per issuer, not per credential.
     function _referenceScore(ModelCred[] memory creds, uint256 n) internal view returns (uint256) {
+        bool[MODEL_ISSUERS] memory active;
+        uint256[MODEL_ISSUERS] memory trust;
+        for (uint256 k = 0; k < MODEL_ISSUERS; k++) {
+            active[k] = registry.isTrustedIssuer(modelIssuers[k]);
+            if (active[k]) trust[k] = registry.getTrustedIssuer(modelIssuers[k]).trustLevel;
+        }
+
         uint256 weighted;
         uint256 total;
         for (uint256 i = 0; i < n; i++) {
             ModelCred memory c = creds[i];
             if (c.revoked) continue;
             if (c.expiresAt != 0 && block.timestamp > c.expiresAt) continue;
-            if (!registry.isTrustedIssuer(c.issuer)) continue;
-            weighted += (c.weight * registry.getTrustedIssuer(c.issuer).trustLevel) / 100;
+            if (!active[c.issuerIdx]) continue;
+            weighted += (c.weight * trust[c.issuerIdx]) / 100;
             total += c.weight;
         }
         if (total == 0) return 0;

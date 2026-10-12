@@ -113,8 +113,12 @@
 #### DIDRegistry.sol - ✅ CORRECT
 
 - One DID per address enforced
-- Sybil score calculation uses weighted average
-- Credential cleanup prevents unbounded array growth
+- Sybil score calculation uses weighted average over every credential the DID holds, computed live by the views
+  (credential expiry and issuer removal or trust changes count immediately)
+- Credential array capped at 50 per DID and 10 per issuer per DID, so no single issuer can fill a DID it does not
+  control; revoked/expired entries are pruned on issuance or by cleanup, and the controller can clear one
+  issuer's credentials in one call
+- Already-expired credentials cannot be issued
 - Attestation type limits prevent loop DoS
 - Trust level capped at 100
 

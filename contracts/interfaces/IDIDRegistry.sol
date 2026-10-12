@@ -47,7 +47,9 @@ interface IDIDRegistry {
         uint256 updated; // Last update timestamp
         DIDStatus status; // Current status
         bytes32 documentHash; // IPFS hash of full DID document
-        uint256 sybilScore; // Sybil resistance score (0-100, higher = more trusted)
+        // Sybil resistance score (0-100, higher = more trusted). getDIDDocument / getDIDByController return the
+        // live score; storage holds the value last recorded by a state-changing call (the SybilScoreUpdated source).
+        uint256 sybilScore;
     }
 
     /// @notice Verifiable Credential representation
@@ -97,7 +99,9 @@ interface IDIDRegistry {
     /// @notice Emitted when a credential is revoked
     event CredentialRevoked(bytes32 indexed credentialId, address indexed revoker, string reason);
 
-    /// @notice Emitted when sybil score is updated
+    /// @notice Emitted when the recorded sybil score changes (on issuance, revocation, revokeIssuerCredentials,
+    ///         cleanup or calculateSybilScore). Expiry and issuer changes alter the live score without an event
+    ///         until one of those calls records it.
     event SybilScoreUpdated(bytes32 indexed did, uint256 oldScore, uint256 newScore);
 
     /// @notice Emitted when a trusted issuer is added
@@ -125,6 +129,11 @@ interface IDIDRegistry {
     error AddressAlreadyHasDID(address controller);
     /// @notice DID already holds MAX_CREDENTIALS_FOR_SCORE credentials that are neither revoked nor expired.
     error TooManyCredentials(bytes32 did);
+    /// @notice The issuer already holds MAX_CREDENTIALS_PER_ISSUER of the DID's credentials that are neither
+    ///         revoked nor expired.
+    error IssuerCredentialLimit(bytes32 did, address issuer);
+    /// @notice A credential's expiry must be 0 (never) or later than the current block timestamp.
+    error ExpiryNotInFuture(uint256 expiresAt);
 
     // ============ DID Management Functions ============
 
@@ -201,12 +210,17 @@ interface IDIDRegistry {
      * @param did The DID to issue credential to
      * @param attestationType Type of attestation
      * @param claimHash Hash of the claim data
-     * @param expiresAt Expiration timestamp (0 = never)
+     * @param expiresAt Expiration timestamp (0 = never); otherwise must be later than block.timestamp
+     *        (ExpiryNotInFuture)
      * @param weight Weight for sybil score (0-100)
      * @return credentialId The issued credential ID
-     * @dev A DID holds at most MAX_CREDENTIALS_FOR_SCORE (50) credentials, all of which are scored. When the
-     *      DID's array is full, revoked and expired entries are pruned first (swap-and-pop); if it is still full
-     *      the call reverts with TooManyCredentials. The DID controller can revoke a credential to make room.
+     * @dev A DID holds at most MAX_CREDENTIALS_FOR_SCORE (50) credentials, all of which are scored, and one issuer
+     *      holds at most MAX_CREDENTIALS_PER_ISSUER (10) of them. When either limit is reached, revoked and expired
+     *      entries are pruned first (swap-and-pop); if the issuer is still at its limit the call reverts with
+     *      IssuerCredentialLimit, and if the array is still full with TooManyCredentials. The DID controller can
+     *      revoke credentials (one at a time, or all of one issuer's via revokeIssuerCredentials) to make room.
+     *      Checks run in this order: paused, trusted issuer, attestation type, DID exists and is active, expiry,
+     *      issuer limit, DID limit.
      */
     function issueCredential(
         bytes32 did,
@@ -224,6 +238,20 @@ interface IDIDRegistry {
     function revokeCredential(bytes32 credentialId, string calldata reason) external;
 
     /**
+     * @notice Revoke every credential `issuer` holds in a DID and free their slots in one call
+     * @dev Callable by the DID controller, or by `issuer` for its own credentials. Emits CredentialRevoked for
+     *      each newly revoked credential, then prunes all revoked/expired entries from the DID's array and records
+     *      the new score. Works while paused.
+     * @param did The DID to clear
+     * @param issuer The issuer whose credentials are revoked
+     * @param reason Reason for revocation
+     * @return revokedCount Number of credentials newly revoked
+     */
+    function revokeIssuerCredentials(bytes32 did, address issuer, string calldata reason)
+        external
+        returns (uint256 revokedCount);
+
+    /**
      * @notice Verify a credential is valid
      * @param credentialId The credential to verify
      * @return valid True if credential is valid, not expired, and not revoked
@@ -235,15 +263,17 @@ interface IDIDRegistry {
      * @param did The DID to get credentials for
      * @return Array of credential IDs
      * @dev At most MAX_CREDENTIALS_FOR_SCORE entries. Order is not preserved: revoked/expired entries are removed
-     *      by cleanupCredentials or automatically when issuance finds the array full.
+     *      by cleanupCredentials, by revokeIssuerCredentials, or automatically when issuance finds the array full
+     *      or the issuer at its MAX_CREDENTIALS_PER_ISSUER limit.
      */
     function getCredentials(bytes32 did) external view returns (bytes32[] memory);
 
     // ============ Sybil Resistance ============
 
     /**
-     * @notice Calculate and update sybil score for a DID
-     * @dev Based on credentials, their weights, and issuer trust levels
+     * @notice Calculate the sybil score for a DID and record it, emitting SybilScoreUpdated if it changed
+     * @dev Based on credentials, their weights, and issuer trust levels. The views compute the same score live, so
+     *      calling this is never needed for freshness; it only syncs the recorded value and its event.
      * @param did The DID to calculate score for
      * @return score The calculated sybil score (0-100)
      */
@@ -251,6 +281,7 @@ interface IDIDRegistry {
 
     /**
      * @notice Check if DID meets minimum sybil score requirement
+     * @dev Uses the live score; false for an unknown or non-active DID
      * @param did The DID to check
      * @param requiredScore Minimum required score
      * @return True if DID meets requirement
@@ -259,6 +290,8 @@ interface IDIDRegistry {
 
     /**
      * @notice Get current sybil score for a DID
+     * @dev Computed live from the DID's credentials (bounded by MAX_CREDENTIALS_FOR_SCORE), so it reflects
+     *      credential expiry and issuer removal or trust changes without any transaction
      * @param did The DID to query
      * @return Current sybil score
      */

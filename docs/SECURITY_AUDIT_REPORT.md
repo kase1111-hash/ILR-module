@@ -229,17 +229,32 @@ Multiple state commitments could reference the same `previousRoot` if submitted 
 
 ### M-04: Unbounded Credential Array Growth
 
-**File:** `DIDRegistry.sol:341-358`
+**File:** `DIDRegistry.sol` (`issueCredential`, `revokeIssuerCredentials`, `cleanupCredentials`, `_computeSybilScore`)
 **Status:** ✅ Fixed
 
 **Description:**
-Revoked credentials remained in the `_didCredentials[did]` array, causing unbounded growth.
+Revoked credentials remained in the `_didCredentials[did]` array, causing unbounded growth. The first fix (a
+cleanup function plus a score loop over only the first 50 entries) let stale entries at the front hide newer
+credentials from the sybil score.
 
 **Fix Applied:**
-- Added `cleanupCredentials(did)` function to remove revoked/expired credentials
-- Uses swap-and-pop pattern for gas-efficient removal
-- Added `getActiveCredentialCount(did)` view function
-- Users or protocols can periodically call cleanup to prevent bloat
+- A DID holds at most `MAX_CREDENTIALS_FOR_SCORE` (50) credentials, so the sybil score covers every one of them and
+  every per-DID loop (score, prune, active count, batch revoke) runs at most 50 times
+- One issuer holds at most `MAX_CREDENTIALS_PER_ISSUER` (10) of a DID's credentials. Without this, any trusted
+  issuer (even one with trust 1) could fill a DID it does not control with 50 never-expiring zero-weight
+  credentials, after which every honest issuer's `issueCredential` reverted with `TooManyCredentials`; filling a
+  DID now takes at least five issuers
+- When either limit is reached, issuance first prunes revoked/expired entries (swap-and-pop) and reverts with
+  `IssuerCredentialLimit` or `TooManyCredentials` only if the limit is still reached
+- `revokeIssuerCredentials(did, issuer, reason)` lets the DID controller (or the issuer, for its own) revoke and
+  remove all of one issuer's credentials in a single bounded call, instead of one `revokeCredential` per entry;
+  this also frees the slots of an issuer the owner has removed
+- `cleanupCredentials(did)` (permissionless, works while paused) still removes revoked/expired entries;
+  `getActiveCredentialCount(did)` and `getIssuerCredentialCount(did, issuer)` report the array's contents
+- `getSybilScore`, `meetsSybilRequirement`, `getDIDDocument` and `getDIDByController` compute the score live (at
+  most 50 credentials read), so credential expiry and `removeTrustedIssuer` / `updateTrustedIssuer` take effect
+  immediately; the stored value only feeds the `SybilScoreUpdated` event
+- `issueCredential` rejects an expiry that is not in the future (`ExpiryNotInFuture`)
 
 ---
 
