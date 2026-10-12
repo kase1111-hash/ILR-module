@@ -50,6 +50,9 @@ abstract contract L3TestBase is Test {
     event DisputeBridgerUpdated(address indexed account, bool authorized);
     event SettlementRelayerUpdated(address indexed account, bool authorized);
     event DisputeBridgeSkipped(uint256 indexed l2DisputeId, uint256 existingL3DisputeId);
+    event SettlementSkipped(
+        uint256 indexed l2DisputeId, uint256 indexed l3DisputeId, IL3Bridge.SettlementSkipReason reason
+    );
     event FeesWithdrawn(address indexed to, uint256 amount);
 
     // ============ Re-declared L3DisputeBatcher events ============
@@ -57,6 +60,7 @@ abstract contract L3TestBase is Test {
     event BatchSubmitted(uint256 indexed batchId, uint256 disputeCount, bytes32 batchHash);
     event SettlementBatchProcessed(uint256 indexed batchId, uint256 settlementCount);
     event AutoBatchFailed(uint256 pendingCount, bytes reason);
+    event AutoBatchDeferred(uint256 consecutiveFailures, uint256 retryAfter);
     event StaleSettlementsDiscarded(address indexed queuedBy, uint256 count);
 
     // ============ Deployment ============
@@ -74,6 +78,37 @@ abstract contract L3TestBase is Test {
                 maxBatchSize: 100
             })
         );
+    }
+
+    // ============ Messages ============
+
+    function _initiation(uint256 l2DisputeId) internal view returns (IL3Bridge.DisputeInitiationMessage memory) {
+        return IL3Bridge.DisputeInitiationMessage({
+            l2DisputeId: l2DisputeId,
+            initiator: address(uint160(0x1000 + l2DisputeId)),
+            counterparty: address(uint160(0x2000 + l2DisputeId)),
+            stakeAmount: 1 ether,
+            evidenceHash: keccak256(abi.encode("evidence", l2DisputeId)),
+            fallbackTermsHash: bytes32(0),
+            l2BlockNumber: block.number
+        });
+    }
+
+    function _settlementMsg(uint256 l2DisputeId, uint256 l3DisputeId, bytes32 stateProof)
+        internal
+        pure
+        returns (IL3Bridge.DisputeSettlementMessage memory)
+    {
+        return IL3Bridge.DisputeSettlementMessage({
+            l2DisputeId: l2DisputeId,
+            l3DisputeId: l3DisputeId,
+            outcome: IL3Bridge.L3DisputeState.Accepted,
+            initiatorReturn: 1 ether,
+            counterpartyReturn: 1 ether,
+            burnAmount: 0,
+            proposalHash: keccak256(abi.encode("proposal", l2DisputeId)),
+            stateProof: stateProof
+        });
     }
 
     // ============ State Commitments ============

@@ -7,6 +7,13 @@ import "../interfaces/IL3Bridge.sol";
 /**
  * @title L3StateVerifier
  * @notice Merkle proof verification for L3 dispute states
+ *
+ * @custom:security-warning NOT PRODUCTION-READY - MUST NOT BE DEPLOYED.
+ * Proofs are checked against roots that L3Bridge finalizes, and L3Bridge finality is known to be unsound
+ * (see the L3Bridge warning), so a proof verified here proves nothing about real L3 state. This verifier
+ * also hashes by leaf index, while L3Bridge.verifyDisputeState and its fraud proofs hash sorted pairs, so
+ * the same tree generally does not verify in both. No deploy script deploys this contract.
+ *
  * @dev Provides efficient verification of dispute states against committed roots
  *
  * Features:
@@ -306,7 +313,7 @@ contract L3StateVerifier is Ownable2Step {
     function computeRoot(bytes32[] calldata leaves) external pure returns (bytes32 root) {
         require(leaves.length > 0, "Empty leaves");
 
-        // Pad to power of 2
+        // Pad to power of 2 (the padded width only ever grows here)
         uint256 n = leaves.length;
         uint256 size = 1;
         while (size < n) {
@@ -325,12 +332,14 @@ contract L3StateVerifier is Ownable2Step {
             tree[i] = EMPTY_LEAF;
         }
 
-        // Build tree bottom-up
-        while (size > 1) {
-            for (uint256 i = 0; i < size / 2; i++) {
+        // Build tree bottom-up, in place: level `width` (a power of two) hashes pairs into the first
+        // width / 2 slots. The level width is a separate variable that only ever halves, so no product is
+        // ever taken of a quotient (each halving of a power of two is exact).
+        for (uint256 width = size; width > 1; width /= 2) {
+            uint256 parents = width / 2;
+            for (uint256 i = 0; i < parents; i++) {
                 tree[i] = keccak256(abi.encodePacked(tree[i * 2], tree[i * 2 + 1]));
             }
-            size /= 2;
         }
 
         return tree[0];

@@ -257,18 +257,22 @@ capped incentives.
 
 ### L3 Bridge Contracts
 
+> ⚠️ **NOT PRODUCTION-READY - MUST NOT BE DEPLOYED.** "✅" below means the code exists and is tested, not that it
+> is safe: the L3 contracts have known-unsound security (see [4.3](#43-l3app-specific-rollups-natlangchain-roadmapmd)).
+> No deploy script deploys them.
+
 | Feature | Status | Location | Notes |
 |---------|--------|----------|-------|
-| Dispute Bridging (L2→L3) | ✅ | `L3Bridge.sol:250-313` | ILRM or owner-authorized bridger |
-| Settlement Processing (L3→L2) | ✅ | `L3Bridge.sol:319-390` | Sequencer-signed |
-| Batch Settlements | ✅ | `L3Bridge.sol:332-345` | Up to 100 per batch |
-| State Commitment | ✅ | `L3Bridge.sol:397-456` | With challenge period |
-| State Finalization | ✅ | `L3Bridge.sol:462-502` | After 7-day period |
-| Fraud Proof System | ✅ | `L3Bridge.sol:532-837` | With challenger bonds |
-| Merkle Proof Verification | ✅ | `L3StateVerifier.sol:55-110` | Sparse tree support |
-| Batch Verification | ✅ | `L3StateVerifier.sol:115-160` | Gas-efficient |
-| Dispute Queue | ✅ | `L3DisputeBatcher.sol:136-176` | Auto-trigger |
-| Settlement Queue | ✅ | `L3DisputeBatcher.sol:185-290` | Sequencer-queued, submitter-relayed |
+| Dispute Bridging (L2→L3) | ✅ | `L3Bridge.sol:276-340` | ILRM or owner-authorized bridger; not validated against the ILRM |
+| Settlement Processing (L3→L2) | ✅ | `L3Bridge.sol:345-454` | Sequencer-signed; `stateProof == 0` not tied to any root |
+| Batch Settlements | ✅ | `L3Bridge.sol:364-388` | Up to 100 per batch; invalid items skipped (`SettlementSkipped`) |
+| State Commitment | ✅ | `L3Bridge.sol:461-520` | With challenge period; no sequencer bond |
+| State Finalization | ✅ | `L3Bridge.sol:526-566` | After 7-day period |
+| Fraud Proof System | ⚠️ | `L3Bridge.sol:596-904` | Bonds/escrow sound; the proof itself checks no state transition |
+| Merkle Proof Verification | ✅ | `L3StateVerifier.sol:95-200` | Sparse tree support |
+| Batch Verification | ✅ | `L3StateVerifier.sol:149-182` | Gas-efficient |
+| Dispute Queue | ✅ | `L3DisputeBatcher.sol:171-244` | Auto-trigger with failure backoff |
+| Settlement Queue | ✅ | `L3DisputeBatcher.sol:253-363` | Sequencer-queued, submitter-relayed |
 
 ### Protocol Safety Invariants
 
@@ -537,16 +541,35 @@ The following features are documented in the project documentation but not yet i
 - Configurable minimum sybil score requirements
 
 #### 4.3 L3/App-Specific Rollups (NatLangChain-Roadmap.md)
-**Status:** ✅ IMPLEMENTED
+**Status:** ⚠️ PROTOTYPE - **NOT PRODUCTION-READY, MUST NOT BE DEPLOYED**
 **Source:** `NatLangChain-Roadmap.md:162`
+
+> ⚠️ **The L3 contracts (L3Bridge, L3DisputeBatcher, L3StateVerifier) are not production-ready and must not be
+> deployed.** Their optimistic-rollup security rests on parts that do not exist yet. These gaps are known and are
+> deliberately not patched, because closing them needs a real fraud-proof system:
+> 1. **Fraud proofs prove nothing.** `_verifyFraudProof` only checks a Merkle path from
+>    `keccak256(invalidStateData)` to `claimedRoot` (and `claimedRoot != correctRoot`, a value the challenger
+>    picks); it never checks a state transition. Anyone who knows a preimage of any node of an *honest* root (a
+>    leaf and its siblings, or just the root's two children) can reject it, roll the chain back and collect the
+>    reward, so every root can be censored by anyone with a refundable bond.
+> 2. **No sequencer bond.** A sequencer that commits a fraudulent root loses nothing.
+> 3. **Settlements are not tied to finalized state.** A settlement with `stateProof == bytes32(0)` is accepted
+>    on the word of the sequencer or any settlement relayer; a nonzero `stateProof` is only checked to be a
+>    finalized root, never that the settlement is included in it.
+> 4. **Bridged disputes are not validated against the ILRM.** The ILRM or any dispute bridger can bridge
+>    arbitrary messages (IDs, parties, stakes).
+>
+> The ILRM neither bridges disputes nor consumes settlements, so L3 settlements move no stake. No deploy
+> script (`scripts/deploy.js`, `scripts/deploy-governance.ts`) deploys the L3 contracts. `test/L3KnownLimitations.t.sol`
+> pins gaps 1-4 as executable evidence.
 
 **Description:** High-throughput dispute handling via dedicated L3 rollup with optimistic state commitments and fraud proofs.
 
 **Implementation:**
 - Bridge Interface: `contracts/interfaces/IL3Bridge.sol`
-- Bridge Contract: `contracts/L3Bridge.sol`
-- State Verifier: `contracts/L3StateVerifier.sol`
-- Dispute Batcher: `contracts/L3DisputeBatcher.sol`
+- Bridge Contract: `contracts/scaling/L3Bridge.sol`
+- State Verifier: `contracts/scaling/L3StateVerifier.sol`
+- Dispute Batcher: `contracts/scaling/L3DisputeBatcher.sol`
 
 **Architecture:**
 ```
@@ -573,13 +596,19 @@ L2 (Arbitrum/Optimism)          L3 (App-Specific Rollup)
 - L3DisputeBatcher for queue management with auto-trigger
 - Sparse Merkle tree support for efficient updates
 
-**Security Model:**
+**Security Model (intended; see the warning above for what is missing):**
 - Optimistic rollup: State assumed valid unless challenged
 - Challenger bond: 0.1 ETH minimum to prevent spam
 - Fraud reward: fixed 0.05 ETH (50% of the minimum bond) for valid challenges, paid only from free balance
 - State chain integrity: Each commitment links to previous root
 
 **Fraud-proof lifecycle:** A challenger commits `computeFraudProofCommitHash(challenger, proof, salt)` (domain-separated and bound to the challenger, chain, bridge and full proof) with a bond against a state root. Any number of commitments may be open per root, so no challenger can block another. The reveal (2 minutes to 62 minutes after the commit) only acts on the root the bond was posted against, and every bond ends in one of three ways: **Won** (valid proof on a canonical, unchallenged root: bond + reward), **Refunded** (valid proof, but the root was already rejected or orphaned: bond only) or **Forfeited** (invalid or mismatched proof, or never revealed, via the permissionless `forfeitExpiredCommitment`). Pending bonds are escrowed and never fund rewards or `withdrawFees`. Each root's challenge deadline is snapshotted at submission, and commits close once a reveal window opened now could still be open at that deadline, so no challenge can be pending when a root becomes finalizable. Roots finalize strictly in chain order; a successful challenge on any canonical root rolls the committed head back to its parent, so that root and all its descendants can never finalize and the sequencer rebuilds from the parent. `pause()` freezes only finalization: commits, reveals, forfeits and legacy submissions are never paused, and bridging and settlements are gated by the bridge status. Disputes are bridged by the ILRM or an owner-authorized dispute bridger (`setDisputeBridger`, e.g. the L3DisputeBatcher), and settlement batches by the sequencer or an owner-authorized settlement relayer (`setSettlementRelayer`).
+
+**Settlement batches:** `processSettlementFromL3` reverts on an invalid settlement (`DisputeNotBridged`, `InvalidSettlement` for an L3 ID mismatch or a repeat, `InvalidStateRoot` for an unfinalized nonzero `stateProof`). `batchProcessSettlements` gives every item exactly those checks, in order and against the state left by the items before it, but skips a failing item with `SettlementSkipped(l2DisputeId, l3DisputeId, reason)` instead of reverting, and returns the number applied. One bad message (never bridged, already settled, duplicated within the batch, wrong L3 ID, unfinalized proof) therefore cannot block the others or get the L3DisputeBatcher settlement queue stuck. A skipped settlement leaves no trace and can be resubmitted once valid. Only batch-level checks (caller, bridge status, `BatchSizeExceeded`) revert the whole batch, in which case the batcher keeps its queue.
+
+**Auto-batch backoff:** a failed auto-batch (bridge revert, missing role, inactive bridge, out of gas) never makes the queue call revert. It also backs the time trigger off (`AutoBatchDeferred`): no time-triggered attempt for 10 minutes, doubling per consecutive failure up to 1 day, so later queue calls do not each pay for a doomed retry. Manual submission is never backed off; any successful submission and `emergencyClearBatches` reset the backoff. The size trigger is not backed off, because only the queue call that fills the batch reaches it.
+
+**Tested invariants** (`test/L3BridgeInvariants.t.sol`, stateful fuzzing): I1 the balance covers the escrowed bonds; I2 `sum(challengerBonds) == totalEscrowedBonds == sum(Pending bonds)`; I3 no reveal window is open at a root's deadline; I4 only canonical, unchallenged roots finalize, and the finalized roots are exactly the canonical prefix; I5 bond outcomes are final and each root is successfully challenged at most once; I6 the finalized head never passes the committed head, never moves back and both heads are canonical; I7 each dispute is bridged and settled at most once and `pendingSettlementsCount == totalBridgedDisputes - totalSettlements`.
 
 ### Category 5: Treasury Enhancements (Low Priority)
 

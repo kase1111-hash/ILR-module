@@ -9,6 +9,14 @@ import "../interfaces/IILRM.sol";
 /**
  * @title L3DisputeBatcher
  * @notice Batches dispute operations for efficient L3 processing
+ *
+ * @custom:security-warning NOT PRODUCTION-READY - MUST NOT BE DEPLOYED.
+ * This batcher only queues and relays for L3Bridge, which is known to be unsound (see the L3Bridge warning):
+ * its fraud proofs let anyone reject honest state roots, the sequencer posts no bond, settlements with
+ * stateProof == bytes32(0) are not tied to any finalized root, and bridged disputes are never validated
+ * against the ILRM. The batcher adds no such checks: queued initiations are bridged as submitted and queued
+ * settlements are relayed on the sequencer's word alone. No deploy script deploys this contract.
+ *
  * @dev Aggregates multiple disputes for single state commitment
  *
  * Features:
@@ -32,11 +40,18 @@ import "../interfaces/IILRM.sol";
  *   MAX_BATCH_WAIT) runs as an isolated self-call. If it fails for any reason (bridge revert, missing
  *   role, bridge inactive, out of gas) the self-call is rolled back, the queue stays intact,
  *   AutoBatchFailed is emitted and the queue call itself still succeeds.
+ * - A failed auto-batch backs the time trigger off (AutoBatchDeferred): no time-triggered attempt is made
+ *   for AUTO_BATCH_RETRY_DELAY (10 min), doubling per consecutive failure up to MAX_AUTO_BATCH_RETRY_DELAY
+ *   (1 day), so queue calls do not each pay for a doomed retry. Any successful batch submission (auto,
+ *   submitInitiationBatch or forceSubmitBatch) and emergencyClearBatches reset the backoff. The size
+ *   trigger is not backed off: only the queue call that fills the batch reaches it.
  *
  * Settlement batches:
  * - Only the bridge's current sequencer can queue settlements; any authorized submitter can relay them.
  * - A batch queued by a sequencer that has since been replaced is never relayed: processSettlementBatch
  *   reverts SequencerChanged, and the new sequencer's first queueSettlement discards the stale batch.
+ * - The bridge skips invalid settlements (SettlementSkipped) instead of reverting, so one bad message
+ *   cannot get the queue stuck. SettlementBatchProcessed.settlementCount counts only the applied ones.
  */
 contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
     // ============ Constants ============
@@ -49,6 +64,21 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
 
     /// @notice Maximum batch wait time (1 hour)
     uint256 public constant MAX_BATCH_WAIT = 1 hours;
+
+    /// @notice Delay before the time trigger retries after a failed auto-batch; doubles per consecutive failure
+    uint256 public constant AUTO_BATCH_RETRY_DELAY = 10 minutes;
+
+    /// @notice Upper bound on the auto-batch retry delay
+    uint256 public constant MAX_AUTO_BATCH_RETRY_DELAY = 1 days;
+
+    // ============ Types ============
+
+    /// @notice Failed auto-batch backoff state (a single storage slot, so the failure path stays cheap)
+    struct AutoBatchBackoff {
+        uint64 retryAfter; // The time trigger does not fire before this timestamp (0 = no backoff)
+        uint64 delay; // Delay applied after the latest failure (0 = no failure since the last successful batch)
+        uint64 consecutiveFailures; // Failed auto-batch attempts since the last successful batch
+    }
 
     // ============ State Variables ============
 
@@ -76,6 +106,9 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
     /// @notice Bridge sequencer that queued the current settlement batch (zero when the queue is empty)
     address public settlementBatchSequencer;
 
+    /// @notice Backoff after failed auto-batches; reset by any successful batch submission or an emergency clear
+    AutoBatchBackoff public autoBatchBackoff;
+
     // ============ Events ============
 
     event DisputeQueued(uint256 indexed l2DisputeId, address indexed initiator, uint256 batchPosition);
@@ -89,6 +122,8 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
     event SubmitterAuthorized(address indexed submitter, bool authorized);
 
     event AutoBatchFailed(uint256 pendingCount, bytes reason);
+
+    event AutoBatchDeferred(uint256 consecutiveFailures, uint256 retryAfter);
 
     event StaleSettlementsDiscarded(address indexed queuedBy, uint256 count);
 
@@ -157,13 +192,46 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
 
         // Check if auto-batch should trigger. The batch runs as an isolated self-call so that a failure
         // (of any kind, including out-of-gas with empty revert data) rolls back atomically, keeps the
-        // queue intact and never makes this queue call revert.
+        // queue intact and never makes this queue call revert. A failure backs the time trigger off, so
+        // later queue calls do not each pay for a retry.
         if (autoBatchEnabled && _shouldTriggerBatch()) {
+            // Self-call under the lock (no re-entry possible); the backoff can only be written after the failure
+            // slither-disable-next-line reentrancy-no-eth
             try this.executeAutoBatch() {}
             catch (bytes memory reason) {
                 emit AutoBatchFailed(_pendingInitiations.length, reason);
+                _deferAutoBatch();
             }
         }
+    }
+
+    /**
+     * @notice Back the time trigger off after a failed auto-batch
+     * @dev The delay starts at AUTO_BATCH_RETRY_DELAY and doubles per consecutive failure, capped at
+     *      MAX_AUTO_BATCH_RETRY_DELAY, so the time trigger makes at most one attempt per delay and is never
+     *      disabled for good. Manual submission is unaffected.
+     */
+    function _deferAutoBatch() internal {
+        AutoBatchBackoff memory backoff = autoBatchBackoff;
+
+        // Double the previous delay (0 after a success); clamp to [AUTO_BATCH_RETRY_DELAY, MAX_AUTO_BATCH_RETRY_DELAY]
+        uint256 delay = uint256(backoff.delay) * 2;
+        if (delay < AUTO_BATCH_RETRY_DELAY) delay = AUTO_BATCH_RETRY_DELAY;
+        if (delay > MAX_AUTO_BATCH_RETRY_DELAY) delay = MAX_AUTO_BATCH_RETRY_DELAY;
+        uint256 retryAfter = block.timestamp + delay;
+        uint256 failures = uint256(backoff.consecutiveFailures) + 1;
+
+        // Cannot truncate: timestamps, delays (<= 1 day) and failure counts are far below 2^64
+        autoBatchBackoff = AutoBatchBackoff({
+            // forge-lint: disable-next-line(unsafe-typecast)
+            retryAfter: uint64(retryAfter),
+            // forge-lint: disable-next-line(unsafe-typecast)
+            delay: uint64(delay),
+            // forge-lint: disable-next-line(unsafe-typecast)
+            consecutiveFailures: uint64(failures)
+        });
+
+        emit AutoBatchDeferred(failures, retryAfter);
     }
 
     /**
@@ -245,9 +313,10 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
         bytes32 batchHash = keccak256(abi.encode(batch));
         batchId = uint256(batchHash);
 
-        // Clear batch before the external call
+        // Clear batch (and any failure backoff) before the external call; a bridge revert rolls both back
         delete _pendingInitiations;
         batchStartTime = 0;
+        if (autoBatchBackoff.consecutiveFailures != 0) delete autoBatchBackoff;
 
         // Bridge the whole batch in one call
         uint256[] memory l3Ids = l3Bridge.bridgeDisputeBatchToL3(batch);
@@ -263,12 +332,15 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
     /**
      * @notice Process settlement batch through L3 bridge
      * @dev Requires the batcher to be an authorized settlement relayer on the bridge, and the bridge's
-     *      sequencer to be the one that queued the batch.
-     * @return count Number of settlements processed
+     *      sequencer to be the one that queued the batch. The bridge skips (and reports with
+     *      SettlementSkipped) any settlement that fails its checks, so one bad message never blocks the
+     *      queue; the whole queue is consumed either way. Only a batch-level revert (missing relayer role,
+     *      bridge inactive) keeps the queue.
+     * @return count Number of settlements the bridge applied (skipped settlements are not counted)
      */
     function processSettlementBatch() external onlyAuthorizedSubmitter nonReentrant returns (uint256 count) {
-        count = _pendingSettlements.length;
-        if (count == 0) revert BatchEmpty();
+        uint256 len = _pendingSettlements.length;
+        if (len == 0) revert BatchEmpty();
 
         // Never relay a batch queued by a sequencer that has since been replaced
         address current = l3Bridge.getSequencerConfig().sequencerAddress;
@@ -284,7 +356,8 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
         settlementBatchSequencer = address(0);
 
         // Process through bridge
-        l3Bridge.batchProcessSettlements(batch);
+        count = l3Bridge.batchProcessSettlements(batch);
+        if (count > len) revert InvalidBatchData();
 
         emit SettlementBatchProcessed(batchId, count);
     }
@@ -298,11 +371,15 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
     function _shouldTriggerBatch() internal view returns (bool) {
         uint256 count = _pendingInitiations.length;
 
-        // Trigger if max size reached
+        // Trigger if max size reached. Only the queue call that fills the batch gets here (the next one
+        // reverts BatchFull), so this makes at most one attempt per fill and needs no backoff.
         if (count >= MAX_BATCH_SIZE) return true;
 
-        // Trigger if min size and max wait exceeded
-        if (count >= MIN_BATCH_SIZE && block.timestamp >= batchStartTime + MAX_BATCH_WAIT) {
+        // Trigger if min size and max wait exceeded, unless backing off after a failed auto-batch
+        if (
+            count >= MIN_BATCH_SIZE && block.timestamp >= batchStartTime + MAX_BATCH_WAIT
+                && block.timestamp >= autoBatchBackoff.retryAfter
+        ) {
             return true;
         }
 
@@ -327,6 +404,7 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
 
     /**
      * @notice Get time until batch auto-triggers
+     * @dev Includes any backoff after a failed auto-batch
      * @return remaining Seconds until trigger (0 if ready or empty)
      */
     function getTimeUntilAutoTrigger() external view returns (uint256 remaining) {
@@ -334,6 +412,8 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
         if (_pendingInitiations.length >= MAX_BATCH_SIZE) return 0;
 
         uint256 triggerTime = batchStartTime + MAX_BATCH_WAIT;
+        uint256 retryAfter = autoBatchBackoff.retryAfter;
+        if (retryAfter > triggerTime) triggerTime = retryAfter;
         if (block.timestamp >= triggerTime) return 0;
 
         return triggerTime - block.timestamp;
@@ -418,6 +498,7 @@ contract L3DisputeBatcher is ReentrancyGuard, Ownable2Step {
         delete _pendingSettlements;
         batchStartTime = 0;
         settlementBatchSequencer = address(0);
+        delete autoBatchBackoff;
     }
 
     /**

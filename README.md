@@ -109,9 +109,9 @@ The protocol is organized into 4 core contracts, 7 optional modules, and 5 scali
 | **GovernanceTimelock.sol** | Multi-sig governance with delays | Emergency actions, contract registry, Ownable2Step |
 | **BatchQueue.sol** | Privacy-preserving batch transactions | Fisher-Yates shuffle, Chainlink Automation |
 | **DummyTransactionGenerator.sol** | Transaction pattern obfuscation | Probability-based generation, VRF compatible |
-| **L3Bridge.sol** | Layer 3 rollup bridge | State commitments, fraud proofs, batch settlements |
-| **L3DisputeBatcher.sol** | Batch dispute handling for L3 | Auto-trigger, authorized submitters |
-| **L3StateVerifier.sol** | Merkle proof verification | Sparse tree support, batch verification |
+| **L3Bridge.sol** | Layer 3 rollup bridge. ⚠️ **Not production-ready - must not be deployed** (fraud proofs check no state transition, no sequencer bond, settlements not tied to finalized roots, bridged disputes not validated against the ILRM; see [SPEC.md 4.3](SPEC.md#43-l3app-specific-rollups-natlangchain-roadmapmd)) | State commitments, fraud proofs, batch settlements |
+| **L3DisputeBatcher.sol** | Batch dispute handling for L3. ⚠️ **Not production-ready - must not be deployed** (relays for the unsound L3Bridge) | Auto-trigger with failure backoff, authorized submitters |
+| **L3StateVerifier.sol** | Merkle proof verification. ⚠️ **Not production-ready - must not be deployed** (verifies against L3Bridge roots, whose finality is unsound) | Sparse tree support, batch verification |
 
 ---
 

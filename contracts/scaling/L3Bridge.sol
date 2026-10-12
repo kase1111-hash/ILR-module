@@ -12,6 +12,25 @@ import "../interfaces/IILRM.sol";
 /**
  * @title L3Bridge
  * @notice Bridge contract connecting L2 ILRM to App-Specific L3 Rollup
+ *
+ * @custom:security-warning NOT PRODUCTION-READY - MUST NOT BE DEPLOYED.
+ * This is a deferred, experimental scaling module. Its optimistic-rollup security rests on parts that do not
+ * exist yet; closing these gaps needs a real fraud-proof system, not a patch:
+ * 1. Fraud proofs prove nothing. _verifyFraudProof only checks a Merkle path from keccak256(invalidStateData)
+ *    to claimedRoot (and claimedRoot != correctRoot, a value the challenger picks); it never checks a state
+ *    transition. Anyone who knows a preimage of any node of an HONEST root - a leaf and its siblings, or just
+ *    the root's two children - can "prove fraud", reject the root, roll the chain back and collect the
+ *    reward. Every root can therefore be censored by anyone with a refundable bond.
+ * 2. There is no sequencer bond. A sequencer that commits a fraudulent root loses nothing; rewards are paid
+ *    only from the bridge's free balance.
+ * 3. Settlements are not tied to finalized state. A settlement with stateProof == bytes32(0) is accepted on
+ *    the word of the sequencer or of any settlement relayer; a nonzero stateProof is only checked to be a
+ *    finalized root, never that the settlement is included in it.
+ * 4. Bridged disputes are not validated against the ILRM. The ILRM or any dispute bridger can bridge
+ *    arbitrary messages (IDs, parties, stakes) that need not exist or match on L2.
+ * The ILRM itself neither bridges disputes nor consumes settlements: a settlement here only emits an event
+ * and moves no stake. No deploy script deploys this contract.
+ *
  * @dev Enables high-throughput dispute handling via dedicated rollup
  *
  * Key Features:
@@ -66,6 +85,13 @@ import "../interfaces/IILRM.sol";
  * - Sequencer: state commitments and settlements
  * - ILRM or owner-authorized dispute bridgers: bridgeDisputeToL3 / bridgeDisputeBatchToL3
  * - Sequencer or owner-authorized settlement relayers: batchProcessSettlements
+ *
+ * Settlement batches:
+ * - processSettlementFromL3 reverts on an invalid settlement. batchProcessSettlements applies exactly the
+ *   same checks to each item in order, but skips a failing item (SettlementSkipped with the reason) instead
+ *   of reverting, so one bad message (never bridged, already settled, duplicated in the batch, L3 ID
+ *   mismatch, unfinalized stateProof) cannot block the others. Only caller, status and size checks revert
+ *   the whole batch.
  */
 contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     using ECDSA for bytes32;
@@ -323,11 +349,17 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
         onlyActive
         nonReentrant
     {
-        _processSettlement(message);
+        SettlementSkipReason reason = _checkSettlement(message);
+        if (reason != SettlementSkipReason.None) {
+            _revertInvalidSettlement(message, reason);
+        }
+        _applySettlement(message);
     }
 
     /**
      * @inheritdoc IL3Bridge
+     * @dev Equivalent to calling processSettlementFromL3 once per message and ignoring the item-level
+     *      reverts: a bad message is skipped, so it can never block the valid ones (or a relayed queue).
      */
     function batchProcessSettlements(DisputeSettlementMessage[] calldata messages)
         external
@@ -335,43 +367,75 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
         onlySequencerOrRelayer
         onlyActive
         nonReentrant
+        returns (uint256 processed)
     {
-        if (messages.length > MAX_BATCH_SIZE) {
-            revert BatchSizeExceeded(messages.length, MAX_BATCH_SIZE);
+        uint256 len = messages.length;
+        if (len > MAX_BATCH_SIZE) {
+            revert BatchSizeExceeded(len, MAX_BATCH_SIZE);
         }
 
-        for (uint256 i = 0; i < messages.length; i++) {
-            _processSettlement(messages[i]);
+        for (uint256 i = 0; i < len; i++) {
+            DisputeSettlementMessage calldata message = messages[i];
+            // Checked against the state left by the earlier items, so an in-batch duplicate is AlreadySettled
+            SettlementSkipReason reason = _checkSettlement(message);
+            if (reason == SettlementSkipReason.None) {
+                _applySettlement(message);
+                processed++;
+            } else {
+                emit SettlementSkipped(message.l2DisputeId, message.l3DisputeId, reason);
+            }
         }
     }
 
     /**
-     * @notice Internal settlement processing
+     * @notice Validate a settlement against the current state (shared by the single and batch paths)
+     * @return reason None if the settlement may be applied, otherwise the first check it fails
      */
-    function _processSettlement(DisputeSettlementMessage calldata message) internal {
+    function _checkSettlement(DisputeSettlementMessage calldata message)
+        internal
+        view
+        returns (SettlementSkipReason reason)
+    {
         uint256 l2Id = message.l2DisputeId;
+        uint256 l3Id = _l2ToL3DisputeId[l2Id];
 
         // Verify dispute was bridged
-        if (_l2ToL3DisputeId[l2Id] == 0) {
-            revert DisputeNotBridged(l2Id);
-        }
+        if (l3Id == 0) return SettlementSkipReason.NotBridged;
 
         // Verify L3 ID matches
-        if (_l2ToL3DisputeId[l2Id] != message.l3DisputeId) {
-            revert InvalidSettlement(l2Id);
-        }
+        if (l3Id != message.l3DisputeId) return SettlementSkipReason.L3DisputeIdMismatch;
 
         // Verify not already settled
-        if (_settledDisputes[l2Id]) {
-            revert InvalidSettlement(l2Id);
+        if (_settledDisputes[l2Id]) return SettlementSkipReason.AlreadySettled;
+
+        // Verify state proof is from finalized root.
+        // For immediate settlements, proof can be bytes32(0) on the sequencer's (or relayer's) word alone.
+        // For delayed settlements, must reference finalized state (inclusion in that root is NOT checked).
+        if (message.stateProof != bytes32(0) && !_finalizedStates[message.stateProof]) {
+            return SettlementSkipReason.StateRootNotFinalized;
         }
 
-        // Verify state proof is from finalized root
-        if (!_finalizedStates[message.stateProof] && message.stateProof != bytes32(0)) {
-            // For immediate settlements, proof can be bytes32(0) with sequencer signature
-            // For delayed settlements, must reference finalized state
-            revert InvalidStateRoot(message.stateProof);
-        }
+        return SettlementSkipReason.None;
+    }
+
+    /**
+     * @notice Revert with the error processSettlementFromL3 has always used for a failed check
+     */
+    function _revertInvalidSettlement(DisputeSettlementMessage calldata message, SettlementSkipReason reason)
+        internal
+        pure
+    {
+        if (reason == SettlementSkipReason.NotBridged) revert DisputeNotBridged(message.l2DisputeId);
+        if (reason == SettlementSkipReason.StateRootNotFinalized) revert InvalidStateRoot(message.stateProof);
+        // L3DisputeIdMismatch or AlreadySettled
+        revert InvalidSettlement(message.l2DisputeId);
+    }
+
+    /**
+     * @notice Record a settlement that passed _checkSettlement
+     */
+    function _applySettlement(DisputeSettlementMessage calldata message) internal {
+        uint256 l2Id = message.l2DisputeId;
 
         // Mark as settled
         _settledDisputes[l2Id] = true;

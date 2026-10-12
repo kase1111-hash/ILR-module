@@ -6,6 +6,10 @@ pragma solidity ^0.8.20;
  * @notice Interface for the L3 Bridge connecting L2 ILRM to App-Specific Rollup
  * @dev Enables high-throughput dispute handling via dedicated L3 rollup
  *
+ * WARNING: the L3Bridge implementation is NOT production-ready and must not be deployed (unsound fraud
+ * proofs, no sequencer bond, settlements not tied to finalized roots, bridged disputes not validated
+ * against the ILRM). See the security warning on L3Bridge.
+ *
  * Architecture:
  * - L2 (Arbitrum/Optimism): Main ILRM contract, asset registry, treasury
  * - L3 (App-Specific): High-throughput dispute processing, batched settlements
@@ -44,6 +48,16 @@ interface IL3Bridge {
         Won, // Valid proof rejected the root: bond + reward paid
         Refunded, // Valid proof, but the root was already rejected or orphaned: bond returned
         Forfeited // Invalid or mismatched proof, or never revealed: bond kept by the bridge
+    }
+
+    /// @notice Why batchProcessSettlements skipped a settlement (None = valid, applied)
+    /// @dev Each reason is the check processSettlementFromL3 reverts on, in the same order
+    enum SettlementSkipReason {
+        None, // Valid: the settlement was applied
+        NotBridged, // The L2 dispute was never bridged (single path: DisputeNotBridged)
+        L3DisputeIdMismatch, // l3DisputeId is not the bridged dispute's L3 ID (single path: InvalidSettlement)
+        AlreadySettled, // Already settled, including earlier in the same batch (single path: InvalidSettlement)
+        StateRootNotFinalized // Nonzero stateProof that is not a finalized root (single path: InvalidStateRoot)
     }
 
     /// @notice L3 dispute state (compressed)
@@ -203,6 +217,10 @@ interface IL3Bridge {
     /// @notice Emitted when a batched dispute is skipped because it is already bridged
     event DisputeBridgeSkipped(uint256 indexed l2DisputeId, uint256 existingL3DisputeId);
 
+    /// @notice Emitted when batchProcessSettlements skips an invalid settlement instead of reverting the batch
+    /// @dev Nothing is recorded for a skipped settlement; once valid it can be submitted again
+    event SettlementSkipped(uint256 indexed l2DisputeId, uint256 indexed l3DisputeId, SettlementSkipReason reason);
+
     /// @notice Emitted when the owner withdraws free (non-escrowed) balance
     event FeesWithdrawn(address indexed to, uint256 amount);
 
@@ -258,7 +276,9 @@ interface IL3Bridge {
 
     /**
      * @notice Process settlement from L3 back to L2
-     * @dev Called by sequencer with finalized state proof
+     * @dev Sequencer only. Reverts DisputeNotBridged, InvalidSettlement (L3 ID mismatch or already settled)
+     *      or InvalidStateRoot (nonzero stateProof that is not finalized). A zero stateProof is accepted on
+     *      the sequencer's word alone (see the L3Bridge security warning).
      * @param message Settlement data with proof
      */
     function processSettlementFromL3(DisputeSettlementMessage calldata message) external;
@@ -266,10 +286,15 @@ interface IL3Bridge {
     /**
      * @notice Batch process multiple settlements
      * @dev Callable by the sequencer or an owner-authorized settlement relayer (e.g. L3DisputeBatcher
-     *      relaying a batch the sequencer queued). More gas efficient for multiple resolutions.
+     *      relaying a batch the sequencer queued). Reverts only for the whole batch (caller, bridge status,
+     *      BatchSizeExceeded above MAX_BATCH_SIZE). Each settlement gets exactly the checks of
+     *      processSettlementFromL3, against the state left by the settlements before it; one that fails them
+     *      (never bridged, L3 ID mismatch, already settled - including a duplicate earlier in the same batch -
+     *      or an unfinalized stateProof) is skipped with SettlementSkipped instead of reverting the batch.
      * @param messages Array of settlement messages
+     * @return processed Number of settlements applied (messages.length minus the skipped ones)
      */
-    function batchProcessSettlements(DisputeSettlementMessage[] calldata messages) external;
+    function batchProcessSettlements(DisputeSettlementMessage[] calldata messages) external returns (uint256 processed);
 
     // ============ State Commitments ============
 
