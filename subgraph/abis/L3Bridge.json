@@ -189,7 +189,13 @@
       }
     ],
     "name": "batchProcessSettlements",
-    "outputs": [],
+    "outputs": [
+      {
+        "internalType": "uint256",
+        "name": "processed",
+        "type": "uint256"
+      }
+    ],
     "stateMutability": "nonpayable",
     "type": "function"
   },
@@ -2082,6 +2088,31 @@
       }
     ],
     "name": "SettlementRelayerUpdated",
+    "type": "event"
+  },
+  {
+    "anonymous": false,
+    "inputs": [
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "l2DisputeId",
+        "type": "uint256"
+      },
+      {
+        "indexed": true,
+        "internalType": "uint256",
+        "name": "l3DisputeId",
+        "type": "uint256"
+      },
+      {
+        "indexed": false,
+        "internalType": "enum IL3Bridge.SettlementSkipReason",
+        "name": "reason",
+        "type": "uint8"
+      }
+    ],
+    "name": "SettlementSkipped",
     "type": "event"
   },
   {

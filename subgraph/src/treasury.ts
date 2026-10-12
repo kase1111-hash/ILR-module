@@ -20,7 +20,13 @@ import {
   TreasuryReceived,
   Unpaused
 } from "../generated/Treasury/Treasury";
-import { HarassmentScore, TreasuryDeposit, TreasuryMetric, TreasurySubsidy } from "../generated/schema";
+import {
+  HarassmentScore,
+  ProtocolContract,
+  TreasuryDeposit,
+  TreasuryMetric,
+  TreasurySubsidy
+} from "../generated/schema";
 import {
   KIND_TREASURY,
   ZERO,
@@ -34,8 +40,9 @@ import {
   touchParty
 } from "./common";
 
-// Reasons used by the contract itself (deposit() takes free text)
-const REASON_BURN = "burn"; // depositBurn()
+// Reasons used by the contract itself. deposit() takes free text from any caller, so a reason is only a
+// label: "burn" counts as burn proceeds only when sent by the Treasury's ILRM (see isBurnDeposit).
+const REASON_BURN = "burn"; // depositBurn() (ILRM-only)
 const REASON_ETH = "eth"; // receive()
 
 function getOrCreateTreasuryMetric(timestamp: BigInt): TreasuryMetric {
@@ -53,6 +60,20 @@ function getOrCreateTreasuryMetric(timestamp: BigInt): TreasuryMetric {
     metric.totalReceivedEth = ZERO;
   }
   return metric;
+}
+
+/**
+ * Whether a TreasuryReceived log is burn proceeds. depositBurn() is ILRM-only and labels its inflow "burn",
+ * but deposit() lets anyone pick the same label, so the label alone is not trusted: the sender must also
+ * be the ILRM the Treasury had at that point (ProtocolContract.ilrm, from ILRMUpdated). Only that ILRM can
+ * emit a "burn" inflow from its own address. No ILRM indexed yet means no burn deposits.
+ */
+function isBurnDeposit(event: TreasuryReceived): boolean {
+  if (event.params.reason != REASON_BURN) return false;
+  const contract = ProtocolContract.load(event.address.toHexString());
+  if (contract == null) return false;
+  const ilrm = contract.ilrm;
+  return ilrm !== null && ilrm.equals(event.params.from);
 }
 
 // =============================================================================
@@ -83,6 +104,7 @@ export function handleTreasuryReceived(event: TreasuryReceived): void {
   // receive() logs ETH with reason "eth". deposit() takes free text, so a token deposit labelled
   // "eth" is indistinguishable from an ETH transfer in this event.
   const isEth = reason == REASON_ETH;
+  const isBurn = isBurnDeposit(event);
 
   const deposit = new TreasuryDeposit(eventId(event));
   deposit.treasury = event.address;
@@ -90,6 +112,7 @@ export function handleTreasuryReceived(event: TreasuryReceived): void {
   deposit.amount = event.params.amount;
   deposit.reason = reason;
   deposit.isEth = isEth;
+  deposit.isBurn = isBurn;
   deposit.timestamp = event.block.timestamp;
   deposit.txHash = event.transaction.hash;
   deposit.save();
@@ -99,7 +122,7 @@ export function handleTreasuryReceived(event: TreasuryReceived): void {
     metric.totalReceivedEth = metric.totalReceivedEth.plus(event.params.amount);
   } else {
     metric.totalReceived = metric.totalReceived.plus(event.params.amount);
-    if (reason == REASON_BURN) {
+    if (isBurn) {
       metric.totalBurnDeposits = metric.totalBurnDeposits.plus(event.params.amount);
       metric.burnDepositCount = metric.burnDepositCount + 1;
     }

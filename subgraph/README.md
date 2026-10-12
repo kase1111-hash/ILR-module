@@ -8,14 +8,17 @@ The subgraph indexes **every event** the five core contracts emit:
 
 | Data source | Contract (artifact) | Indexed |
 |-------------|---------------------|---------|
-| `ILRM` | `contracts/ILRM.sol` (`ILRM`) | dispute lifecycle, LLM proposals (incl. `ProposalSuperseded`), counter-proposals, burns, stake subsidies (`StakeSubsidized`, `SubsidyReturned`, `SubsidyTreasuryUpdated`), reserves, harassment scores, ownership, pause |
+| `ILRM` | `contracts/ILRM.sol` (`ILRM`) | dispute lifecycle, LLM proposals (incl. `ProposalSuperseded` and Oracle-reset voids, `ProposalVoided`), counter-proposals, failed advisory Oracle requests (`OracleRequestFailed`), burns, stake subsidies (`StakeSubsidized`, `SubsidyReturned`, `SubsidyTreasuryUpdated`), initiator incentives and their caps (`InitiatorIncentivePaid`, `InitiatorIncentiveCapsUpdated`), reserves, harassment scores, ownership, pause |
 | `Treasury` | `contracts/Treasury.sol` (`NatLangChainTreasury`) | subsidy grants (`SubsidyFunded`), inflows, harassment scores, caps, ILRM pointer, ownership, pause |
-| `Oracle` | `contracts/Oracle.sol` (`NatLangChainOracle`) | requests and cancellations, round fills (`ProposalRoundFilled`), owner resets (`ProposalReset`, `ProposalRoundReopened`), operators, ownership |
-| `L3Bridge` | `contracts/scaling/L3Bridge.sol` (`L3Bridge`) | state commitments, finalization, commit-reveal fraud proofs (`FraudProofCommitted/Revealed/Refunded/Forfeited/Validated`), chain rollbacks, dispute bridging and settlement, roles, status, ownership, pause |
+| `Oracle` | `contracts/Oracle.sol` (`NatLangChainOracle`) | requests and cancellations (`ProposalRequestCancelled`), round fills (`ProposalRoundFilled`), owner resets (`ProposalReset`, `ProposalRoundReopened`), operators, ownership |
+| `L3Bridge` | `contracts/scaling/L3Bridge.sol` (`L3Bridge`) | state commitments, finalization, commit-reveal fraud proofs (`FraudProofCommitted/Revealed/Refunded/Forfeited/Validated`), chain rollbacks, dispute bridging and settlement (incl. skipped batch settlements, `SettlementSkipped`), roles, status, ownership, pause |
 | `AssetRegistry` | `contracts/AssetRegistry.sol` (`NatLangChainAssetRegistry`) | assets, dispute freezes, fallback licenses, license grants and revocations, ILRM authorization, ownership |
 
 `npm run check-abis` prints any contract event that subgraph.yaml does not handle, so
 newly added events are easy to spot.
+
+CI (`.github/workflows/ci.yml`, job `subgraph`) compiles the contracts and then runs, in
+`subgraph/`, `npm ci`, `npm run check-abis`, `npm run codegen`, `npm run build` and `npm test`.
 
 ## Prerequisites
 
@@ -56,8 +59,9 @@ most recently written one).
 
 The repository's Hardhat suite (`test/Subgraph.manifest.test.js`, run by `npm test` in the
 repository root and in CI) also fails when a `subgraph.yaml` handler names an event the compiled
-contract does not emit, when `abis/` disagrees with the compiled fragment of a handled event, or
-when a handler is not exported by its mapping.
+contract does not emit, when `abis/` disagrees with the compiled fragment of a handled event or of
+a function a mapping calls (`ILRM.disputes`, `L3Bridge.getChallengeDeadline`,
+`AssetRegistry.getLicense`), or when a handler is not exported by its mapping.
 
 ## Adding a new event
 
@@ -88,15 +92,27 @@ Before deployment, update `subgraph.yaml`:
 
 ## Deployment
 
+`scripts/deploy-subgraph.sh` (from the repository root, after compiling the contracts) runs
+`npm ci`, `npm run check-abis`, `codegen`, `build` and the matchstick tests, refuses to deploy a
+manifest that still has zero addresses, and deploys with the pinned graph-cli 0.98.1:
+
+```bash
+scripts/deploy-subgraph.sh                                   # verify, build and test only
+GRAPH_DEPLOY_KEY=<key> scripts/deploy-subgraph.sh --studio <slug> --version-label v0.2.0
+scripts/deploy-subgraph.sh --local --version-label v0.0.1    # local Graph Node
+scripts/deploy-subgraph.sh --help                            # all options (--sync-abis, --skip-tests)
+```
+
 ### TheGraph Studio (Recommended)
 
 1. Create a subgraph at [TheGraph Studio](https://thegraph.com/studio/)
 2. Get your deploy key
-3. Authenticate and deploy:
+3. Authenticate and deploy (graph-cli 0.98 takes the key as a plain argument; there is no
+   `--studio` flag):
 
 ```bash
 npx graph auth <DEPLOY_KEY>
-npm run deploy
+npx graph deploy <SLUG> --version-label <VERSION>
 ```
 
 ### Local Development
@@ -104,7 +120,7 @@ npm run deploy
 ```bash
 # Start a local Graph Node (requires Docker), then
 npm run create-local
-npm run deploy-local
+npm run deploy-local -- --version-label v0.0.1
 ```
 
 ## Indexed Entities
@@ -115,9 +131,10 @@ npm run deploy-local
 |--------|-------------|
 | `Dispute` | Lifecycle, stakes (initiator stake and fallback terms read once via `ILRM.disputes()`), live proposal, outcome |
 | `Party` | Participant stats: own funds staked, burn share, ILRM and Treasury harassment scores, subsidies received |
-| `Proposal` | Every stored proposal with round, `keccak256` hash and status (`LIVE`, `SUPERSEDED`, `VOIDED_BY_COUNTER`, `ACCEPTED`, `EXPIRED`) |
+| `Proposal` | Every stored proposal with round, `keccak256` hash and status (`LIVE`, `SUPERSEDED`, `VOIDED` by an Oracle reset, `VOIDED_BY_COUNTER`, `ACCEPTED`, `EXPIRED`) |
 | `Counter` | Counter-proposals with the burned fee and, for direct calls, the new evidence hash |
 | `VoluntaryRequest` | `initiateVoluntaryRequest` logs (no dispute is created) |
+| `OracleRequestFailure` | Advisory Oracle request that ILRM could not make or that reverted, per dispute and round |
 | `Burn` | Stake burns on timeout |
 | `HarassmentScore` | Score history, tagged `ILRM` or `TREASURY` |
 
@@ -128,7 +145,7 @@ npm run deploy-local
 | `StakeSubsidy` | Treasury co-stake escrowed in ILRM, with repayments |
 | `SubsidyReturn` | Pro-rata repayment to the funder on resolution |
 | `TreasurySubsidy` | Grant as recorded by the Treasury (`SubsidyFunded`) |
-| `TreasuryDeposit` | Treasury inflows by reason |
+| `TreasuryDeposit` | Treasury inflows with their (unverified) reason label; `isBurn` only for `"burn"` inflows sent by the Treasury's ILRM |
 
 ### Oracle
 
@@ -147,6 +164,7 @@ npm run deploy-local
 | `FraudProofCommitment` | Bonded commit-reveal challenge: `PENDING`, `WON`, `REFUNDED` or `FORFEITED` |
 | `FraudProofChallenge` | Successful challenge of a root (commit-reveal or legacy direct) |
 | `L3BridgedDispute` | Dispute bridged to L3 and its settlement |
+| `L3SettlementSkip` | Settlement message skipped by `batchProcessSettlements`, with its reason |
 | `L3Chain` | Committed and finalized chain heads per bridge |
 
 ### Assets
@@ -171,7 +189,7 @@ npm run deploy-local
 | Entity | Description |
 |--------|-------------|
 | `DailyMetric` | Daily protocol statistics |
-| `ProtocolMetric` | Cumulative protocol stats (singleton `protocol`) |
+| `ProtocolMetric` | Cumulative protocol stats (singleton `protocol`), incl. initiator incentives paid vs uncapped |
 | `TreasuryMetric` | Daily treasury stats |
 | `OracleMetric` | Daily oracle stats |
 | `L3Metric` | Daily L3 stats |
@@ -186,12 +204,15 @@ These come from what the contracts emit, not from the subgraph:
   owners stay the registering owner, revoked operators still show as active, and those settings
   are not indexed.
 - Constructor-set configuration (Treasury caps, L3 sequencer) appears only after its first
-  update event.
-- The initiator incentive paid on non-participation, the excess of a counter-proposal fee
-  (credited to the ILRM treasury) and the fee of a voluntary request sent through another
-  contract are not in any event.
-- `Treasury.deposit()` takes a free-text reason, so a token deposit labelled `"eth"` is
-  indistinguishable from an ETH transfer.
+  update event. ILRM's initiator-incentive caps are emitted by its constructor, so they are
+  indexed from the start.
+- The excess of a counter-proposal fee (credited to the ILRM treasury) and the fee of a voluntary
+  request sent through another contract are not in any event.
+- `Treasury.deposit()` takes a free-text reason from any caller, so `TreasuryDeposit.reason` is an
+  unverified label. Burn metrics do not trust it: an inflow counts as burn proceeds only when it is
+  labelled `"burn"` and sent by the ILRM of the Treasury's latest `ILRMUpdated` (what the ILRM-only
+  `depositBurn()` emits). The `"eth"` label has no such check, so a token deposit labelled `"eth"`
+  is indistinguishable from an ETH transfer.
 - Disputes are keyed by ILRM dispute id; another ILRM sharing the AssetRegistry (for example
   `MultiPartyILRM`) would collide.
 - The deferred modules (`contracts/modules/*`, `L3DisputeBatcher`, `BatchQueue`, ...) are not

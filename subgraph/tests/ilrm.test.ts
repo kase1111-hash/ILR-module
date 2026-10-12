@@ -7,11 +7,15 @@ import {
   DisputeInitiated,
   DisputeResolved,
   HarassmentScoreUpdated,
+  InitiatorIncentiveCapsUpdated,
+  InitiatorIncentivePaid,
+  OracleRequestFailed,
   OwnershipTransferStarted,
   OwnershipTransferred,
   Paused,
   ProposalSubmitted,
   ProposalSuperseded,
+  ProposalVoided,
   StakeDeposited,
   StakeSubsidized,
   StakesBurned,
@@ -25,18 +29,22 @@ import {
   handleDisputeInitiated,
   handleDisputeResolved,
   handleHarassmentScoreUpdated,
+  handleInitiatorIncentiveCapsUpdated,
+  handleInitiatorIncentivePaid,
+  handleOracleRequestFailed,
   handleOwnershipTransferStarted,
   handleOwnershipTransferred,
   handlePaused,
   handleProposalSubmitted,
   handleProposalSuperseded,
+  handleProposalVoided,
   handleStakeDeposited,
   handleStakeSubsidized,
   handleStakesBurned,
   handleSubsidyReturned,
   handleSubsidyTreasuryUpdated
 } from "../src/ilrm";
-import { Counter, VoluntaryRequest } from "../generated/schema";
+import { Counter, Proposal, VoluntaryRequest } from "../generated/schema";
 import { eventId, keccakUtf8, selector } from "../src/common";
 import {
   ALICE,
@@ -157,6 +165,34 @@ function stakesBurned(id: i32, amount: BigInt): StakesBurned {
 
 function resolved(id: i32, outcome: i32): DisputeResolved {
   return changetype<DisputeResolved>(mockEvent(ILRM_ADDRESS, [pInt("disputeId", id), pInt("outcome", outcome)]));
+}
+
+function proposalVoided(id: i32, round: i32, text: string): ProposalVoided {
+  return changetype<ProposalVoided>(
+    mockEvent(ILRM_ADDRESS, [pInt("disputeId", id), pInt("round", round), pB32("proposalHash", keccakUtf8(text))])
+  );
+}
+
+function oracleRequestFailed(id: i32, round: i32): OracleRequestFailed {
+  return changetype<OracleRequestFailed>(mockEvent(ILRM_ADDRESS, [pInt("disputeId", id), pInt("round", round)]));
+}
+
+function incentivePaid(id: i32, initiator: Address, amount: BigInt, uncapped: BigInt): InitiatorIncentivePaid {
+  return changetype<InitiatorIncentivePaid>(
+    mockEvent(ILRM_ADDRESS, [
+      pInt("disputeId", id),
+      pAddr("initiator", initiator),
+      pUint("amount", amount),
+      pUint("uncappedAmount", uncapped)
+    ])
+  );
+}
+
+/** enforceTimeout without a counterparty stake: InitiatorIncentivePaid, DefaultLicenseApplied, DisputeResolved */
+function resolveNonParticipation(id: i32, initiator: Address, amount: BigInt, uncapped: BigInt): void {
+  handleInitiatorIncentivePaid(incentivePaid(id, initiator, amount, uncapped));
+  handleDefaultLicenseApplied(changetype<DefaultLicenseApplied>(mockEvent(ILRM_ADDRESS, [pInt("disputeId", id)])));
+  handleDisputeResolved(resolved(id, 3));
 }
 
 function counterProposeCalldata(id: i32, evidence: Bytes): Bytes {
@@ -313,6 +349,125 @@ describe("ILRM dispute lifecycle", () => {
     assert.fieldEquals("ProtocolMetric", "protocol", "defaultedDisputes", "1");
   });
 
+  test("an Oracle reset voids the live proposal and every acceptance of it", () => {
+    mockDisputeRead(3, ALICE, BOB, bi(100));
+
+    beginTx(60, 1000);
+    handleDisputeInitiated(disputeInitiated(bi(3), ALICE, BOB));
+    handleStakeDeposited(stakeDeposited(3, BOB, bi(100)));
+    beginTx(61, 2000);
+    handleProposalSubmitted(proposalSubmitted(3, "bad terms"));
+    beginTx(62, 3000);
+    handleAcceptanceSignaled(accepted(3, ALICE));
+    assert.fieldEquals("Dispute", "3", "initiatorAccepted", "true");
+
+    // Oracle.resetProposal -> ILRM.voidLLMProposal: ProposalVoided only, no ProposalSuperseded
+    beginTx(63, 4000);
+    handleProposalVoided(proposalVoided(3, 0, "bad terms"));
+    assert.fieldEquals("Proposal", "3-0", "status", "VOIDED");
+    assert.fieldEquals("Dispute", "3", "currentProposal", "null");
+    assert.fieldEquals("Dispute", "3", "initiatorAccepted", "false");
+    assert.fieldEquals("Dispute", "3", "counterpartyAccepted", "false");
+    assert.fieldEquals("Dispute", "3", "counterCount", "0");
+
+    // The replacement of the same round is a plain ProposalSubmitted and does not touch the voided one
+    beginTx(64, 5000);
+    handleProposalSubmitted(proposalSubmitted(3, "good terms"));
+    assert.fieldEquals("Proposal", "3-1", "status", "LIVE");
+    assert.fieldEquals("Proposal", "3-1", "round", "0");
+    assert.fieldEquals("Proposal", "3-0", "status", "VOIDED");
+    assert.assertTrue(Proposal.load("3-0")!.supersededBy === null);
+    assert.fieldEquals("Dispute", "3", "currentProposal", "3-1");
+
+    beginTx(65, 6000);
+    handleAcceptanceSignaled(accepted(3, ALICE));
+    handleAcceptanceSignaled(accepted(3, BOB));
+    handleDisputeResolved(resolved(3, 1));
+    assert.fieldEquals("Proposal", "3-1", "status", "ACCEPTED");
+    assert.fieldEquals("Proposal", "3-0", "status", "VOIDED");
+  });
+
+  test("failed advisory Oracle requests are recorded per dispute and round", () => {
+    mockDisputeRead(4, ALICE, BOB, bi(100));
+
+    beginTx(70, 1000);
+    handleDisputeInitiated(disputeInitiated(bi(4), ALICE, BOB));
+    beginTx(71, 2000);
+    handleStakeDeposited(stakeDeposited(4, BOB, bi(100)));
+    const first = oracleRequestFailed(4, 0);
+    handleOracleRequestFailed(first);
+    beginTx(72, 3000);
+    handleCounterProposed(countered(4, ALICE, 1));
+    const second = oracleRequestFailed(4, 1);
+    handleOracleRequestFailed(second);
+
+    assert.fieldEquals("OracleRequestFailure", eventId(first), "dispute", "4");
+    assert.fieldEquals("OracleRequestFailure", eventId(first), "round", "0");
+    assert.fieldEquals("OracleRequestFailure", eventId(second), "round", "1");
+    assert.fieldEquals("OracleRequestFailure", eventId(second), "timestamp", "3000");
+    assert.fieldEquals("Dispute", "4", "oracleRequestFailureCount", "2");
+    assert.fieldEquals("Dispute", "4", "state", "ACTIVE");
+    assert.fieldEquals("ProtocolMetric", "protocol", "totalOracleRequestFailures", "2");
+  });
+
+  test("non-participation records the capped initiator incentive against the uncapped 10%", () => {
+    mockDisputeRead(5, ALICE, BOB, wei("50000000000000000000"));
+    mockDisputeRead(6, CAROL, BOB, wei("5000000000000000000"));
+
+    beginTx(80, 1000);
+    handleDisputeInitiated(disputeInitiated(bi(5), ALICE, BOB));
+    handleDisputeInitiated(disputeInitiated(bi(6), CAROL, BOB));
+
+    // 10% of 50 tokens is 5, capped at maxIncentivePerDispute (1 token)
+    beginTx(81, 300000);
+    resolveNonParticipation(5, ALICE, wei("1000000000000000000"), wei("5000000000000000000"));
+    assert.fieldEquals("Dispute", "5", "initiatorIncentive", "1000000000000000000");
+    assert.fieldEquals("Dispute", "5", "initiatorIncentiveUncapped", "5000000000000000000");
+    assert.fieldEquals("Dispute", "5", "outcome", "DEFAULT_LICENSE_APPLIED");
+
+    // Below every cap: paid in full
+    beginTx(82, 300100);
+    resolveNonParticipation(6, CAROL, wei("500000000000000000"), wei("500000000000000000"));
+    assert.fieldEquals("Dispute", "6", "initiatorIncentive", "500000000000000000");
+    assert.fieldEquals("Dispute", "6", "initiatorIncentiveUncapped", "500000000000000000");
+
+    assert.fieldEquals("ProtocolMetric", "protocol", "totalInitiatorIncentivesPaid", "1500000000000000000");
+    assert.fieldEquals("ProtocolMetric", "protocol", "totalInitiatorIncentivesUncapped", "5500000000000000000");
+    assert.fieldEquals("ProtocolMetric", "protocol", "cappedInitiatorIncentives", "1");
+    assert.fieldEquals("ProtocolMetric", "protocol", "defaultedDisputes", "2");
+    assert.fieldEquals("DailyMetric", "259200", "initiatorIncentivesPaid", "1500000000000000000");
+    assert.fieldEquals("DailyMetric", "0", "initiatorIncentivesPaid", "0");
+  });
+
+  test("the mean resolution time is exact, not a drifting running mean", () => {
+    mockDisputeRead(7, ALICE, BOB, bi(10));
+    mockDisputeRead(8, ALICE, CAROL, bi(10));
+    mockDisputeRead(9, BOB, CAROL, bi(10));
+
+    // Initiated in blocks 100, 200, 300; resolved 1, 2 and 3 blocks later: mean 2 (a running mean
+    // of rounded values gives 1, then 1, then 1)
+    beginTx(100, 1000);
+    handleDisputeInitiated(disputeInitiated(bi(7), ALICE, BOB));
+    beginTx(101, 1012);
+    handleDisputeResolved(resolved(7, 2));
+    assert.fieldEquals("ProtocolMetric", "protocol", "avgResolutionBlocks", "1");
+
+    beginTx(200, 2000);
+    handleDisputeInitiated(disputeInitiated(bi(8), ALICE, CAROL));
+    beginTx(202, 2024);
+    handleDisputeResolved(resolved(8, 2));
+    assert.fieldEquals("ProtocolMetric", "protocol", "totalResolutionBlocks", "3");
+    assert.fieldEquals("ProtocolMetric", "protocol", "avgResolutionBlocks", "1");
+
+    beginTx(300, 3000);
+    handleDisputeInitiated(disputeInitiated(bi(9), BOB, CAROL));
+    beginTx(303, 3036);
+    handleDisputeResolved(resolved(9, 2));
+    assert.fieldEquals("ProtocolMetric", "protocol", "resolvedDisputes", "3");
+    assert.fieldEquals("ProtocolMetric", "protocol", "totalResolutionBlocks", "6");
+    assert.fieldEquals("ProtocolMetric", "protocol", "avgResolutionBlocks", "2");
+  });
+
   test("voluntary requests do not create disputes", () => {
     beginTx(30, 1000);
     setCall(ALICE, ILRM_ADDRESS, selector("initiateVoluntaryRequest(address,bytes32)"), wei("10000000000000000"));
@@ -374,6 +529,39 @@ describe("ILRM configuration and ownership", () => {
     handlePaused(changetype<Paused>(mockEvent(ILRM_ADDRESS, [pAddr("account", BOB)])));
     assert.fieldEquals("ProtocolContract", ilrm, "paused", "true");
     assert.entityCount("AdminEvent", 5);
+  });
+
+  test("initiator-incentive caps, from the constructor and from the owner", () => {
+    const ilrm = ILRM_ADDRESS.toHexString();
+
+    // Constructor defaults (1 token per dispute, 10 per 30-day window)
+    beginTx(45, 1000);
+    handleInitiatorIncentiveCapsUpdated(
+      changetype<InitiatorIncentiveCapsUpdated>(
+        mockEvent(ILRM_ADDRESS, [
+          pUint("maxPerDispute", wei("1000000000000000000")),
+          pUint("maxPerWindow", wei("10000000000000000000")),
+          pInt("window", 2592000)
+        ])
+      )
+    );
+    assert.fieldEquals("ProtocolContract", ilrm, "kind", "ILRM");
+    assert.fieldEquals("ProtocolContract", ilrm, "maxIncentivePerDispute", "1000000000000000000");
+    assert.fieldEquals("ProtocolContract", ilrm, "maxIncentivePerWindow", "10000000000000000000");
+    assert.fieldEquals("ProtocolContract", ilrm, "incentiveWindow", "2592000");
+
+    // Kill switch: zero caps are allowed
+    beginTx(46, 2000);
+    const update = changetype<InitiatorIncentiveCapsUpdated>(
+      mockEvent(ILRM_ADDRESS, [pInt("maxPerDispute", 0), pInt("maxPerWindow", 0), pInt("window", 86400)])
+    );
+    handleInitiatorIncentiveCapsUpdated(update);
+    assert.fieldEquals("ProtocolContract", ilrm, "maxIncentivePerDispute", "0");
+    assert.fieldEquals("ProtocolContract", ilrm, "maxIncentivePerWindow", "0");
+    assert.fieldEquals("ProtocolContract", ilrm, "incentiveWindow", "86400");
+    assert.fieldEquals("AdminEvent", eventId(update), "event", "InitiatorIncentiveCapsUpdated");
+    assert.fieldEquals("AdminEvent", eventId(update), "details", "maxPerDispute=0 maxPerWindow=0 window=86400");
+    assert.entityCount("AdminEvent", 2);
   });
 
   test("ILRM harassment score is kept separately", () => {

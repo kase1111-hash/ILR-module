@@ -122,24 +122,62 @@ function parseYamlSubset(text) {
 
 /**
  * Load subgraph.yaml into a flat description of its data sources.
- * @returns {{dataSources: Array<{name, abiName, abiFile, mappingFile, entities, eventHandlers}>, raw}}
+ * `abis` lists every ABI the data source's mapping may bind (mapping.abis), with resolved file paths.
+ * @returns {{dataSources: Array<{name, abiName, abiFile, abis, mappingFile, entities, eventHandlers}>, raw}}
  */
 function loadManifest(subgraphDir = SUBGRAPH_DIR) {
   const raw = parseYamlSubset(fs.readFileSync(path.join(subgraphDir, "subgraph.yaml"), "utf8"));
   const dataSources = (raw.dataSources || []).map((ds) => {
     const mapping = ds.mapping || {};
     const abiName = ds.source && ds.source.abi;
-    const abiEntry = (mapping.abis || []).find((a) => a.name === abiName);
+    const abis = (mapping.abis || []).map((a) => ({ name: a.name, file: path.resolve(subgraphDir, a.file) }));
+    const abiEntry = abis.find((a) => a.name === abiName);
     return {
       name: ds.name,
       abiName,
-      abiFile: abiEntry ? path.resolve(subgraphDir, abiEntry.file) : null,
+      abiFile: abiEntry ? abiEntry.file : null,
+      abis,
       mappingFile: mapping.file ? path.resolve(subgraphDir, mapping.file) : null,
       entities: mapping.entities || [],
       eventHandlers: (mapping.eventHandlers || []).map((h) => ({ event: h.event, handler: h.handler })),
     };
   });
   return { dataSources, raw };
+}
+
+// -----------------------------------------------------------------------------
+// Contract calls made by a mapping
+// -----------------------------------------------------------------------------
+
+/**
+ * Contract functions a mapping calls through graph-cli's generated bindings (eth_call), e.g.
+ * `ILRM.bind(event.address).try_disputes(id)` or `const c = L3Bridge.bind(a); c.getChallengeDeadline(r)`.
+ * Recognises calls chained on `X.bind(...)` and calls on a const/let holding one; the `try_` prefix is
+ * dropped. Comments are ignored.
+ * @param {string} source Mapping source (AssemblyScript)
+ * @returns {Array<{contract: string, fn: string}>} unique, in order of first appearance
+ */
+function contractCalls(source) {
+  const code = source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/\/\/[^\n]*/g, "");
+  const found = [];
+  const seen = new Set();
+  const add = (contract, fn) => {
+    const key = `${contract}.${fn}`;
+    if (!seen.has(key)) {
+      seen.add(key);
+      found.push({ contract, fn });
+    }
+  };
+  for (const m of code.matchAll(/\b([A-Z]\w*)\s*\.\s*bind\s*\([^()]*(?:\([^()]*\)[^()]*)*\)\s*\.\s*(\w+)\s*\(/g)) {
+    add(m[1], m[2].replace(/^try_/, ""));
+  }
+  for (const m of code.matchAll(/\b(?:const|let|var)\s+(\w+)\s*(?::\s*\w+\s*)?=\s*([A-Z]\w*)\s*\.\s*bind\s*\(/g)) {
+    const [, variable, contract] = m;
+    for (const call of code.matchAll(new RegExp(`\\b${variable}\\s*\\.\\s*(\\w+)\\s*\\(`, "g"))) {
+      add(contract, call[1].replace(/^try_/, ""));
+    }
+  }
+  return found;
 }
 
 // -----------------------------------------------------------------------------
@@ -237,6 +275,7 @@ module.exports = {
   REPO_ROOT,
   parseYamlSubset,
   loadManifest,
+  contractCalls,
   eventSignature,
   abiEvents,
   readAbiFile,

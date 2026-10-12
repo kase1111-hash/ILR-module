@@ -1,177 +1,188 @@
-#!/bin/bash
+#!/usr/bin/env bash
 # =============================================================================
-# NatLangChain ILRM - Subgraph Deployment Script
+# NatLangChain ILRM - Subgraph build and deployment
 # =============================================================================
-# This script helps deploy the ILRM subgraph to TheGraph
-# Usage: ./scripts/deploy-subgraph.sh [network] [deploy-key]
+# Verifies the subgraph against the compiled contracts, builds and tests it, and
+# optionally deploys it. Uses only the graph-cli pinned in subgraph/package-lock.json
+# (0.98.1), run through npm/npx; no global install is needed.
+#
+# Usage (from anywhere in the repository):
+#   scripts/deploy-subgraph.sh [options]                 verify, build and test only
+#   GRAPH_DEPLOY_KEY=<key> scripts/deploy-subgraph.sh --studio <slug> --version-label <v>
+#   scripts/deploy-subgraph.sh --local [<name>] --version-label <v>
+#
+# Options:
+#   --studio <slug>          Deploy to Subgraph Studio (https://thegraph.com/studio/). The deploy key
+#                            is read from GRAPH_DEPLOY_KEY and stored with `graph auth`; without it, a
+#                            key saved earlier with `npx graph auth <key>` (in subgraph/) is used.
+#   --local [<name>]         Deploy to a local Graph Node (http://localhost:8020, IPFS on
+#                            http://localhost:5001); <name> defaults to ilrm-subgraph.
+#   --version-label <v>      Version label of the deployment (required to deploy).
+#   --sync-abis              Rewrite subgraph/abis from the compiled contracts first (review and commit
+#                            the diff; the mappings may need updating too).
+#   --skip-tests             Do not run the matchstick unit tests.
+#   -h, --help               Show this help.
+#
+# Prerequisites: Node.js >= 20.18.1 and compiled contracts (`forge build` or
+# `npx hardhat compile` in the repository root). Before deploying, replace the zero
+# addresses and startBlock values in subgraph/subgraph.yaml with the deployment's.
 # =============================================================================
 
-set -e
+set -euo pipefail
 
-# Colors for output
 RED='\033[0;31m'
 GREEN='\033[0;32m'
 YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
-NC='\033[0m' # No Color
+NC='\033[0m'
 
-# Configuration
-SUBGRAPH_DIR="subgraph"
-NETWORK=${1:-"optimism"}
-DEPLOY_KEY=${2:-""}
+STUDIO_NODE="https://api.studio.thegraph.com/deploy/"
+LOCAL_NODE="http://localhost:8020/"
+LOCAL_IPFS="http://localhost:5001"
 
-echo -e "${BLUE}============================================${NC}"
-echo -e "${BLUE}  ILRM Subgraph Deployment${NC}"
-echo -e "${BLUE}============================================${NC}"
-echo ""
-echo "Network: $NETWORK"
-echo ""
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
+SUBGRAPH_DIR="$REPO_ROOT/subgraph"
 
-# =============================================================================
-# Step 1: Prerequisites Check
-# =============================================================================
-echo -e "${YELLOW}[1/6] Checking prerequisites...${NC}"
+usage() {
+    sed -n '/^# Usage/,/^# =====/p' "${BASH_SOURCE[0]}" | sed -e '$d' -e 's/^# \{0,1\}//'
+}
 
-if ! command -v graph &> /dev/null; then
-    echo -e "${RED}ERROR: Graph CLI is not installed${NC}"
-    echo "Install with: npm install -g @graphprotocol/graph-cli"
+fail() {
+    echo -e "${RED}ERROR: $*${NC}" >&2
     exit 1
+}
+
+step() {
+    echo -e "${YELLOW}$*${NC}"
+}
+
+TARGET=""
+NAME=""
+VERSION_LABEL=""
+SYNC_ABIS=false
+RUN_TESTS=true
+
+while [ $# -gt 0 ]; do
+    case "$1" in
+        --studio)
+            [ $# -ge 2 ] && [ -n "$2" ] && [ "${2#-}" = "$2" ] || fail "--studio needs the Studio subgraph slug"
+            TARGET="studio"
+            NAME="$2"
+            shift 2
+            ;;
+        --local)
+            TARGET="local"
+            if [ $# -ge 2 ] && [ -n "$2" ] && [ "${2#-}" = "$2" ]; then
+                NAME="$2"
+                shift
+            else
+                NAME="ilrm-subgraph"
+            fi
+            shift
+            ;;
+        --version-label)
+            [ $# -ge 2 ] && [ -n "$2" ] || fail "--version-label needs a value"
+            VERSION_LABEL="$2"
+            shift 2
+            ;;
+        --sync-abis)
+            SYNC_ABIS=true
+            shift
+            ;;
+        --skip-tests)
+            RUN_TESTS=false
+            shift
+            ;;
+        -h | --help)
+            usage
+            exit 0
+            ;;
+        *)
+            usage >&2
+            fail "unknown argument: $1"
+            ;;
+    esac
+done
+
+if [ -n "$TARGET" ] && [ -z "$VERSION_LABEL" ]; then
+    fail "--version-label is required to deploy (graph deploy would otherwise prompt for it)"
+fi
+if [ "$TARGET" = "studio" ] && [ -n "${GRAPH_DEPLOY_KEY:-}" ]; then
+    # graph auth falls back to an interactive prompt for anything else
+    [[ "$GRAPH_DEPLOY_KEY" =~ ^[0-9a-fA-F]{32}$ ]] || fail "GRAPH_DEPLOY_KEY is not a Subgraph Studio deploy key (32 hex characters)"
 fi
 
-if ! command -v node &> /dev/null; then
-    echo -e "${RED}ERROR: Node.js is not installed${NC}"
-    exit 1
-fi
-
-echo "  Graph CLI: $(graph --version)"
-echo "  Node.js: $(node --version)"
-echo -e "${GREEN}  Prerequisites OK${NC}"
+echo -e "${BLUE}============================================${NC}"
+echo -e "${BLUE}  ILRM Subgraph${NC}"
+echo -e "${BLUE}============================================${NC}"
+echo "Target: ${TARGET:-none (verify and build only)}${NAME:+ ($NAME)}"
 echo ""
 
-# =============================================================================
-# Step 2: Install Dependencies
-# =============================================================================
-echo -e "${YELLOW}[2/6] Installing dependencies...${NC}"
+# -----------------------------------------------------------------------------
+step "[1/6] Checking prerequisites..."
+command -v node > /dev/null 2>&1 || fail "Node.js is not installed (>= 20.18.1 required)"
+command -v npm > /dev/null 2>&1 || fail "npm is not installed"
+node -e 'const [a, b, c] = process.versions.node.split(".").map(Number); process.exit(a > 20 || (a === 20 && (b > 18 || (b === 18 && c >= 1))) ? 0 : 1)' ||
+    fail "Node.js $(node --version) is too old: graph-cli 0.98 needs >= 20.18.1"
+echo "  Node.js $(node --version), npm $(npm --version)"
+if [ ! -d "$REPO_ROOT/out" ] && [ ! -d "$REPO_ROOT/artifacts" ]; then
+    fail "no compiled contracts: run 'forge build' or 'npx hardhat compile' in $REPO_ROOT first"
+fi
 
 cd "$SUBGRAPH_DIR"
-npm install
 
-echo -e "${GREEN}  Dependencies installed${NC}"
-echo ""
+# -----------------------------------------------------------------------------
+step "[2/6] Installing subgraph dependencies (npm ci)..."
+npm ci --no-audit --no-fund
+echo "  graph-cli $(npx --no-install graph --version)"
 
-# =============================================================================
-# Step 3: Generate ABIs
-# =============================================================================
-echo -e "${YELLOW}[3/6] Copying contract ABIs...${NC}"
+# -----------------------------------------------------------------------------
+step "[3/6] Checking abis/ against the compiled contracts..."
+if [ "$SYNC_ABIS" = true ]; then
+    npm run --silent sync-abis
+fi
+# Fails if abis/*.json drifted from the compiler artifacts or a handler names an event the
+# contract does not emit (then run `npm run sync-abis` and update the mappings)
+npm run --silent check-abis
 
-mkdir -p abis
+# -----------------------------------------------------------------------------
+step "[4/6] Generating types (graph codegen)..."
+npm run --silent codegen
 
-# Check if Foundry output exists
-if [ -d "../out" ]; then
-    # Copy ABIs from Foundry output
-    if [ -f "../out/ILRM.sol/ILRM.json" ]; then
-        cp ../out/ILRM.sol/ILRM.json abis/
-        echo "  Copied ILRM.json"
-    fi
-    if [ -f "../out/Treasury.sol/Treasury.json" ]; then
-        cp ../out/Treasury.sol/Treasury.json abis/
-        echo "  Copied Treasury.json"
-    fi
-    if [ -f "../out/Oracle.sol/Oracle.json" ]; then
-        cp ../out/Oracle.sol/Oracle.json abis/
-        echo "  Copied Oracle.json"
-    fi
-    if [ -f "../out/L3Bridge.sol/L3Bridge.json" ]; then
-        cp ../out/L3Bridge.sol/L3Bridge.json abis/
-        echo "  Copied L3Bridge.json"
-    fi
-    if [ -f "../out/AssetRegistry.sol/AssetRegistry.json" ]; then
-        cp ../out/AssetRegistry.sol/AssetRegistry.json abis/
-        echo "  Copied AssetRegistry.json"
-    fi
+# -----------------------------------------------------------------------------
+step "[5/6] Building (graph build)..."
+npm run --silent build
+if [ "$RUN_TESTS" = true ]; then
+    npm test
 else
-    echo -e "${YELLOW}  WARNING: Foundry output not found. Run 'forge build' first.${NC}"
-    echo "  Checking for Hardhat artifacts..."
+    echo "  Skipping matchstick tests (--skip-tests)"
+fi
 
-    if [ -d "../artifacts" ]; then
-        # Copy ABIs from Hardhat output
-        find ../artifacts -name "ILRM.json" -exec cp {} abis/ \; 2>/dev/null || true
-        find ../artifacts -name "Treasury.json" -exec cp {} abis/ \; 2>/dev/null || true
-        find ../artifacts -name "Oracle.json" -exec cp {} abis/ \; 2>/dev/null || true
-        find ../artifacts -name "L3Bridge.json" -exec cp {} abis/ \; 2>/dev/null || true
-        find ../artifacts -name "AssetRegistry.json" -exec cp {} abis/ \; 2>/dev/null || true
+# -----------------------------------------------------------------------------
+step "[6/6] Deploying..."
+if [ -z "$TARGET" ]; then
+    echo "  No target given; nothing deployed. To deploy:"
+    echo "    GRAPH_DEPLOY_KEY=<key> scripts/deploy-subgraph.sh --studio <slug> --version-label <v>"
+    echo "    scripts/deploy-subgraph.sh --local [<name>] --version-label <v>"
+    exit 0
+fi
+
+# Deploying the placeholder manifest would index nothing
+if grep -Eq 'address: "0x0{40}"' subgraph.yaml; then
+    fail "subgraph.yaml still has zero contract addresses; set each data source's address and startBlock first"
+fi
+
+if [ "$TARGET" = "studio" ]; then
+    if [ -n "${GRAPH_DEPLOY_KEY:-}" ]; then
+        # graph-cli 0.98: `graph auth <deploy-key>` stores the key for the Studio node
+        npx --no-install graph auth "$GRAPH_DEPLOY_KEY"
     fi
-fi
-
-# Verify ABIs exist
-if [ ! -f "abis/ILRM.json" ]; then
-    echo -e "${RED}ERROR: ILRM.json ABI not found${NC}"
-    echo "Please run 'forge build' or 'npx hardhat compile' first"
-    exit 1
-fi
-
-echo -e "${GREEN}  ABIs copied${NC}"
-echo ""
-
-# =============================================================================
-# Step 4: Generate Types
-# =============================================================================
-echo -e "${YELLOW}[4/6] Generating TypeScript types...${NC}"
-
-npm run codegen
-
-echo -e "${GREEN}  Types generated${NC}"
-echo ""
-
-# =============================================================================
-# Step 5: Build Subgraph
-# =============================================================================
-echo -e "${YELLOW}[5/6] Building subgraph...${NC}"
-
-npm run build
-
-echo -e "${GREEN}  Subgraph built${NC}"
-echo ""
-
-# =============================================================================
-# Step 6: Deploy
-# =============================================================================
-echo -e "${YELLOW}[6/6] Deploying subgraph...${NC}"
-
-if [ -z "$DEPLOY_KEY" ]; then
-    echo -e "${YELLOW}  No deploy key provided. Skipping deployment.${NC}"
-    echo ""
-    echo "To deploy, run one of the following:"
-    echo ""
-    echo "  # TheGraph Studio (recommended)"
-    echo "  graph auth --studio YOUR_DEPLOY_KEY"
-    echo "  npm run deploy"
-    echo ""
-    echo "  # Local development"
-    echo "  npm run create-local"
-    echo "  npm run deploy-local"
-    echo ""
+    npx --no-install graph deploy "$NAME" --node "$STUDIO_NODE" --version-label "$VERSION_LABEL"
 else
-    echo "  Authenticating with TheGraph Studio..."
-    graph auth --studio "$DEPLOY_KEY"
-
-    echo "  Deploying..."
-    npm run deploy
-
-    echo -e "${GREEN}  Subgraph deployed!${NC}"
+    # Creating a name that already exists fails; deploying to it still works
+    npx --no-install graph create --node "$LOCAL_NODE" "$NAME" ||
+        echo -e "${YELLOW}  graph create failed (the name may already exist); deploying anyway${NC}"
+    npx --no-install graph deploy "$NAME" --node "$LOCAL_NODE" --ipfs "$LOCAL_IPFS" --version-label "$VERSION_LABEL"
 fi
 
-echo ""
-echo -e "${BLUE}============================================${NC}"
-echo -e "${BLUE}  Subgraph Build Complete${NC}"
-echo -e "${BLUE}============================================${NC}"
-echo ""
-echo "Next steps:"
-echo "  1. Update subgraph.yaml with deployed contract addresses"
-echo "  2. Set the correct startBlock for each contract"
-echo "  3. Deploy to TheGraph Studio or hosted service"
-echo ""
-echo "Example queries available in subgraph/README.md"
-echo ""
-
-cd ..
+echo -e "${GREEN}  Subgraph deployed${NC}"

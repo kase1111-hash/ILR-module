@@ -3,10 +3,15 @@
 // =============================================================================
 // Handles every event of contracts/ILRM.sol (core dispute resolution).
 // Event order inside one transaction matters and mirrors the contract:
-//   depositStakeWithSubsidy: StakeSubsidized, StakeDeposited
+//   depositStake:            StakeDeposited, [OracleRequestFailed]
+//   depositStakeWithSubsidy: StakeSubsidized, StakeDeposited, [OracleRequestFailed]
 //   submitLLMProposal:       [ProposalSuperseded], ProposalSubmitted
+//   voidLLMProposal:         ProposalVoided (Oracle owner reset; the replacement is a plain ProposalSubmitted)
+//   counterPropose:          CounterProposed, [OracleRequestFailed]
 //   acceptProposal:          AcceptanceSignaled, [SubsidyReturned], DisputeResolved
-//   enforceTimeout:          [SubsidyReturned], StakesBurned | DefaultLicenseApplied, DisputeResolved
+//   enforceTimeout (active): [SubsidyReturned], StakesBurned, DisputeResolved
+//   enforceTimeout (no counterparty stake): InitiatorIncentivePaid, DefaultLicenseApplied, DisputeResolved
+// OracleRequestFailed replaces the Oracle's ProposalRequested when the advisory request fails.
 // =============================================================================
 
 import { Address, BigInt, Bytes, ethereum } from "@graphprotocol/graph-ts";
@@ -18,11 +23,15 @@ import {
   DisputeInitiated,
   DisputeResolved,
   HarassmentScoreUpdated,
+  InitiatorIncentiveCapsUpdated,
+  InitiatorIncentivePaid,
+  OracleRequestFailed,
   OwnershipTransferStarted,
   OwnershipTransferred,
   Paused,
   ProposalSubmitted,
   ProposalSuperseded,
+  ProposalVoided,
   StakeDeposited,
   StakeSubsidized,
   StakesBurned,
@@ -37,6 +46,7 @@ import {
   Counter,
   Dispute,
   HarassmentScore,
+  OracleRequestFailure,
   Party,
   Proposal,
   StakeSubsidy,
@@ -161,6 +171,7 @@ export function handleDisputeInitiated(event: DisputeInitiated): void {
   dispute.counterCount = 0;
   dispute.proposalCount = 0;
   dispute.counterFeesBurned = ZERO;
+  dispute.oracleRequestFailureCount = 0;
   dispute.createdAt = timestamp;
   dispute.updatedAt = timestamp;
 
@@ -350,6 +361,21 @@ export function handleProposalSubmitted(event: ProposalSubmitted): void {
   protocol.save();
 }
 
+export function handleProposalVoided(event: ProposalVoided): void {
+  const dispute = Dispute.load(event.params.disputeId.toString());
+  if (dispute == null) return;
+
+  // voidLLMProposal (Oracle owner reset) clears the live proposal and both acceptances; the round then
+  // admits one replacement, which arrives as a plain ProposalSubmitted. The contract only emits this
+  // while a proposal is live and only for its hash (compare-and-clear).
+  setProposalStatus(dispute.currentProposal, "VOIDED");
+  dispute.currentProposal = null;
+  dispute.initiatorAccepted = false;
+  dispute.counterpartyAccepted = false;
+  dispute.updatedAt = event.block.timestamp;
+  dispute.save();
+}
+
 export function handleAcceptanceSignaled(event: AcceptanceSignaled): void {
   const dispute = Dispute.load(event.params.disputeId.toString());
   if (dispute == null) return;
@@ -430,6 +456,28 @@ export function handleCounterProposed(event: CounterProposed): void {
   protocol.save();
 }
 
+export function handleOracleRequestFailed(event: OracleRequestFailed): void {
+  const dispute = Dispute.load(event.params.disputeId.toString());
+  if (dispute == null) return;
+
+  // The advisory Oracle.requestProposal call could not be made or reverted; the dispute proceeds
+  const failure = new OracleRequestFailure(eventId(event));
+  failure.dispute = dispute.id;
+  failure.round = event.params.round;
+  failure.timestamp = event.block.timestamp;
+  failure.blockNumber = event.block.number;
+  failure.txHash = event.transaction.hash;
+  failure.save();
+
+  dispute.oracleRequestFailureCount = dispute.oracleRequestFailureCount + 1;
+  dispute.updatedAt = event.block.timestamp;
+  dispute.save();
+
+  const protocol = getOrCreateProtocolMetric(event.block);
+  protocol.totalOracleRequestFailures = protocol.totalOracleRequestFailures.plus(ONE);
+  protocol.save();
+}
+
 // =============================================================================
 // Resolution
 // =============================================================================
@@ -507,6 +555,31 @@ export function handleStakesBurned(event: StakesBurned): void {
   protocol.save();
 }
 
+export function handleInitiatorIncentivePaid(event: InitiatorIncentivePaid): void {
+  const dispute = Dispute.load(event.params.disputeId.toString());
+  if (dispute == null) return;
+
+  // Paid on top of the returned stake: min(uncapped, per-dispute cap, window budget left, reserves)
+  const amount = event.params.amount;
+  const uncapped = event.params.uncappedAmount;
+  dispute.initiatorIncentive = amount;
+  dispute.initiatorIncentiveUncapped = uncapped;
+  dispute.updatedAt = event.block.timestamp;
+  dispute.save();
+
+  const daily = getOrCreateDailyMetric(event.block.timestamp);
+  daily.initiatorIncentivesPaid = daily.initiatorIncentivesPaid.plus(amount);
+  daily.save();
+
+  const protocol = getOrCreateProtocolMetric(event.block);
+  protocol.totalInitiatorIncentivesPaid = protocol.totalInitiatorIncentivesPaid.plus(amount);
+  protocol.totalInitiatorIncentivesUncapped = protocol.totalInitiatorIncentivesUncapped.plus(uncapped);
+  if (amount.lt(uncapped)) {
+    protocol.cappedInitiatorIncentives = protocol.cappedInitiatorIncentives.plus(ONE);
+  }
+  protocol.save();
+}
+
 export function handleDefaultLicenseApplied(event: DefaultLicenseApplied): void {
   const dispute = Dispute.load(event.params.disputeId.toString());
   if (dispute == null) return;
@@ -565,10 +638,9 @@ export function handleDisputeResolved(event: DisputeResolved): void {
   protocol.resolvedDisputes = protocol.resolvedDisputes.plus(ONE);
   if (outcome == "TIMEOUT_WITH_BURN") protocol.timedOutDisputes = protocol.timedOutDisputes.plus(ONE);
   if (outcome == "DEFAULT_LICENSE_APPLIED") protocol.defaultedDisputes = protocol.defaultedDisputes.plus(ONE);
-  // Running mean over resolved disputes
-  const blocks = event.block.number.minus(dispute.startBlock);
-  const n = protocol.resolvedDisputes;
-  protocol.avgResolutionBlocks = protocol.avgResolutionBlocks.times(n.minus(ONE)).plus(blocks).div(n);
+  // Mean over resolved disputes, derived from the exact sum (a running mean of rounded values drifts down)
+  protocol.totalResolutionBlocks = protocol.totalResolutionBlocks.plus(event.block.number.minus(dispute.startBlock));
+  protocol.avgResolutionBlocks = protocol.totalResolutionBlocks.div(protocol.resolvedDisputes);
   protocol.save();
 }
 
@@ -604,6 +676,25 @@ export function handleSubsidyTreasuryUpdated(event: SubsidyTreasuryUpdated): voi
   const entry = newAdminEvent(event, KIND_ILRM, "SubsidyTreasuryUpdated");
   entry.account = event.params.newTreasury;
   entry.previousAccount = event.params.previousTreasury;
+  entry.save();
+}
+
+export function handleInitiatorIncentiveCapsUpdated(event: InitiatorIncentiveCapsUpdated): void {
+  // Emitted by setInitiatorIncentiveCaps and once by the constructor (defaults)
+  const contract = getOrCreateContract(event, KIND_ILRM);
+  contract.maxIncentivePerDispute = event.params.maxPerDispute;
+  contract.maxIncentivePerWindow = event.params.maxPerWindow;
+  contract.incentiveWindow = event.params.window;
+  contract.save();
+
+  const entry = newAdminEvent(event, KIND_ILRM, "InitiatorIncentiveCapsUpdated");
+  entry.details =
+    "maxPerDispute=" +
+    event.params.maxPerDispute.toString() +
+    " maxPerWindow=" +
+    event.params.maxPerWindow.toString() +
+    " window=" +
+    event.params.window.toString();
   entry.save();
 }
 

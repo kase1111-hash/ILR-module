@@ -3,6 +3,7 @@ import { Address, BigInt, Bytes } from "@graphprotocol/graph-ts";
 import {
   DisputeProcessed,
   OracleRegistered,
+  ProposalRequestCancelled,
   ProposalRequested,
   ProposalReset,
   ProposalRoundFilled,
@@ -12,12 +13,14 @@ import {
 import {
   handleDisputeProcessed,
   handleOracleRegistered,
+  handleProposalRequestCancelled,
   handleProposalRequested,
   handleProposalReset,
   handleProposalRoundFilled,
   handleProposalRoundReopened,
   handleProposalSubmittedToILRM
 } from "../src/oracle";
+import { OracleSubmission } from "../generated/schema";
 import { eventId, keccakUtf8 } from "../src/common";
 import {
   OPERATOR,
@@ -128,15 +131,55 @@ describe("Oracle rounds", () => {
     assert.fieldEquals("OracleMetric", "0", "avgResponseSeconds", "450");
   });
 
-  test("cancelPendingRequest emits a zero request", () => {
+  test("cancelPendingRequest clears the open request (ProposalRequestCancelled)", () => {
     beginTx(10, 1000);
     handleProposalRequested(requested(7, word(0xe7), 1000));
+    assert.fieldEquals("OracleDispute", "7", "openRequestAt", "1000");
+
     beginTx(11, 1500);
-    handleProposalRequested(requested(7, word(0), 0));
+    handleProposalRequestCancelled(
+      changetype<ProposalRequestCancelled>(mockEvent(ORACLE_ADDRESS, [pInt("disputeId", 7)]))
+    );
     assert.fieldEquals("OracleDispute", "7", "pending", "false");
+    assert.fieldEquals("OracleDispute", "7", "openRequestAt", "null");
+    assert.fieldEquals("OracleDispute", "7", "lastCancelledAt", "1500");
     assert.fieldEquals("OracleDispute", "7", "requestCount", "1");
     assert.fieldEquals("OracleDispute", "7", "cancelCount", "1");
+    assert.fieldEquals("OracleDispute", "7", "lastRequestedAt", "1000");
     assert.fieldEquals("OracleMetric", "0", "requestsCancelled", "1");
+    assert.fieldEquals("OracleMetric", "0", "proposalsRequested", "1");
+
+    // Advisory only: a later proposal is admitted, but answers no open request
+    beginTx(12, 2000);
+    submit(7, 0, keccakUtf8("late"), 0, word(0xe7));
+    assert.assertTrue(OracleSubmission.load("7-0-0")!.responseTime === null);
+    assert.fieldEquals("OracleMetric", "0", "responseSamples", "0");
+
+    // A new request re-opens it
+    beginTx(13, 2500);
+    handleProposalRequested(requested(7, word(0xe8), 2500));
+    assert.fieldEquals("OracleDispute", "7", "pending", "true");
+    assert.fieldEquals("OracleDispute", "7", "openRequestAt", "2500");
+    assert.fieldEquals("OracleDispute", "7", "requestCount", "2");
+  });
+
+  test("the mean response time is exact, not a drifting running mean", () => {
+    // Response times 1, 2 and 3 seconds: mean 2 (a running mean of rounded values gives 1)
+    beginTx(30, 1000);
+    handleProposalRequested(requested(8, word(0xe8), 1000));
+    beginTx(31, 1001);
+    submit(8, 0, keccakUtf8("a"), 0, word(0xe8));
+    beginTx(32, 2000);
+    handleProposalRequested(requested(9, word(0xe9), 2000));
+    beginTx(33, 2002);
+    submit(9, 0, keccakUtf8("b"), 0, word(0xe9));
+    beginTx(34, 3000);
+    handleProposalRequested(requested(10, word(0xea), 3000));
+    beginTx(35, 3003);
+    submit(10, 0, keccakUtf8("c"), 0, word(0xea));
+    assert.fieldEquals("OracleMetric", "0", "responseSamples", "3");
+    assert.fieldEquals("OracleMetric", "0", "totalResponseSeconds", "6");
+    assert.fieldEquals("OracleMetric", "0", "avgResponseSeconds", "2");
   });
 
   test("operator registration", () => {

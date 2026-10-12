@@ -48,6 +48,15 @@ type ProtocolContract @entity(immutable: false) {
   "ILRM: treasury allowed to fund stake subsidies (SubsidyTreasuryUpdated); null = disabled"
   subsidyTreasury: Bytes
 
+  "ILRM: cap on a single initiator incentive (InitiatorIncentiveCapsUpdated, also emitted by the constructor)"
+  maxIncentivePerDispute: BigInt
+
+  "ILRM: cap on all initiator incentives paid in one incentive window (InitiatorIncentiveCapsUpdated)"
+  maxIncentivePerWindow: BigInt
+
+  "ILRM: initiator-incentive window in seconds (InitiatorIncentiveCapsUpdated)"
+  incentiveWindow: BigInt
+
   "Treasury: ILRM allowed to draw subsidies (ILRMUpdated)"
   ilrm: Bytes
 
@@ -208,7 +217,7 @@ type Dispute @entity(immutable: false) {
   "Proposals stored so far (including superseded ones)"
   proposalCount: Int!
 
-  "Live proposal; null before the first proposal and after a counter-proposal clears it"
+  "Live proposal; null before the first proposal and after a counter-proposal or an Oracle reset (ProposalVoided) clears it"
   currentProposal: Proposal
 
   "Fallback license terms hash (ILRM.disputes() at initiation)"
@@ -231,6 +240,18 @@ type Dispute @entity(immutable: false) {
 
   "Counter-proposal fees burned (ETH)"
   counterFeesBurned: BigInt!
+
+  "Initiator incentive paid on top of the returned stake on non-participation (InitiatorIncentivePaid); below initiatorIncentiveUncapped (possibly 0) when a cap or the token reserves bound it"
+  initiatorIncentive: BigInt
+
+  "Uncapped initiator incentive (10% of the initiator stake) the payout was derived from (InitiatorIncentivePaid)"
+  initiatorIncentiveUncapped: BigInt
+
+  "Advisory Oracle requests ILRM could not make or that reverted (OracleRequestFailed)"
+  oracleRequestFailureCount: Int!
+
+  "Failed advisory Oracle requests"
+  oracleRequestFailures: [OracleRequestFailure!]! @derivedFrom(field: "dispute")
 
   "Block timestamp of resolution"
   resolvedAt: BigInt
@@ -333,8 +354,10 @@ type Party @entity(immutable: false) {
 enum ProposalStatus {
   "Live proposal of the current round"
   LIVE
-  "Replaced in the same round after an Oracle owner reset (ProposalSuperseded)"
+  "Replaced by a proposal relayed over it in the same round (ProposalSuperseded); NatLangChainOracle voids first instead (VOIDED)"
   SUPERSEDED
+  "Voided by an Oracle owner reset (ProposalVoided); the round admits one replacement"
+  VOIDED
   "Cleared by a counter-proposal"
   VOIDED_BY_COUNTER
   "Accepted by both parties"
@@ -466,6 +489,24 @@ type HarassmentScore @entity(immutable: true) {
   txHash: Bytes!
 }
 
+"""
+Advisory Oracle.requestProposal call that ILRM could not make (no code at the oracle) or that
+reverted (OracleRequestFailed). The dispute is unaffected; the Oracle has no request for the round.
+"""
+type OracleRequestFailure @entity(immutable: true) {
+  "<txHash>-<logIndex>"
+  id: ID!
+
+  dispute: Dispute!
+
+  "Round (dispute counterCount) the request was for"
+  round: BigInt!
+
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  txHash: Bytes!
+}
+
 # =============================================================================
 # Stake subsidies (ILRM escrow + Treasury grants)
 # =============================================================================
@@ -546,11 +587,14 @@ type TreasuryDeposit @entity(immutable: true) {
   "Token amount, or wei when isEth"
   amount: BigInt!
 
-  "Reason string: free text for deposit(), \"burn\" for depositBurn(), \"eth\" for plain ETH"
+  "Unverified label: deposit() lets any depositor choose any text; depositBurn() uses \"burn\", plain ETH transfers \"eth\""
   reason: String!
 
-  "True for plain ETH transfers (reason \"eth\")"
+  "Label \"eth\": plain ETH transfer (receive()). Label-based, so a token deposit() labelled \"eth\" also counts"
   isEth: Boolean!
+
+  "Burn proceeds from the Treasury's ILRM: label \"burn\" sent by the ILRM of the latest ILRMUpdated, as depositBurn() (ILRM-only) does. A \"burn\" label from anyone else is an ordinary deposit"
+  isBurn: Boolean!
 
   timestamp: BigInt!
   txHash: Bytes!
@@ -573,9 +617,10 @@ type TreasuryMetric @entity(immutable: false) {
   "Token inflows of every reason except \"eth\""
   totalReceived: BigInt!
 
-  "Token inflows with reason \"burn\" (depositBurn), included in totalReceived"
+  "Burn proceeds from the Treasury's ILRM (TreasuryDeposit.isBurn), included in totalReceived"
   totalBurnDeposits: BigInt!
 
+  "Deposits counted in totalBurnDeposits"
   burnDepositCount: Int!
 
   "ETH received (reason \"eth\")"
@@ -596,14 +641,17 @@ type OracleDispute @entity(immutable: false) {
   "Linked ILRM dispute"
   dispute: Dispute
 
-  "Mirror of Oracle.pendingRequests: set by requests and resets, cleared by submissions and cancellations"
+  "Mirror of Oracle.pendingRequests: set by requests and resets, cleared by submissions and cancellations (ProposalRequestCancelled)"
   pending: Boolean!
 
-  "Proposal requests (ProposalRequested with a non-zero timestamp)"
+  "Proposal requests (ProposalRequested)"
   requestCount: Int!
 
-  "Requests cancelled by the owner (ProposalRequested with zero values)"
+  "Pending requests withdrawn by the owner (ProposalRequestCancelled)"
   cancelCount: Int!
+
+  "Time of the latest ProposalRequestCancelled"
+  lastCancelledAt: BigInt
 
   lastRequestedAt: BigInt
   lastRequestEvidenceHash: Bytes
@@ -723,8 +771,11 @@ type OracleMetric @entity(immutable: false) {
   proposalsSubmitted: Int!
   proposalsReset: Int!
 
-  "Running mean of OracleSubmission.responseTime (seconds) for the day"
+  "Mean OracleSubmission.responseTime (seconds) for the day: totalResponseSeconds / responseSamples, rounded down"
   avgResponseSeconds: BigInt!
+
+  "Sum of the day's OracleSubmission.responseTime values"
+  totalResponseSeconds: BigInt!
 
   "Submissions included in avgResponseSeconds"
   responseSamples: Int!
@@ -927,12 +978,62 @@ type L3BridgedDispute @entity(immutable: false) {
   "Re-bridge attempts skipped by bridgeDisputeBatchToL3 (DisputeBridgeSkipped)"
   skippedRebridges: Int!
 
+  "Settlements for this dispute skipped by batchProcessSettlements (SettlementSkipped)"
+  skippedSettlements: Int!
+
+  "Skipped settlement messages for this dispute"
+  settlementSkips: [L3SettlementSkip!]! @derivedFrom(field: "bridgedDispute")
+
   settled: Boolean!
   outcome: L3DisputeState
   initiatorReturn: BigInt
   counterpartyReturn: BigInt
   settledAt: BigInt
   settlementTx: Bytes
+}
+
+enum L3SettlementSkipReason {
+  "The L2 dispute was never bridged"
+  NOT_BRIDGED
+  "l3DisputeId is not the bridged dispute's L3 id"
+  L3_DISPUTE_ID_MISMATCH
+  "Already settled, including earlier in the same batch"
+  ALREADY_SETTLED
+  "Nonzero stateProof that is not a finalized root"
+  STATE_ROOT_NOT_FINALIZED
+  "A reason code this subgraph does not know (see reasonCode)"
+  UNKNOWN
+}
+
+"""
+Settlement message skipped by batchProcessSettlements instead of reverting the batch (SettlementSkipped)
+"""
+type L3SettlementSkip @entity(immutable: true) {
+  "<txHash>-<logIndex>"
+  id: ID!
+
+  bridge: Bytes!
+
+  "L2 (ILRM) dispute id named in the message"
+  l2DisputeId: BigInt!
+
+  "L3 dispute id named in the message"
+  l3DisputeId: BigInt!
+
+  reason: L3SettlementSkipReason!
+
+  "IL3Bridge.SettlementSkipReason value as emitted"
+  reasonCode: Int!
+
+  "Bridged dispute with that L2 id; null for NOT_BRIDGED"
+  bridgedDispute: L3BridgedDispute
+
+  "Linked ILRM dispute (by L2 id)"
+  dispute: Dispute
+
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  txHash: Bytes!
 }
 
 """
@@ -959,6 +1060,9 @@ type L3Metric @entity(immutable: false) {
   rewardsPaid: BigInt!
   disputesBridged: Int!
   disputesSettled: Int!
+
+  "Settlement messages skipped by batchProcessSettlements (SettlementSkipped)"
+  settlementsSkipped: Int!
 }
 
 # =============================================================================
@@ -1116,6 +1220,9 @@ type DailyMetric @entity(immutable: false) {
   "Stake subsidies repaid to funders (SubsidyReturned)"
   totalSubsidiesReturned: BigInt!
 
+  "Initiator incentives paid on non-participation (InitiatorIncentivePaid)"
+  initiatorIncentivesPaid: BigInt!
+
   "Parties whose first dispute was initiated this day"
   newParticipants: Int!
 
@@ -1152,6 +1259,18 @@ type ProtocolMetric @entity(immutable: false) {
   "Stake subsidies repaid to funders (SubsidyReturned)"
   totalSubsidiesReturned: BigInt!
 
+  "Initiator incentives paid on non-participation (InitiatorIncentivePaid amount)"
+  totalInitiatorIncentivesPaid: BigInt!
+
+  "Uncapped initiator incentives those payouts were derived from (InitiatorIncentivePaid uncappedAmount)"
+  totalInitiatorIncentivesUncapped: BigInt!
+
+  "Initiator incentives paid below the uncapped amount (a cap or the token reserves bound them)"
+  cappedInitiatorIncentives: BigInt!
+
+  "Advisory Oracle requests ILRM could not make or that reverted (OracleRequestFailed)"
+  totalOracleRequestFailures: BigInt!
+
   "Addresses that took part in at least one dispute"
   uniqueParticipants: BigInt!
 
@@ -1166,7 +1285,10 @@ type ProtocolMetric @entity(immutable: false) {
   "L3 state commitments submitted"
   totalL3Commitments: BigInt!
 
-  "Mean blocks from initiation to resolution"
+  "Sum over resolved disputes of the blocks from initiation to resolution"
+  totalResolutionBlocks: BigInt!
+
+  "Mean blocks from initiation to resolution: totalResolutionBlocks / resolvedDisputes, rounded down"
   avgResolutionBlocks: BigInt!
 
   "Last updated block"

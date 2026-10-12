@@ -8,6 +8,10 @@
  *   - every subgraph.yaml handler names an event the compiled contract emits (exact signature)
  *   - subgraph/abis holds the same fragment (parameter names included) for every handled event,
  *     so `graph codegen` types match the contract
+ *   - every contract function a mapping eth_calls through the generated bindings (ILRM.disputes,
+ *     L3Bridge.getChallengeDeadline, AssetRegistry.getLicense) exists in the compiled contract and
+ *     subgraph/abis holds exactly its compiled fragment (inputs, outputs and struct component names),
+ *     so the call's signature and the decoded fields match the deployed contract
  *   - every handler is exported by its mapping file and no exported handler is unused
  *   - every entity a data source lists exists in schema.graphql
  * New contract events do not fail these checks; `npm run check-abis` (in subgraph/) lists them.
@@ -21,6 +25,7 @@ const {
   SUBGRAPH_DIR,
   loadManifest,
   loadAbiSources,
+  contractCalls,
   eventSignature,
   abiEvents,
   readAbiFile
@@ -28,6 +33,17 @@ const {
 
 function exportedHandlers(source) {
   return [...source.matchAll(/^export function (handle\w+)\s*\(/gm)].map((m) => m[1]);
+}
+
+function abiFunctions(abi, name) {
+  return abi.filter((f) => f.type === "function" && f.name === name);
+}
+
+/** Contract calls of every data source's mapping: { ds, contract, fn } */
+function mappingCalls(manifest) {
+  return manifest.dataSources.flatMap((ds) =>
+    contractCalls(fs.readFileSync(ds.mappingFile, "utf8")).map((c) => ({ ds, ...c }))
+  );
 }
 
 function schemaEntities() {
@@ -86,6 +102,23 @@ describe("Subgraph manifest", function () {
         }
       });
 
+      it("ships the compiled fragment of every contract function its mapping calls", function () {
+        for (const { contract, fn } of contractCalls(fs.readFileSync(ds.mappingFile, "utf8"))) {
+          const call = `${ds.name} mapping calls ${contract}.${fn}`;
+          const abiEntry = ds.abis.find((a) => a.name === contract);
+          expect(abiEntry, `${call}, but ${contract} is not in its mapping.abis`).to.not.equal(undefined);
+          expect(sources, `${call}, but abi-sources.json has no ${contract}`).to.have.property(contract);
+
+          const compiledFns = abiFunctions(compiled[contract] || [], fn);
+          expect(compiledFns.length, `${call}: compiled ${contract} has ${compiledFns.length} functions named ${fn}`).to.equal(
+            1
+          );
+          const shippedFns = abiFunctions(readAbiFile(abiEntry.file), fn);
+          const file = path.basename(abiEntry.file);
+          expect(shippedFns, `${file}: ${fn} differs from the compiled fragment`).to.deep.equal(compiledFns);
+        }
+      });
+
       it("exports every handler from its mapping and none besides", function () {
         expect(fs.existsSync(ds.mappingFile), `${ds.mappingFile} is missing`).to.equal(true);
         const exported = exportedHandlers(fs.readFileSync(ds.mappingFile, "utf8"));
@@ -104,6 +137,15 @@ describe("Subgraph manifest", function () {
     });
   }
 
+  it("finds the eth_calls the mappings make", function () {
+    // Guards the scanner: if it stopped recognising the calls, the fragment check above would pass vacuously
+    expect(mappingCalls(manifest).map((c) => `${c.contract}.${c.fn}`)).to.include.members([
+      "ILRM.disputes",
+      "L3Bridge.getChallengeDeadline",
+      "AssetRegistry.getLicense"
+    ]);
+  });
+
   it("indexes the proposal-round, subsidy-escrow and fraud-proof lifecycle events", function () {
     const handled = new Set(manifest.dataSources.flatMap((ds) => ds.eventHandlers.map((h) => `${ds.name}.${h.event}`)));
     const required = [
@@ -111,7 +153,12 @@ describe("Subgraph manifest", function () {
       "ILRM.StakeSubsidized(indexed uint256,indexed address,indexed address,uint256)",
       "ILRM.SubsidyReturned(indexed uint256,indexed address,uint256)",
       "ILRM.SubsidyTreasuryUpdated(indexed address,indexed address)",
+      "ILRM.ProposalVoided(indexed uint256,indexed uint256,bytes32)",
+      "ILRM.OracleRequestFailed(indexed uint256,indexed uint256)",
+      "ILRM.InitiatorIncentivePaid(indexed uint256,indexed address,uint256,uint256)",
+      "ILRM.InitiatorIncentiveCapsUpdated(uint256,uint256,uint256)",
       "Treasury.SubsidyFunded(indexed address,indexed uint256,uint256)",
+      "Oracle.ProposalRequestCancelled(indexed uint256)",
       "Oracle.ProposalSubmittedToILRM(indexed uint256,bytes32,indexed address)",
       "Oracle.ProposalRoundFilled(indexed uint256,indexed uint256,bytes32,uint256)",
       "Oracle.ProposalRoundReopened(indexed uint256,indexed uint256,bytes32)",
@@ -121,6 +168,7 @@ describe("Subgraph manifest", function () {
       "L3Bridge.FraudProofRefunded(indexed bytes32,indexed bytes32,indexed address,uint256)",
       "L3Bridge.FraudProofForfeited(indexed bytes32,indexed bytes32,indexed address,uint256)",
       "L3Bridge.CommittedChainRolledBack(indexed bytes32,indexed bytes32,uint256)",
+      "L3Bridge.SettlementSkipped(indexed uint256,indexed uint256,uint8)",
       "AssetRegistry.AssetsFrozen(indexed uint256,indexed address,bytes32[])"
     ];
     expect(required.filter((r) => !handled.has(r))).to.deep.equal([]);
