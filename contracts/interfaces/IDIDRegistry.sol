@@ -99,9 +99,13 @@ interface IDIDRegistry {
     /// @notice Emitted when a credential is revoked
     event CredentialRevoked(bytes32 indexed credentialId, address indexed revoker, string reason);
 
-    /// @notice Emitted when the recorded sybil score changes (on issuance, revocation, revokeIssuerCredentials,
-    ///         cleanup or calculateSybilScore). Expiry and issuer changes alter the live score without an event
-    ///         until one of those calls records it.
+    /// @notice Emitted by renewCredential after CredentialRevoked (reason "superseded") for the old credential and
+    ///         CredentialIssued for its replacement, linking the two
+    event CredentialSuperseded(bytes32 indexed oldCredentialId, bytes32 indexed newCredentialId, bytes32 indexed did);
+
+    /// @notice Emitted when the recorded sybil score changes (on issuance, renewal, revocation,
+    ///         revokeIssuerCredentials, cleanup or calculateSybilScore). Expiry and issuer changes alter the live
+    ///         score without an event until one of those calls records it.
     event SybilScoreUpdated(bytes32 indexed did, uint256 oldScore, uint256 newScore);
 
     /// @notice Emitted when a trusted issuer is added
@@ -130,8 +134,11 @@ interface IDIDRegistry {
     /// @notice DID already holds MAX_CREDENTIALS_FOR_SCORE credentials that are neither revoked nor expired.
     error TooManyCredentials(bytes32 did);
     /// @notice The issuer already holds MAX_CREDENTIALS_PER_ISSUER of the DID's credentials that are neither
-    ///         revoked nor expired.
+    ///         revoked nor expired. renewCredential reuses the renewed credential's slot, so it hits this limit only
+    ///         when that credential had expired and was already pruned.
     error IssuerCredentialLimit(bytes32 did, address issuer);
+    /// @notice Only a credential's own issuer may renew (supersede) it.
+    error NotCredentialIssuer(bytes32 credentialId, address caller);
     /// @notice A credential's expiry must be 0 (never) or later than the current block timestamp.
     error ExpiryNotInFuture(uint256 expiresAt);
 
@@ -219,6 +226,8 @@ interface IDIDRegistry {
      *      entries are pruned first (swap-and-pop); if the issuer is still at its limit the call reverts with
      *      IssuerCredentialLimit, and if the array is still full with TooManyCredentials. The DID controller can
      *      revoke credentials (one at a time, or all of one issuer's via revokeIssuerCredentials) to make room.
+     *      To replace one of its own credentials (e.g. renew it before it expires), an issuer calls
+     *      renewCredential instead, which needs no extra slot.
      *      Checks run in this order: paused, trusted issuer, attestation type, DID exists and is active, expiry,
      *      issuer limit, DID limit.
      */
@@ -231,6 +240,28 @@ interface IDIDRegistry {
     ) external returns (bytes32 credentialId);
 
     /**
+     * @notice Supersede one of the caller's own credentials with a new one of the same attestation type for the
+     *         same DID (e.g. renew it before it expires), without needing a free slot
+     * @param credentialId The credential to supersede: issued by the caller, not revoked (it may have expired)
+     * @param claimHash Hash of the replacement's claim data
+     * @param expiresAt Replacement's expiry (0 = never); otherwise must be later than block.timestamp
+     *        (ExpiryNotInFuture)
+     * @param weight Replacement's weight for the sybil score (0-100)
+     * @return newCredentialId The replacement credential's ID
+     * @dev The old credential is revoked (CredentialRevoked, reason "superseded") and the replacement takes over
+     *      its slot in the DID's credential array, so the array length and the issuer's MAX_CREDENTIALS_PER_ISSUER
+     *      count are unchanged. Only if the old credential had expired and was already pruned does the replacement
+     *      need a slot, exactly as issueCredential would (same IssuerCredentialLimit / TooManyCredentials rules).
+     *      Emits CredentialRevoked, CredentialIssued and CredentialSuperseded. Checks run in this order: paused,
+     *      credential exists (CredentialNotFound), caller is its issuer (NotCredentialIssuer), not revoked
+     *      (CredentialAlreadyRevoked), then issueCredential's checks: trusted issuer, attestation type still
+     *      allowed, DID exists and is active, expiry.
+     */
+    function renewCredential(bytes32 credentialId, bytes32 claimHash, uint256 expiresAt, uint256 weight)
+        external
+        returns (bytes32 newCredentialId);
+
+    /**
      * @notice Revoke a credential
      * @param credentialId The credential to revoke
      * @param reason Reason for revocation
@@ -241,7 +272,8 @@ interface IDIDRegistry {
      * @notice Revoke every credential `issuer` holds in a DID and free their slots in one call
      * @dev Callable by the DID controller, or by `issuer` for its own credentials. Emits CredentialRevoked for
      *      each newly revoked credential, then prunes all revoked/expired entries from the DID's array and records
-     *      the new score. Works while paused.
+     *      the new score. Works while paused, whatever the DID's status (active, suspended or revoked), and for an
+     *      issuer that is no longer trusted (it can still clear its own credentials).
      * @param did The DID to clear
      * @param issuer The issuer whose credentials are revoked
      * @param reason Reason for revocation

@@ -69,7 +69,8 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
 
     /// @notice Entries each issuer holds in a DID's credential array: did => issuer => count
     /// @dev Incremented on issuance, decremented when an entry is pruned from the array; revoked and expired
-    ///      entries keep counting until pruned.
+    ///      entries keep counting until pruned. renewCredential reuses the superseded entry's slot and leaves the
+    ///      count unchanged (it takes a new slot only if that entry had expired and was already pruned).
     mapping(bytes32 => mapping(address => uint256)) private _issuerCredentialCount;
 
     /// @notice Credential counter for unique IDs
@@ -307,6 +308,77 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
         uint256 expiresAt,
         uint256 weight
     ) external override nonReentrant whenNotPaused returns (bytes32 credentialId) {
+        _requireCanIssue(did, attestationType, expiresAt);
+        _reserveSlot(did);
+
+        credentialId = _storeCredential(did, attestationType, claimHash, expiresAt, weight);
+
+        // Add to DID's credentials (written through the mapping so static analysis sees the array initialized)
+        _didCredentials[did].push(credentialId);
+        _issuerCredentialCount[did][msg.sender]++;
+
+        // Recalculate sybil score (covers any entries pruned above and the new credential)
+        _updateSybilScore(did);
+
+        emit CredentialIssued(credentialId, did, msg.sender, attestationType);
+    }
+
+    /**
+     * @inheritdoc IDIDRegistry
+     * @dev Bounded: one pass over the DID's credential array (at most MAX_CREDENTIALS_FOR_SCORE entries) to find
+     *      the superseded credential's slot, plus _reserveSlot's pruning pass only if it is no longer there.
+     */
+    function renewCredential(bytes32 credentialId, bytes32 claimHash, uint256 expiresAt, uint256 weight)
+        external
+        override
+        nonReentrant
+        whenNotPaused
+        returns (bytes32 newCredentialId)
+    {
+        Credential storage old = _credentials[credentialId];
+        if (old.issuer == address(0)) revert CredentialNotFound(credentialId);
+        // Only the issuer supersedes its own credential; the replacement keeps its DID and attestation type
+        if (old.issuer != msg.sender) revert NotCredentialIssuer(credentialId, msg.sender);
+        if (old.revoked) revert CredentialAlreadyRevoked(credentialId);
+
+        bytes32 did = old.did;
+        AttestationType attestationType = old.attestationType;
+        _requireCanIssue(did, attestationType, expiresAt);
+
+        old.revoked = true;
+        emit CredentialRevoked(credentialId, msg.sender, "superseded");
+
+        newCredentialId = _storeCredential(did, attestationType, claimHash, expiresAt, weight);
+
+        bytes32[] storage credIds = _didCredentials[did];
+        uint256 length = credIds.length;
+        uint256 slot = 0;
+        while (slot < length && credIds[slot] != credentialId) {
+            ++slot;
+        }
+        if (slot < length) {
+            // The replacement takes over the superseded credential's slot: the array length and the issuer's
+            // count are unchanged, so renewing (early or after expiry) never needs a free slot
+            credIds[slot] = newCredentialId;
+        } else {
+            // The superseded credential had expired and was already pruned: take a slot like a fresh issuance
+            _reserveSlot(did);
+            _didCredentials[did].push(newCredentialId);
+            _issuerCredentialCount[did][msg.sender]++;
+        }
+
+        // Recalculate sybil score (the superseded credential no longer counts, the replacement does)
+        _updateSybilScore(did);
+
+        emit CredentialIssued(newCredentialId, did, msg.sender, attestationType);
+        emit CredentialSuperseded(credentialId, newCredentialId, did);
+    }
+
+    /**
+     * @notice Checks shared by issueCredential and renewCredential, in this order: trusted issuer, attestation
+     *         type, DID exists and is active, expiry 0 (never) or strictly in the future
+     */
+    function _requireCanIssue(bytes32 did, AttestationType attestationType, uint256 expiresAt) internal view {
         // Verify issuer is trusted
         if (!_isTrustedIssuerInternal(msg.sender)) {
             revert NotTrustedIssuer(msg.sender);
@@ -322,24 +394,40 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
 
         // Reject credentials that would never be valid: expiry must be 0 (never) or strictly in the future
         if (expiresAt != 0 && expiresAt <= block.timestamp) revert ExpiryNotInFuture(expiresAt);
+    }
 
-        // Cap weight at 100
-        if (weight > 100) weight = 100;
-
-        // FIX M-04: a DID holds at most MAX_CREDENTIALS_FOR_SCORE credentials so the score always covers all of
-        // them, and one issuer holds at most MAX_CREDENTIALS_PER_ISSUER of them so it cannot fill the DID alone.
-        // When either limit is reached, prune revoked/expired entries first; reject if it is still reached.
-        bytes32[] storage credIds = _didCredentials[did];
+    /**
+     * @notice Make room in `did`'s credential array for one more credential from msg.sender
+     * @dev FIX M-04: a DID holds at most MAX_CREDENTIALS_FOR_SCORE credentials so the score always covers all of
+     *      them, and one issuer holds at most MAX_CREDENTIALS_PER_ISSUER of them so it cannot fill the DID alone.
+     *      When either limit is reached, prune revoked/expired entries first; reject if it is still reached.
+     */
+    function _reserveSlot(bytes32 did) internal {
         if (
             _issuerCredentialCount[did][msg.sender] >= MAX_CREDENTIALS_PER_ISSUER
-                || credIds.length >= MAX_CREDENTIALS_FOR_SCORE
+                || _didCredentials[did].length >= MAX_CREDENTIALS_FOR_SCORE
         ) {
             _pruneCredentials(did);
             if (_issuerCredentialCount[did][msg.sender] >= MAX_CREDENTIALS_PER_ISSUER) {
                 revert IssuerCredentialLimit(did, msg.sender);
             }
-            if (credIds.length >= MAX_CREDENTIALS_FOR_SCORE) revert TooManyCredentials(did);
+            if (_didCredentials[did].length >= MAX_CREDENTIALS_FOR_SCORE) revert TooManyCredentials(did);
         }
+    }
+
+    /**
+     * @notice Store a new credential issued by msg.sender (weight capped at 100) and return its ID
+     * @dev Does not touch the DID's credential array or the issuer's count; callers place the ID
+     */
+    function _storeCredential(
+        bytes32 did,
+        AttestationType attestationType,
+        bytes32 claimHash,
+        uint256 expiresAt,
+        uint256 weight
+    ) internal returns (bytes32 credentialId) {
+        // Cap weight at 100
+        if (weight > 100) weight = 100;
 
         // Generate credential ID
         _credentialCounter++;
@@ -359,16 +447,7 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
             revoked: false,
             weight: weight
         });
-
-        // Add to DID's credentials (written through the mapping so static analysis sees the array initialized)
-        _didCredentials[did].push(credentialId);
-        _issuerCredentialCount[did][msg.sender]++;
         totalCredentials++;
-
-        // Recalculate sybil score (covers any entries pruned above and the new credential)
-        _updateSybilScore(did);
-
-        emit CredentialIssued(credentialId, did, msg.sender, attestationType);
     }
 
     /**
@@ -396,7 +475,8 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
     /**
      * @inheritdoc IDIDRegistry
      * @dev Bounded: two passes over the DID's credential array, which never exceeds MAX_CREDENTIALS_FOR_SCORE.
-     *      Not pausable, like revokeCredential and cleanupCredentials.
+     *      Not pausable, like revokeCredential and cleanupCredentials. Like revokeCredential it does not check the
+     *      DID's status or whether the issuer is still trusted.
      */
     function revokeIssuerCredentials(bytes32 did, address issuer, string calldata reason)
         external
