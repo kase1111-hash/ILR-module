@@ -256,6 +256,10 @@ contract GovernanceTimelockTest is GovernanceTimelockFixture {
     }
 
     function test_Config_OpenExecutorTracksRole() public {
+        // Closing execution needs an explicit executor (closing the last one reverts, see the follow-up suite)
+        vm.prank(admin);
+        timelock.grantRole(EXECUTOR_ROLE, makeAddr("executor"));
+
         vm.prank(admin);
         timelock.setOpenExecutor(false);
         assertFalse(timelock.getTimelockConfig().openExecutor);
@@ -1338,7 +1342,7 @@ contract GovernanceTimelockTest is GovernanceTimelockFixture {
         assertTrue(timelock.isOperationDone(idB));
     }
 
-    function test_EmergencyPauseAllUnchanged() public {
+    function test_EmergencyPauseAllInstant_UnpauseQueued() public {
         vm.prank(admin);
         timelock.registerProtocolContract("ilrm", address(target));
 
@@ -1352,8 +1356,19 @@ contract GovernanceTimelockTest is GovernanceTimelockFixture {
         (bool ilrmPaused,,,) = timelock.getPauseStatus();
         assertTrue(ilrmPaused);
 
+        // Unpausing is queued at minDelay, not instant
         vm.prank(guardian);
-        timelock.emergencyUnpauseAll();
+        bytes32 id = timelock.emergencyUnpauseAll();
+        assertTrue(target.paused());
+
+        vm.warp(T0 + MIN);
+        timelock.execute(
+            address(timelock),
+            0,
+            abi.encodeCall(IGovernanceTimelock.emergencyUnpauseAll, ()),
+            bytes32(0),
+            timelock.getOperation(id).salt
+        );
         assertFalse(target.paused());
 
         assertEq(timelock.getProtocolContracts().ilrm, address(target));
@@ -1429,23 +1444,35 @@ contract GovernanceTimelockTest is GovernanceTimelockFixture {
 // Invariant suite
 // =========================================================================
 
+/// @notice Drives every scheduling, execution, cancellation, pause/unpause and executor path.
+/// @dev The suite runs with fail_on_revert = true: each action guards its preconditions and wraps the
+///      reverts it expects (StaleUnpause, LastExecutor) in vm.expectRevert, so any other revert, or a
+///      failed assertion inside an action, fails the run instead of being silently discarded.
 contract GovTimelockHandler is Test {
     GovernanceTimelock public timelock;
     GovTimelockTarget public target;
     address public admin;
     address public proposer;
     address public guardian;
+    address public executor = makeAddr("handlerExecutor");
 
     struct Call {
         address target;
         bytes data;
         bytes32 salt;
+        bool batch; // scheduled as a one-call batch (hashOperationBatch / executeBatch)
+        bool raw; // latest scheduling went through a raw OZ entry point (no metadata)
+        bool guardian; // queued by EMERGENCY_ROLE (reserved salt namespace)
+        bool unpause; // bound to the pause epoch it was scheduled in
+        uint256 epoch; // pause epoch at its latest scheduling
     }
 
     Call[] internal _calls;
-    bytes32[] public executedIds;
+    bytes32[] internal _executedIds;
     uint256 public saltCounter;
-    uint256 public emergencyCount;
+    uint256 public guardianOps;
+    uint256 public pauseCount;
+    uint256 public staleRejections;
 
     constructor(GovernanceTimelock tl, GovTimelockTarget t, address a, address p, address g) {
         timelock = tl;
@@ -1455,20 +1482,39 @@ contract GovTimelockHandler is Test {
         guardian = g;
     }
 
-    function executedCount() external view returns (uint256) {
-        return executedIds.length;
+    // ---- Views for the invariants ----
+
+    function callCount() external view returns (uint256) {
+        return _calls.length;
     }
 
+    function callAt(uint256 i) external view returns (Call memory) {
+        return _calls[i];
+    }
+
+    function idOf(uint256 i) public view returns (bytes32) {
+        Call storage c = _calls[i];
+        return c.batch
+            ? timelock.hashOperationBatch(_targets(c.target), _values(), _payloads(c.data), bytes32(0), c.salt)
+            : timelock.hashOperation(c.target, 0, c.data, bytes32(0), c.salt);
+    }
+
+    function executedCount() external view returns (uint256) {
+        return _executedIds.length;
+    }
+
+    function executedId(uint256 i) external view returns (bytes32) {
+        return _executedIds[i];
+    }
+
+    // ---- Scheduling ----
+
     function scheduleStandard(uint256 newFee, uint8 label) external {
-        IGovernanceTimelock.OperationType opType = IGovernanceTimelock.OperationType(label % 7);
-        if (opType == IGovernanceTimelock.OperationType.EmergencyAction) {
-            opType = IGovernanceTimelock.OperationType.ParameterChange;
-        }
         bytes memory data = abi.encodeCall(GovTimelockTarget.setFee, (newFee));
         bytes32 salt = bytes32(++saltCounter);
         vm.prank(proposer);
-        timelock.scheduleOperation(address(target), 0, data, bytes32(0), salt, opType, "");
-        _calls.push(Call(address(target), data, salt));
+        timelock.scheduleOperation(address(target), 0, data, bytes32(0), salt, _label(label), "");
+        _push(address(target), data, salt, false, false, false);
     }
 
     function scheduleCritical(address newOwner) external {
@@ -1478,7 +1524,7 @@ contract GovTimelockHandler is Test {
         timelock.scheduleOperation(
             address(target), 0, data, bytes32(0), salt, IGovernanceTimelock.OperationType.ParameterChange, ""
         );
-        _calls.push(Call(address(target), data, salt));
+        _push(address(target), data, salt, false, false, false);
     }
 
     function scheduleRaw(uint256 newFee, uint256 extra) external {
@@ -1487,34 +1533,135 @@ contract GovTimelockHandler is Test {
         uint256 delay = timelock.getRequiredDelay(address(target), data) + _bound(extra, 0, 1 days);
         vm.prank(proposer);
         timelock.schedule(address(target), 0, data, bytes32(0), salt, delay);
-        _calls.push(Call(address(target), data, salt));
+        _push(address(target), data, salt, false, true, false);
+    }
+
+    /// @dev 7-argument scheduleBatch of a standard call: the label floor alone sets the delay
+    function scheduleBatchLabelled(uint256 newFee, uint8 label) external {
+        IGovernanceTimelock.OperationType opType = _label(label);
+        bytes memory data = abi.encodeCall(GovTimelockTarget.setFee, (newFee));
+        bytes32 salt = bytes32(++saltCounter);
+        IGovernanceTimelock.TimelockConfig memory cfg = timelock.getTimelockConfig();
+        bool longLabel = opType == IGovernanceTimelock.OperationType.ContractUpgrade
+            || opType == IGovernanceTimelock.OperationType.OwnershipTransfer;
+
+        vm.prank(proposer);
+        bytes32 id =
+            timelock.scheduleBatch(_targets(address(target)), _values(), _payloads(data), bytes32(0), salt, opType, "");
+        assertEq(timelock.getTimestamp(id), block.timestamp + (longLabel ? cfg.longDelay : cfg.minDelay));
+        _push(address(target), data, salt, true, false, false);
     }
 
     function scheduleEmergency(address who) external {
         bytes memory data = abi.encodeCall(GovTimelockTarget.revokeThing, (who));
         vm.prank(guardian);
         bytes32 id = timelock.executeEmergency(address(target), data, "drill");
-        emergencyCount++;
-        _calls.push(Call(address(target), data, timelock.getOperation(id).salt));
+        guardianOps++;
+        _push(address(target), data, timelock.getOperation(id).salt, false, false, true);
     }
+
+    /// @dev Guardian emergencyUnpauseAll, or a proposer's raw unpause() of the target
+    function queueUnpause(bool viaGuardian) external {
+        if (viaGuardian) {
+            vm.prank(guardian);
+            bytes32 id = timelock.emergencyUnpauseAll();
+            guardianOps++;
+            _push(
+                address(timelock),
+                abi.encodeCall(IGovernanceTimelock.emergencyUnpauseAll, ()),
+                timelock.getOperation(id).salt,
+                false,
+                false,
+                true
+            );
+        } else {
+            bytes memory data = abi.encodeCall(GovTimelockTarget.unpause, ());
+            bytes32 salt = bytes32(++saltCounter);
+            uint256 delay = timelock.getRequiredDelay(address(target), data);
+            vm.prank(proposer);
+            timelock.schedule(address(target), 0, data, bytes32(0), salt, delay);
+            _push(address(target), data, salt, false, true, false);
+        }
+    }
+
+    /// @dev Cancel (if pending) and re-schedule a proposer operation through the raw OZ entry point
+    function rescheduleRaw(uint256 idx) external {
+        if (_calls.length == 0) return;
+        uint256 i = idx % _calls.length;
+        Call storage c = _calls[i];
+        if (c.guardian) return; // reserved salt namespace
+        bytes32 id = idOf(i);
+        if (timelock.isOperationDone(id)) return;
+        if (timelock.isOperationPending(id)) {
+            vm.prank(proposer);
+            timelock.cancel(id);
+        }
+
+        uint256 delay = timelock.getRequiredDelay(c.target, c.data);
+        vm.prank(proposer);
+        if (c.batch) {
+            timelock.scheduleBatch(_targets(c.target), _values(), _payloads(c.data), bytes32(0), c.salt, delay);
+        } else {
+            timelock.schedule(c.target, 0, c.data, bytes32(0), c.salt, delay);
+        }
+        c.raw = true;
+        c.epoch = timelock.pauseEpoch();
+    }
+
+    // ---- Execution / cancellation ----
 
     function execute(uint256 idx) external {
         if (_calls.length == 0) return;
-        Call memory c = _calls[idx % _calls.length];
-        bytes32 id = timelock.hashOperation(c.target, 0, c.data, bytes32(0), c.salt);
+        uint256 i = idx % _calls.length;
+        Call memory c = _calls[i];
+        bytes32 id = idOf(i);
         if (!timelock.isOperationReady(id)) return;
-        timelock.execute(c.target, 0, c.data, bytes32(0), c.salt);
-        executedIds.push(id);
+        // A direct unpause() of a running target reverts in the target itself; nothing to check there
+        if (c.target == address(target) && bytes4(c.data) == GovTimelockTarget.unpause.selector && !target.paused()) {
+            return;
+        }
+
+        uint256 epoch = timelock.pauseEpoch();
+        bool stale = c.unpause && c.epoch != epoch;
+        address caller = timelock.hasRole(timelock.EXECUTOR_ROLE(), address(0)) ? address(this) : executor;
+
+        if (stale) {
+            vm.expectRevert(abi.encodeWithSelector(IGovernanceTimelock.StaleUnpause.selector, id, c.epoch, epoch));
+        }
+        vm.prank(caller);
+        if (c.batch) {
+            timelock.executeBatch(_targets(c.target), _values(), _payloads(c.data), bytes32(0), c.salt);
+        } else {
+            timelock.execute(c.target, 0, c.data, bytes32(0), c.salt);
+        }
+
+        if (stale) {
+            staleRejections++;
+            assertTrue(timelock.isOperationReady(id));
+        } else {
+            _executedIds.push(id);
+            if (c.unpause) assertFalse(target.paused());
+        }
     }
 
     function cancel(uint256 idx) external {
         if (_calls.length == 0) return;
-        Call memory c = _calls[idx % _calls.length];
-        bytes32 id = timelock.hashOperation(c.target, 0, c.data, bytes32(0), c.salt);
+        bytes32 id = idOf(idx % _calls.length);
         if (!timelock.isOperationPending(id)) return;
         vm.prank(proposer);
         timelock.cancel(id);
     }
+
+    // ---- Pause ----
+
+    function pauseAll() external {
+        vm.prank(guardian);
+        timelock.emergencyPauseAll("drill");
+        pauseCount++;
+        assertTrue(target.paused());
+    }
+
+    // ---- Configuration ----
 
     function updateDelays(uint256 minD, uint256 emD, uint256 longD) external {
         minD = _bound(minD, 1 hours, 30 days);
@@ -1524,8 +1671,57 @@ contract GovTimelockHandler is Test {
         timelock.updateDelays(minD, emD, longD);
     }
 
+    function setOpenExecution(bool open) external {
+        bytes32 role = timelock.EXECUTOR_ROLE();
+        if (!open && timelock.hasRole(role, address(0)) && !timelock.hasRole(role, executor)) {
+            vm.expectRevert(abi.encodeWithSelector(IGovernanceTimelock.LastExecutor.selector, address(0)));
+        }
+        vm.prank(admin);
+        timelock.setOpenExecutor(open);
+    }
+
+    function setExplicitExecutor(bool grant) external {
+        bytes32 role = timelock.EXECUTOR_ROLE();
+        if (!grant && timelock.hasRole(role, executor) && !timelock.hasRole(role, address(0))) {
+            vm.expectRevert(abi.encodeWithSelector(IGovernanceTimelock.LastExecutor.selector, executor));
+        }
+        vm.prank(admin);
+        if (grant) timelock.grantRole(role, executor);
+        else timelock.revokeRole(role, executor);
+    }
+
     function warp(uint256 dt) external {
         vm.warp(block.timestamp + _bound(dt, 0, 5 days));
+    }
+
+    // ---- Helpers ----
+
+    function _push(address tgt, bytes memory data, bytes32 salt, bool batch, bool raw, bool byGuardian) internal {
+        bytes4 sel = bytes4(data);
+        bool unpause = sel == GovTimelockTarget.unpause.selector
+            || (tgt == address(timelock) && sel == IGovernanceTimelock.emergencyUnpauseAll.selector);
+        _calls.push(Call(tgt, data, salt, batch, raw, byGuardian, unpause, timelock.pauseEpoch()));
+    }
+
+    function _label(uint8 label) internal pure returns (IGovernanceTimelock.OperationType opType) {
+        opType = IGovernanceTimelock.OperationType(label % 7);
+        if (opType == IGovernanceTimelock.OperationType.EmergencyAction) {
+            opType = IGovernanceTimelock.OperationType.ParameterChange;
+        }
+    }
+
+    function _targets(address a) internal pure returns (address[] memory arr) {
+        arr = new address[](1);
+        arr[0] = a;
+    }
+
+    function _values() internal pure returns (uint256[] memory arr) {
+        arr = new uint256[](1);
+    }
+
+    function _payloads(bytes memory d) internal pure returns (bytes[] memory arr) {
+        arr = new bytes[](1);
+        arr[0] = d;
     }
 }
 
@@ -1535,21 +1731,49 @@ contract GovernanceTimelockInvariantTest is GovernanceTimelockFixture {
     function setUp() public override {
         super.setUp();
         handler = new GovTimelockHandler(timelock, target, admin, proposer, guardian);
+
+        // emergencyPauseAll / emergencyUnpauseAll act on the target
+        vm.prank(admin);
+        timelock.registerProtocolContract("ilrm", address(target));
+
+        // Fuzz the actions only (the handler's getters revert on out-of-range indexes)
+        bytes4[] memory selectors = new bytes4[](16);
+        selectors[0] = GovTimelockHandler.scheduleStandard.selector;
+        selectors[1] = GovTimelockHandler.scheduleCritical.selector;
+        selectors[2] = GovTimelockHandler.scheduleRaw.selector;
+        selectors[3] = GovTimelockHandler.scheduleBatchLabelled.selector;
+        selectors[4] = GovTimelockHandler.scheduleEmergency.selector;
+        selectors[5] = GovTimelockHandler.queueUnpause.selector;
+        selectors[6] = GovTimelockHandler.rescheduleRaw.selector;
+        selectors[7] = GovTimelockHandler.execute.selector;
+        selectors[8] = GovTimelockHandler.execute.selector; // weight execution
+        selectors[9] = GovTimelockHandler.cancel.selector;
+        selectors[10] = GovTimelockHandler.pauseAll.selector;
+        selectors[11] = GovTimelockHandler.updateDelays.selector;
+        selectors[12] = GovTimelockHandler.setOpenExecution.selector;
+        selectors[13] = GovTimelockHandler.setExplicitExecutor.selector;
+        selectors[14] = GovTimelockHandler.warp.selector;
+        selectors[15] = GovTimelockHandler.warp.selector; // weight time
+        targetSelector(FuzzSelector({addr: address(handler), selectors: selectors}));
         targetContract(address(handler));
     }
 
     /// forge-config: default.invariant.runs = 64
     /// forge-config: default.invariant.depth = 64
+    /// forge-config: default.invariant.fail-on-revert = true
     /// forge-config: ci.invariant.runs = 64
     /// forge-config: ci.invariant.depth = 64
+    /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_MinDelayMatchesConfig() public view {
         assertEq(timelock.getMinDelay(), timelock.getTimelockConfig().minDelay);
     }
 
     /// forge-config: default.invariant.runs = 64
     /// forge-config: default.invariant.depth = 64
+    /// forge-config: default.invariant.fail-on-revert = true
     /// forge-config: ci.invariant.runs = 64
     /// forge-config: ci.invariant.depth = 64
+    /// forge-config: ci.invariant.fail-on-revert = true
     function invariant_DelayBoundsHold() public view {
         IGovernanceTimelock.TimelockConfig memory cfg = timelock.getTimelockConfig();
         assertGe(cfg.minDelay, 1 hours);
@@ -1560,27 +1784,102 @@ contract GovernanceTimelockInvariantTest is GovernanceTimelockFixture {
         assertLe(cfg.longDelay, 60 days);
     }
 
+    /// @dev Pending list: OZ-pending, metadata in sync, and no duplicate entries (the property the
+    ///      removed _storeOperation dedupe guard was meant to protect)
     /// forge-config: default.invariant.runs = 64
     /// forge-config: default.invariant.depth = 64
+    /// forge-config: default.invariant.fail-on-revert = true
     /// forge-config: ci.invariant.runs = 64
     /// forge-config: ci.invariant.depth = 64
-    function invariant_PendingMetadataMatchesOz() public view {
+    /// forge-config: ci.invariant.fail-on-revert = true
+    function invariant_PendingListConsistent() public view {
         bytes32[] memory pending = timelock.getPendingOperations();
+        assertEq(pending.length, timelock.getPendingOperationsCount());
         for (uint256 i = 0; i < pending.length; ++i) {
             assertTrue(timelock.isOperationPending(pending[i]));
-            assertEq(timelock.getOperation(pending[i]).readyAt, timelock.getTimestamp(pending[i]));
+            IGovernanceTimelock.GovernanceOperation memory op = timelock.getOperation(pending[i]);
+            assertEq(op.id, pending[i]);
+            assertEq(op.readyAt, timelock.getTimestamp(pending[i]));
+            IGovernanceTimelock.OperationStatus expected = timelock.isOperationReady(pending[i])
+                ? IGovernanceTimelock.OperationStatus.Ready
+                : IGovernanceTimelock.OperationStatus.Pending;
+            assertEq(uint256(op.status), uint256(expected));
+            for (uint256 j = 0; j < i; ++j) {
+                assertTrue(pending[j] != pending[i], "duplicate pending entry");
+            }
         }
+    }
+
+    /// @dev getOperation never contradicts OZ: raw schedules (including raw re-schedules of a
+    ///      previously tracked id) carry no metadata, tracked ones mirror the OZ state
+    /// forge-config: default.invariant.runs = 64
+    /// forge-config: default.invariant.depth = 64
+    /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: ci.invariant.runs = 64
+    /// forge-config: ci.invariant.depth = 64
+    /// forge-config: ci.invariant.fail-on-revert = true
+    function invariant_MetadataMatchesOz() public view {
+        uint256 trackedPending;
+        uint256 n = handler.callCount();
+        for (uint256 i = 0; i < n; ++i) {
+            GovTimelockHandler.Call memory c = handler.callAt(i);
+            bytes32 id = handler.idOf(i);
+            IGovernanceTimelock.GovernanceOperation memory op = timelock.getOperation(id);
+
+            if (c.raw) {
+                assertEq(uint256(op.status), uint256(IGovernanceTimelock.OperationStatus.None), "raw op has metadata");
+                assertEq(op.scheduledAt, 0);
+                continue;
+            }
+
+            assertEq(uint256(op.status), uint256(_expectedStatus(timelock.getOperationState(id))), "status vs OZ");
+            assertEq(op.id, id);
+            assertEq(op.salt, c.salt);
+            if (timelock.isOperationPending(id)) {
+                assertEq(op.readyAt, timelock.getTimestamp(id));
+                trackedPending++;
+            }
+        }
+        assertEq(timelock.getPendingOperationsCount(), trackedPending);
     }
 
     /// forge-config: default.invariant.runs = 64
     /// forge-config: default.invariant.depth = 64
+    /// forge-config: default.invariant.fail-on-revert = true
     /// forge-config: ci.invariant.runs = 64
     /// forge-config: ci.invariant.depth = 64
-    function invariant_ExecutedStayDoneAndNonceTracksEmergencies() public view {
+    /// forge-config: ci.invariant.fail-on-revert = true
+    function invariant_ExecutedStayDoneAndCountersTrack() public view {
         uint256 n = handler.executedCount();
         for (uint256 i = 0; i < n; ++i) {
-            assertEq(timelock.getTimestamp(handler.executedIds(i)), 1);
+            assertEq(timelock.getTimestamp(handler.executedId(i)), 1);
         }
-        assertEq(timelock.emergencyNonce(), handler.emergencyCount());
+        assertEq(timelock.emergencyNonce(), handler.guardianOps());
+        assertEq(timelock.pauseEpoch(), handler.pauseCount());
+    }
+
+    /// forge-config: default.invariant.runs = 64
+    /// forge-config: default.invariant.depth = 64
+    /// forge-config: default.invariant.fail-on-revert = true
+    /// forge-config: ci.invariant.runs = 64
+    /// forge-config: ci.invariant.depth = 64
+    /// forge-config: ci.invariant.fail-on-revert = true
+    function invariant_ExecutionNeverBricked() public view {
+        bytes32 role = timelock.EXECUTOR_ROLE();
+        uint256 holders =
+            (timelock.hasRole(role, address(0)) ? 1 : 0) + (timelock.hasRole(role, handler.executor()) ? 1 : 0);
+        assertGe(holders, 1);
+        assertEq(timelock.getExecutorCount(), holders);
+    }
+
+    function _expectedStatus(TimelockController.OperationState s)
+        internal
+        pure
+        returns (IGovernanceTimelock.OperationStatus)
+    {
+        if (s == TimelockController.OperationState.Unset) return IGovernanceTimelock.OperationStatus.Cancelled;
+        if (s == TimelockController.OperationState.Waiting) return IGovernanceTimelock.OperationStatus.Pending;
+        if (s == TimelockController.OperationState.Ready) return IGovernanceTimelock.OperationStatus.Ready;
+        return IGovernanceTimelock.OperationStatus.Executed;
     }
 }

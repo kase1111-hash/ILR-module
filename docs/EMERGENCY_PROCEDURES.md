@@ -517,3 +517,31 @@ Full post-mortem: [Link]
 ---
 
 *This document contains sensitive operational information. Handle appropriately.*
+
+---
+
+## Addendum: Unpausing Through the GovernanceTimelock Is Queued
+
+This updates step 2 of "Unpausing After Incident" and the guardian procedures above.
+
+- `timelock.emergencyPauseAll(reason)` is still instant (EMERGENCY_ROLE). Each call starts a new
+  pause epoch (`timelock.pauseEpoch()`).
+- `timelock.emergencyUnpauseAll()` no longer unpauses. Called by EMERGENCY_ROLE it **queues** the
+  unpause at the standard delay (minDelay, 2 days by default) and returns the operation id:
+  ```solidity
+  bytes32 id = timelock.emergencyUnpauseAll();               // emits EmergencyActionScheduled
+  // ... CANCELLER_ROLE can veto it with timelock.cancel(id) during the delay ...
+  bytes32 salt = timelock.getOperation(id).salt;
+  timelock.execute(timelock, 0, abi.encodeCall(IGovernanceTimelock.emergencyUnpauseAll, ()), bytes32(0), salt);
+  ```
+  The final `execute` (any executor, after the delay) makes the timelock call itself, which unpauses
+  every registered contract and emits `EmergencyActionExecuted(..., "Emergency unpause all")`.
+- Any operation that unpauses (`unpause()` on any contract, or `emergencyUnpauseAll` on the timelock,
+  queued by a guardian or a proposer) can only execute in the pause epoch it was scheduled in. If you
+  pause again, every earlier unpause reverts with `StaleUnpause`: queue a new one once the new
+  incident is resolved, and cancel the stale ones (`timelock.cancel(id)`).
+- `executeEmergency` only queues its call too; it now emits `EmergencyActionScheduled`, and
+  `EmergencyActionExecuted` is only emitted when an action takes effect (a pause, or a queued unpause
+  when it executes).
+- A guardian that queues an unexpected unpause is a governance attack: cancel it (Action 4) and see
+  "If a Guardian (EMERGENCY_ROLE Holder) Is Rogue or Compromised" in `docs/MULTISIG_CONFIG.md`.
