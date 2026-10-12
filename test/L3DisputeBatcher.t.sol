@@ -58,8 +58,12 @@ contract QueueObservingBridge {
         }
     }
 
-    function batchProcessSettlements(IL3Bridge.DisputeSettlementMessage[] calldata) external {
+    function batchProcessSettlements(IL3Bridge.DisputeSettlementMessage[] calldata messages)
+        external
+        returns (uint256 processed)
+    {
         observedSettlements = batcher.getPendingSettlementsCount();
+        processed = messages.length;
     }
 }
 
@@ -264,16 +268,18 @@ contract L3DisputeBatcherTest is L3TestBase {
         _queue(_messages(1, 5));
         vm.warp(block.timestamp + batcher.MAX_BATCH_WAIT());
 
-        // Every queue call retries the overdue batch, fails in isolation and still succeeds
-        for (uint256 i = 0; i < 3; i++) {
-            vm.expectEmit(address(batcher));
-            emit AutoBatchFailed(6 + i, _notAuthorized(address(batcher)));
-            batcher.queueDisputeInitiation(_message(6 + i));
-        }
+        // The overdue batch fails in isolation and the queue call still succeeds
+        vm.expectEmit(address(batcher));
+        emit AutoBatchFailed(6, _notAuthorized(address(batcher)));
+        batcher.queueDisputeInitiation(_message(6));
+
+        // Later queue calls succeed too; during the backoff they do not retry (see L3BatcherBackoff.t.sol)
+        _queue(_messages(7, 2));
         assertEq(batcher.getPendingInitiationsCount(), 8);
 
-        // After the grant, the next queue call flushes everything
+        // After the grant and the backoff, the next queue call flushes everything
         l3Bridge.setDisputeBridger(address(batcher), true);
+        vm.warp(block.timestamp + batcher.AUTO_BATCH_RETRY_DELAY());
         batcher.queueDisputeInitiation(_message(9));
         assertEq(batcher.getPendingInitiationsCount(), 0);
         assertEq(l3Bridge.getTotalBridgedDisputes(), 9);
