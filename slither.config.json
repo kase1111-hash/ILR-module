@@ -8,7 +8,7 @@
   "exclude_low": false,
   "exclude_medium": false,
   "exclude_high": false,
-  "filter_paths": "lib/,node_modules/,contracts/mocks/,contracts/modules/,contracts/scaling/",
+  "filter_paths": "lib/,node_modules/,contracts/mocks/",
   "fail_on": "medium",
   "solc_remaps": [
     "@openzeppelin/=lib/openzeppelin-contracts/",
