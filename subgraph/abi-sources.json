@@ -1,0 +1,7 @@
+{
+  "ILRM": { "source": "contracts/ILRM.sol", "contract": "ILRM" },
+  "Treasury": { "source": "contracts/Treasury.sol", "contract": "NatLangChainTreasury" },
+  "Oracle": { "source": "contracts/Oracle.sol", "contract": "NatLangChainOracle" },
+  "L3Bridge": { "source": "contracts/scaling/L3Bridge.sol", "contract": "L3Bridge" },
+  "AssetRegistry": { "source": "contracts/AssetRegistry.sol", "contract": "NatLangChainAssetRegistry" }
+}

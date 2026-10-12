@@ -1,170 +1,519 @@
 // =============================================================================
 // L3Bridge Event Handlers - TheGraph Subgraph
 // =============================================================================
-// Handles all events from the L3Bridge layer 3 scaling contract
+// Handles every event of contracts/scaling/L3Bridge.sol.
+// L3Bridge has no batch ids: the unit of submission is a state commitment keyed
+// by its state root, placed at a 1-based height on a single canonical chain.
+// Event order inside one transaction mirrors the contract:
+//   revealFraudProof (win): FraudProofRevealed, CommittedChainRolledBack,
+//                           FraudProofSubmitted, FraudProofValidated
+//   revealFraudProof (else): FraudProofRevealed, FraudProofForfeited | FraudProofRefunded
+//   submitFraudProof:       CommittedChainRolledBack, FraudProofSubmitted, FraudProofValidated
 // =============================================================================
 
-import { BigInt, Bytes } from "@graphprotocol/graph-ts";
+import { Address, BigInt, Bytes, ethereum } from "@graphprotocol/graph-ts";
 import {
-  BatchSubmitted,
-  BatchFinalized,
-  ChallengeInitiated,
-  ChallengeResolved
+  L3Bridge,
+  BridgeStatusChanged,
+  CommittedChainRolledBack,
+  DisputeBridgeSkipped,
+  DisputeBridgedToL3,
+  DisputeBridgerUpdated,
+  DisputeSettledFromL3,
+  FeesWithdrawn,
+  FraudProofCommitted,
+  FraudProofForfeited,
+  FraudProofRefunded,
+  FraudProofRevealed,
+  FraudProofSubmitted,
+  FraudProofValidated,
+  OwnershipTransferStarted,
+  OwnershipTransferred,
+  Paused,
+  SequencerUpdated,
+  SettlementRelayerUpdated,
+  StateCommitmentFinalized,
+  StateCommitmentSubmitted,
+  Unpaused
 } from "../generated/L3Bridge/L3Bridge";
 import {
-  L3Batch,
-  L3Metric,
   FraudProofChallenge,
-  ProtocolMetric
+  FraudProofCommitment,
+  L3BridgedDispute,
+  L3Chain,
+  L3ChainSlot,
+  L3Metric,
+  L3StateCommitment
 } from "../generated/schema";
+import {
+  KIND_L3_BRIDGE,
+  ONE,
+  ZERO,
+  dayStart,
+  getOrCreateContract,
+  getOrCreateDailyMetric,
+  getOrCreateProtocolMetric,
+  isZeroBytes,
+  newAdminEvent,
+  recordOwnershipTransferStarted,
+  recordOwnershipTransferred,
+  recordPause,
+  setRole
+} from "./common";
 
 // =============================================================================
-// Helper Functions
+// Enum mirrors (IL3Bridge.sol)
 // =============================================================================
+
+function bridgeStatusName(value: i32): string {
+  if (value == 1) return "PAUSED";
+  if (value == 2) return "DEPRECATED";
+  return "ACTIVE";
+}
+
+function l3DisputeStateName(value: i32): string {
+  if (value == 1) return "ACTIVE";
+  if (value == 2) return "PROPOSAL_SUBMITTED";
+  if (value == 3) return "ACCEPTED";
+  if (value == 4) return "TIMED_OUT";
+  if (value == 5) return "SETTLED";
+  return "PENDING";
+}
+
+// =============================================================================
+// Helpers
+// =============================================================================
+
+function getOrCreateChain(bridge: Address): L3Chain {
+  const id = bridge.toHexString();
+  let chain = L3Chain.load(id);
+  if (chain == null) {
+    chain = new L3Chain(id);
+    chain.latestCommittedHeight = ZERO;
+    chain.latestFinalizedHeight = ZERO;
+    chain.latestFinalizedL3Block = ZERO;
+    chain.totalCommitments = ZERO;
+    chain.totalBridgedDisputes = ZERO;
+    chain.totalSettlements = ZERO;
+  }
+  return chain;
+}
+
+function slotId(bridge: Address, height: BigInt): string {
+  return bridge.toHexString() + "-" + height.toString();
+}
+
+function commitmentId(challenger: Address, commitHash: Bytes): string {
+  return challenger.toHexString() + "-" + commitHash.toHexString();
+}
 
 function getOrCreateL3Metric(timestamp: BigInt): L3Metric {
-  // Convert to day (86400 seconds)
-  let dayTimestamp = timestamp.div(BigInt.fromI32(86400)).times(BigInt.fromI32(86400));
-  let id = dayTimestamp.toString();
+  const date = dayStart(timestamp);
+  const id = date.toString();
   let metric = L3Metric.load(id);
-
   if (metric == null) {
     metric = new L3Metric(id);
-    metric.date = dayTimestamp;
-    metric.batchesSubmitted = 0;
-    metric.batchesFinalized = 0;
-    metric.challengesInitiated = 0;
-    metric.challengesSucceeded = 0;
-    metric.totalDisputesBatched = 0;
+    metric.date = date;
+    metric.commitmentsSubmitted = 0;
+    metric.commitmentsFinalized = 0;
+    metric.commitmentsRejected = 0;
+    metric.commitmentsOrphaned = 0;
+    metric.totalDisputesCommitted = ZERO;
+    metric.fraudProofsCommitted = 0;
+    metric.fraudProofsWon = 0;
+    metric.fraudProofsRefunded = 0;
+    metric.fraudProofsForfeited = 0;
+    metric.bondsForfeited = ZERO;
+    metric.rewardsPaid = ZERO;
+    metric.disputesBridged = 0;
+    metric.disputesSettled = 0;
   }
-
   return metric;
 }
 
-function getOrCreateProtocolMetric(): ProtocolMetric {
-  let id = "protocol";
-  let metric = ProtocolMetric.load(id);
-
-  if (metric == null) {
-    metric = new ProtocolMetric(id);
-    metric.totalDisputes = BigInt.fromI32(0);
-    metric.activeDisputes = BigInt.fromI32(0);
-    metric.resolvedDisputes = BigInt.fromI32(0);
-    metric.timedOutDisputes = BigInt.fromI32(0);
-    metric.totalValueStaked = BigInt.fromI32(0);
-    metric.totalValueBurned = BigInt.fromI32(0);
-    metric.totalSubsidiesDistributed = BigInt.fromI32(0);
-    metric.uniqueParticipants = BigInt.fromI32(0);
-    metric.totalCounterProposals = BigInt.fromI32(0);
-    metric.totalL3Batches = BigInt.fromI32(0);
-    metric.avgResolutionBlocks = BigInt.fromI32(0);
-    metric.lastUpdatedBlock = BigInt.fromI32(0);
+/** Successful challenge of `root`; the success events fill it in one transaction */
+function getOrCreateChallenge(root: Bytes, event: ethereum.Event): FraudProofChallenge {
+  const id = root.toHexString();
+  let challenge = FraudProofChallenge.load(id);
+  if (challenge == null) {
+    challenge = new FraudProofChallenge(id);
+    challenge.stateCommitment = id;
+    // Placeholders until FraudProofSubmitted (same transaction) names the challenger and dispute
+    challenge.challenger = Address.zero();
+    challenge.disputeId = ZERO;
+    challenge.mode = "DIRECT";
+    challenge.orphanedCount = 0;
+    challenge.timestamp = event.block.timestamp;
+    challenge.txHash = event.transaction.hash;
   }
+  return challenge;
+}
 
-  return metric;
+function resolveCommitment(
+  event: ethereum.Event,
+  challenger: Address,
+  commitHash: Bytes,
+  status: string
+): FraudProofCommitment | null {
+  const commitment = FraudProofCommitment.load(commitmentId(challenger, commitHash));
+  if (commitment == null) return null;
+  commitment.status = status;
+  commitment.resolvedAt = event.block.timestamp;
+  commitment.resolveTx = event.transaction.hash;
+  commitment.save();
+  return commitment;
 }
 
 // =============================================================================
-// Event Handlers
+// State commitments
 // =============================================================================
 
-export function handleBatchSubmitted(event: BatchSubmitted): void {
-  let batchId = event.params.batchId.toString();
-  let timestamp = event.block.timestamp;
+export function handleStateCommitmentSubmitted(event: StateCommitmentSubmitted): void {
+  const root = event.params.stateRoot;
+  const timestamp = event.block.timestamp;
+  const chain = getOrCreateChain(event.address);
 
-  // Create batch record
-  let batch = new L3Batch(batchId);
-  batch.stateRoot = event.params.stateRoot;
-  batch.disputeCount = event.params.disputeCount.toI32();
-  batch.submitter = event.params.submitter;
-  batch.submittedAt = timestamp;
-  batch.challenged = false;
-  batch.status = "PENDING";
-  batch.save();
+  // Mirrors submitStateCommitment: chained to the committed head, or to the finalized head
+  // when no commitment is pending; placed one above the committed head
+  const height = chain.latestCommittedHeight.plus(ONE);
+  const parent = chain.latestCommittedRoot !== null ? chain.latestCommittedRoot : chain.latestFinalizedRoot;
 
-  // Update L3 metrics
-  let metric = getOrCreateL3Metric(timestamp);
-  metric.batchesSubmitted = metric.batchesSubmitted + 1;
-  metric.totalDisputesBatched = metric.totalDisputesBatched + batch.disputeCount;
+  const commitment = new L3StateCommitment(root.toHexString());
+  commitment.bridge = event.address;
+  commitment.stateRoot = root;
+  commitment.l3BlockNumber = event.params.blockNumber;
+  commitment.disputeCount = event.params.disputeCount;
+  commitment.sequencer = event.params.sequencer;
+  commitment.height = height;
+  commitment.previousRoot = parent;
+  commitment.status = "PENDING";
+  commitment.submittedAt = timestamp;
+  commitment.submittedBlock = event.block.number;
+  commitment.txHash = event.transaction.hash;
+  // Snapshotted at submission and never changed afterwards
+  const deadline = L3Bridge.bind(event.address).try_getChallengeDeadline(root);
+  if (!deadline.reverted) commitment.challengeDeadline = deadline.value;
+  commitment.save();
+
+  const slot = new L3ChainSlot(slotId(event.address, height));
+  slot.root = root;
+  slot.save();
+
+  chain.latestCommittedRoot = root;
+  chain.latestCommittedHeight = height;
+  chain.totalCommitments = chain.totalCommitments.plus(ONE);
+  chain.save();
+
+  const metric = getOrCreateL3Metric(timestamp);
+  metric.commitmentsSubmitted = metric.commitmentsSubmitted + 1;
+  metric.totalDisputesCommitted = metric.totalDisputesCommitted.plus(event.params.disputeCount);
   metric.save();
 
-  // Update protocol metrics
-  let protocol = getOrCreateProtocolMetric();
-  protocol.totalL3Batches = protocol.totalL3Batches.plus(BigInt.fromI32(1));
-  protocol.lastUpdatedBlock = event.block.number;
+  const daily = getOrCreateDailyMetric(timestamp);
+  daily.l3Commitments = daily.l3Commitments + 1;
+  daily.save();
+
+  const protocol = getOrCreateProtocolMetric(event.block);
+  protocol.totalL3Commitments = protocol.totalL3Commitments.plus(ONE);
   protocol.save();
 }
 
-export function handleBatchFinalized(event: BatchFinalized): void {
-  let batchId = event.params.batchId.toString();
-  let timestamp = event.block.timestamp;
+export function handleStateCommitmentFinalized(event: StateCommitmentFinalized): void {
+  const commitment = L3StateCommitment.load(event.params.stateRoot.toHexString());
+  if (commitment == null) return;
 
-  let batch = L3Batch.load(batchId);
-  if (batch == null) {
-    return;
-  }
+  commitment.status = "FINALIZED";
+  commitment.finalizedAt = event.block.timestamp;
+  commitment.save();
 
-  batch.finalizedAt = timestamp;
-  batch.status = "FINALIZED";
-  batch.save();
+  const chain = getOrCreateChain(event.address);
+  chain.latestFinalizedRoot = event.params.stateRoot;
+  chain.latestFinalizedHeight = commitment.height;
+  chain.latestFinalizedL3Block = event.params.blockNumber;
+  chain.save();
 
-  // Update L3 metrics
-  let metric = getOrCreateL3Metric(timestamp);
-  metric.batchesFinalized = metric.batchesFinalized + 1;
+  const metric = getOrCreateL3Metric(event.block.timestamp);
+  metric.commitmentsFinalized = metric.commitmentsFinalized + 1;
   metric.save();
 }
 
-export function handleChallengeInitiated(event: ChallengeInitiated): void {
-  let batchId = event.params.batchId.toString();
-  let timestamp = event.block.timestamp;
+// =============================================================================
+// Fraud proofs (commit-reveal)
+// =============================================================================
 
-  let batch = L3Batch.load(batchId);
-  if (batch == null) {
-    return;
+export function handleFraudProofCommitted(event: FraudProofCommitted): void {
+  const commitment = new FraudProofCommitment(commitmentId(event.params.challenger, event.params.commitHash));
+  commitment.commitHash = event.params.commitHash;
+  commitment.stateCommitment = event.params.stateRoot.toHexString();
+  commitment.challenger = event.params.challenger;
+  commitment.bond = event.params.bond;
+  commitment.status = "PENDING";
+  commitment.committedAt = event.block.timestamp;
+  commitment.commitTx = event.transaction.hash;
+  commitment.save();
+
+  const metric = getOrCreateL3Metric(event.block.timestamp);
+  metric.fraudProofsCommitted = metric.fraudProofsCommitted + 1;
+  metric.save();
+}
+
+export function handleFraudProofRevealed(event: FraudProofRevealed): void {
+  const commitment = FraudProofCommitment.load(commitmentId(event.params.challenger, event.params.commitHash));
+  if (commitment == null) return;
+  commitment.revealedAt = event.block.timestamp;
+  commitment.save();
+
+  // Lets FraudProofValidated (same transaction, no commit hash) find the winning commitment
+  const stateCommitment = L3StateCommitment.load(event.params.stateRoot.toHexString());
+  if (stateCommitment != null) {
+    stateCommitment.lastRevealCommitment = commitment.id;
+    stateCommitment.lastRevealTx = event.transaction.hash;
+    stateCommitment.save();
+  }
+}
+
+export function handleFraudProofForfeited(event: FraudProofForfeited): void {
+  // Invalid or mismatched reveal, or never revealed (forfeitExpiredCommitment)
+  resolveCommitment(event, event.params.challenger, event.params.commitHash, "FORFEITED");
+
+  const metric = getOrCreateL3Metric(event.block.timestamp);
+  metric.fraudProofsForfeited = metric.fraudProofsForfeited + 1;
+  metric.bondsForfeited = metric.bondsForfeited.plus(event.params.bond);
+  metric.save();
+}
+
+export function handleFraudProofRefunded(event: FraudProofRefunded): void {
+  // Valid proof against a root that was already rejected or orphaned
+  resolveCommitment(event, event.params.challenger, event.params.commitHash, "REFUNDED");
+
+  const metric = getOrCreateL3Metric(event.block.timestamp);
+  metric.fraudProofsRefunded = metric.fraudProofsRefunded + 1;
+  metric.save();
+}
+
+// =============================================================================
+// Successful challenges
+// =============================================================================
+
+export function handleCommittedChainRolledBack(event: CommittedChainRolledBack): void {
+  const chain = getOrCreateChain(event.address);
+  const rejected = event.params.rejectedRoot;
+  const newHeight = event.params.newHeight;
+  const timestamp = event.block.timestamp;
+
+  // The rejected root and every root above it on the canonical chain are dead
+  let orphaned = 0;
+  let rejectedSeen = false;
+  for (let h = newHeight.plus(ONE); h.le(chain.latestCommittedHeight); h = h.plus(ONE)) {
+    const slot = L3ChainSlot.load(slotId(event.address, h));
+    if (slot == null) continue;
+    const commitment = L3StateCommitment.load(slot.root.toHexString());
+    if (commitment == null || commitment.status != "PENDING") continue;
+    if (slot.root.equals(rejected)) {
+      commitment.status = "REJECTED";
+      rejectedSeen = true;
+    } else {
+      commitment.status = "ORPHANED";
+      orphaned++;
+    }
+    commitment.invalidatedAt = timestamp;
+    commitment.save();
+  }
+  if (!rejectedSeen) {
+    const commitment = L3StateCommitment.load(rejected.toHexString());
+    if (commitment != null) {
+      commitment.status = "REJECTED";
+      commitment.invalidatedAt = timestamp;
+      commitment.save();
+    }
   }
 
-  batch.challenged = true;
-  batch.save();
+  chain.latestCommittedRoot = isZeroBytes(event.params.newHead) ? null : event.params.newHead;
+  chain.latestCommittedHeight = newHeight;
+  chain.save();
 
-  // Create challenge record
-  let challengeId = batchId + "-" + event.params.challenger.toHexString();
-  let challenge = new FraudProofChallenge(challengeId);
-  challenge.batch = batchId;
-  challenge.challenger = event.params.challenger;
-  challenge.initiatedAt = timestamp;
-  challenge.txHash = event.transaction.hash;
+  const challenge = getOrCreateChallenge(rejected, event);
+  challenge.newHead = event.params.newHead;
+  challenge.newHeight = newHeight;
+  challenge.orphanedCount = orphaned;
   challenge.save();
 
-  // Update L3 metrics
-  let metric = getOrCreateL3Metric(timestamp);
-  metric.challengesInitiated = metric.challengesInitiated + 1;
+  const metric = getOrCreateL3Metric(timestamp);
+  metric.commitmentsRejected = metric.commitmentsRejected + 1;
+  metric.commitmentsOrphaned = metric.commitmentsOrphaned + orphaned;
   metric.save();
 }
 
-export function handleChallengeResolved(event: ChallengeResolved): void {
-  let batchId = event.params.batchId.toString();
-  let timestamp = event.block.timestamp;
-  let succeeded = event.params.challengeSucceeded;
+export function handleFraudProofSubmitted(event: FraudProofSubmitted): void {
+  // Despite its name this is emitted only for a successful challenge, by both proof paths
+  const root = event.params.claimedRoot;
+  const challenge = getOrCreateChallenge(root, event);
+  challenge.challenger = event.params.challenger;
+  challenge.disputeId = event.params.disputeId;
+  challenge.mode = "DIRECT";
 
-  let batch = L3Batch.load(batchId);
-  if (batch == null) {
-    return;
+  const stateCommitment = L3StateCommitment.load(root.toHexString());
+  if (stateCommitment != null) {
+    const revealId = stateCommitment.lastRevealCommitment;
+    const revealTx = stateCommitment.lastRevealTx;
+    if (revealId !== null && revealTx !== null && revealTx.equals(event.transaction.hash)) {
+      const commitment = FraudProofCommitment.load(revealId);
+      if (commitment != null && commitment.challenger.equals(event.params.challenger)) {
+        challenge.mode = "COMMIT_REVEAL";
+        challenge.commitment = commitment.id;
+      }
+    }
+    stateCommitment.challenge = challenge.id;
+    stateCommitment.save();
+  }
+  challenge.save();
+}
+
+export function handleFraudProofValidated(event: FraudProofValidated): void {
+  const challenge = getOrCreateChallenge(event.params.claimedRoot, event);
+  challenge.challenger = event.params.challenger;
+  challenge.reward = event.params.reward;
+  challenge.save();
+
+  const commitmentRef = challenge.commitment;
+  if (commitmentRef !== null) {
+    const commitment = FraudProofCommitment.load(commitmentRef);
+    if (commitment != null) {
+      commitment.status = "WON";
+      commitment.reward = event.params.reward;
+      commitment.resolvedAt = event.block.timestamp;
+      commitment.resolveTx = event.transaction.hash;
+      commitment.save();
+    }
   }
 
-  batch.challengeSucceeded = succeeded;
-  if (succeeded) {
-    batch.status = "REVERTED";
-  }
-  batch.save();
-
-  // Find and update the challenge record
-  // We need to iterate through possible challengers - simplified approach
-  // In production, you'd track the challenger address in the event or separately
-
-  // Update L3 metrics
-  let metric = getOrCreateL3Metric(timestamp);
-  if (succeeded) {
-    metric.challengesSucceeded = metric.challengesSucceeded + 1;
-  }
+  const metric = getOrCreateL3Metric(event.block.timestamp);
+  metric.fraudProofsWon = metric.fraudProofsWon + 1;
+  metric.rewardsPaid = metric.rewardsPaid.plus(event.params.reward);
   metric.save();
+}
+
+// =============================================================================
+// Dispute bridging and settlement
+// =============================================================================
+
+export function handleDisputeBridgedToL3(event: DisputeBridgedToL3): void {
+  const id = event.params.l2DisputeId.toString();
+  const bridged = new L3BridgedDispute(id);
+  bridged.dispute = id;
+  bridged.l3DisputeId = event.params.l3DisputeId;
+  bridged.initiator = event.params.initiator;
+  bridged.stakeAmount = event.params.stakeAmount;
+  bridged.bridgedAt = event.block.timestamp;
+  bridged.bridgeTx = event.transaction.hash;
+  bridged.skippedRebridges = 0;
+  bridged.settled = false;
+  bridged.save();
+
+  const chain = getOrCreateChain(event.address);
+  chain.totalBridgedDisputes = chain.totalBridgedDisputes.plus(ONE);
+  chain.save();
+
+  const metric = getOrCreateL3Metric(event.block.timestamp);
+  metric.disputesBridged = metric.disputesBridged + 1;
+  metric.save();
+}
+
+export function handleDisputeBridgeSkipped(event: DisputeBridgeSkipped): void {
+  const bridged = L3BridgedDispute.load(event.params.l2DisputeId.toString());
+  if (bridged == null) return;
+  bridged.skippedRebridges = bridged.skippedRebridges + 1;
+  bridged.save();
+}
+
+export function handleDisputeSettledFromL3(event: DisputeSettledFromL3): void {
+  const bridged = L3BridgedDispute.load(event.params.l2DisputeId.toString());
+  if (bridged == null) return;
+  bridged.settled = true;
+  bridged.outcome = l3DisputeStateName(event.params.outcome);
+  bridged.initiatorReturn = event.params.initiatorReturn;
+  bridged.counterpartyReturn = event.params.counterpartyReturn;
+  bridged.settledAt = event.block.timestamp;
+  bridged.settlementTx = event.transaction.hash;
+  bridged.save();
+
+  const chain = getOrCreateChain(event.address);
+  chain.totalSettlements = chain.totalSettlements.plus(ONE);
+  chain.save();
+
+  const metric = getOrCreateL3Metric(event.block.timestamp);
+  metric.disputesSettled = metric.disputesSettled + 1;
+  metric.save();
+}
+
+// =============================================================================
+// Configuration and roles
+// =============================================================================
+
+export function handleSequencerUpdated(event: SequencerUpdated): void {
+  const contract = getOrCreateContract(event, KIND_L3_BRIDGE);
+  contract.sequencer = event.params.newSequencer;
+  contract.save();
+
+  const entry = newAdminEvent(event, KIND_L3_BRIDGE, "SequencerUpdated");
+  entry.account = event.params.newSequencer;
+  entry.previousAccount = event.params.oldSequencer;
+  entry.save();
+}
+
+export function handleBridgeStatusChanged(event: BridgeStatusChanged): void {
+  const status = bridgeStatusName(event.params.newStatus);
+  const contract = getOrCreateContract(event, KIND_L3_BRIDGE);
+  contract.bridgeStatus = status;
+  contract.save();
+
+  const entry = newAdminEvent(event, KIND_L3_BRIDGE, "BridgeStatusChanged");
+  entry.details = bridgeStatusName(event.params.oldStatus) + " -> " + status;
+  entry.save();
+}
+
+export function handleDisputeBridgerUpdated(event: DisputeBridgerUpdated): void {
+  setRole(event, KIND_L3_BRIDGE, "L3_DISPUTE_BRIDGER", event.params.account, event.params.authorized);
+
+  const entry = newAdminEvent(event, KIND_L3_BRIDGE, "DisputeBridgerUpdated");
+  entry.account = event.params.account;
+  entry.flag = event.params.authorized;
+  entry.save();
+}
+
+export function handleSettlementRelayerUpdated(event: SettlementRelayerUpdated): void {
+  setRole(event, KIND_L3_BRIDGE, "L3_SETTLEMENT_RELAYER", event.params.account, event.params.authorized);
+
+  const entry = newAdminEvent(event, KIND_L3_BRIDGE, "SettlementRelayerUpdated");
+  entry.account = event.params.account;
+  entry.flag = event.params.authorized;
+  entry.save();
+}
+
+export function handleFeesWithdrawn(event: FeesWithdrawn): void {
+  const entry = newAdminEvent(event, KIND_L3_BRIDGE, "FeesWithdrawn");
+  entry.account = event.params.to;
+  entry.amount = event.params.amount;
+  entry.save();
+}
+
+// =============================================================================
+// Ownable2Step / Pausable
+// =============================================================================
+
+export function handleOwnershipTransferStarted(event: OwnershipTransferStarted): void {
+  recordOwnershipTransferStarted(event, KIND_L3_BRIDGE, event.params.previousOwner, event.params.newOwner);
+}
+
+export function handleOwnershipTransferred(event: OwnershipTransferred): void {
+  recordOwnershipTransferred(event, KIND_L3_BRIDGE, event.params.previousOwner, event.params.newOwner);
+}
+
+export function handlePaused(event: Paused): void {
+  // L3Bridge pause freezes finalization only; bridging and settlements follow bridgeStatus
+  recordPause(event, KIND_L3_BRIDGE, event.params.account, true);
+}
+
+export function handleUnpaused(event: Unpaused): void {
+  recordPause(event, KIND_L3_BRIDGE, event.params.account, false);
 }

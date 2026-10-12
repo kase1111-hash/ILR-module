@@ -1,111 +1,152 @@
 # =============================================================================
 # NatLangChain ILRM - TheGraph Schema
 # =============================================================================
-# This schema defines all indexable entities for the ILRM protocol
-# Documentation: https://thegraph.com/docs/en/developing/creating-a-subgraph/
+# Every entity below is populated only from events the deployed contracts emit
+# (see subgraph.yaml) plus a few read-only eth_calls for values that are fixed
+# once written (noted per field). Field comments name the source event.
+#
+# Conventions
+# - Event-log entities (@entity(immutable: true)) use "<txHash>-<logIndex>" ids.
+# - Dispute ids are the ILRM dispute id in decimal. The subgraph assumes one
+#   ILRM deployment: AssetRegistry and L3Bridge events are linked to Dispute
+#   by id, so disputes of another ILRM sharing the registry (for example
+#   MultiPartyILRM) would collide.
+# - Timestamps are block timestamps (seconds); *Block fields are block numbers.
 # =============================================================================
 
 # =============================================================================
-# Dispute Entities
+# Contracts, ownership, roles and admin log (all data sources)
 # =============================================================================
 
+enum ContractKind {
+  ILRM
+  TREASURY
+  ORACLE
+  L3_BRIDGE
+  ASSET_REGISTRY
+}
+
 """
-Core dispute entity tracking the full lifecycle
+One indexed protocol contract: ownership (Ownable2Step), pause state (Pausable)
+and the configuration values its events expose
 """
-type Dispute @entity {
-  "Dispute ID from contract"
+type ProtocolContract @entity(immutable: false) {
+  "Contract address"
   id: ID!
 
-  "Dispute initiator"
-  initiator: Party!
+  kind: ContractKind!
 
-  "Dispute counterparty"
-  counterparty: Party!
+  "Owner (OwnershipTransferred); null until the first ownership event is indexed"
+  owner: Bytes
 
-  "Initiator's stake amount"
-  initiatorStake: BigInt!
+  "Pending owner (OwnershipTransferStarted); cleared by OwnershipTransferred"
+  pendingOwner: Bytes
 
-  "Counterparty's stake amount"
-  counterpartyStake: BigInt!
+  "Pause state (Paused/Unpaused); Oracle and AssetRegistry are not pausable"
+  paused: Boolean!
 
-  "Block timestamp when dispute was initiated"
-  startTime: BigInt!
+  "ILRM: treasury allowed to fund stake subsidies (SubsidyTreasuryUpdated); null = disabled"
+  subsidyTreasury: Bytes
 
-  "Block when dispute was initiated"
-  startBlock: BigInt!
+  "Treasury: ILRM allowed to draw subsidies (ILRMUpdated)"
+  ilrm: Bytes
 
-  "Hash of evidence bundle"
-  evidenceHash: Bytes!
+  "Treasury: maximum subsidy per dispute (CapsUpdated; null until the first update)"
+  maxSubsidyPerDispute: BigInt
 
-  "Current state: INITIATED, ACTIVE, RESOLVED"
-  state: DisputeState!
+  "Treasury: maximum subsidy per participant per window (CapsUpdated)"
+  maxSubsidyPerParticipant: BigInt
 
-  "Resolution outcome"
-  outcome: DisputeOutcome
+  "Treasury: rolling subsidy window in seconds (CapsUpdated)"
+  subsidyWindowDuration: BigInt
 
-  "Whether initiator accepted current proposal"
-  initiatorAccepted: Boolean!
+  "L3Bridge: sequencer (SequencerUpdated; null until the first change)"
+  sequencer: Bytes
 
-  "Whether counterparty accepted current proposal"
-  counterpartyAccepted: Boolean!
+  "L3Bridge: bridge status (BridgeStatusChanged)"
+  bridgeStatus: L3BridgeStatus
 
-  "Number of counter-proposals submitted"
-  counterCount: Int!
+  "Role holders on this contract"
+  roles: [RoleMember!]! @derivedFrom(field: "contract")
 
-  "Fallback license terms hash"
-  fallbackTermsHash: Bytes
+  "Configuration, ownership, pause and fund-management log"
+  adminEvents: [AdminEvent!]! @derivedFrom(field: "contract")
 
-  "Fallback license duration"
-  fallbackDuration: BigInt
-
-  "Fallback royalty cap in basis points"
-  fallbackRoyaltyCap: BigInt
-
-  "All proposals for this dispute"
-  proposals: [Proposal!]! @derivedFrom(field: "dispute")
-
-  "All counter-proposals"
-  counters: [Counter!]! @derivedFrom(field: "dispute")
-
-  "Amount burned (if any)"
-  burnAmount: BigInt
-
-  "Block when dispute was resolved"
-  resolvedAt: BigInt
-
-  "Transaction hash of resolution"
-  resolvedTx: Bytes
-
-  "ZK mode enabled"
-  zkModeEnabled: Boolean!
-
-  "Initiator ZK identity hash"
-  initiatorZKIdentity: Bytes
-
-  "Counterparty ZK identity hash"
-  counterpartyZKIdentity: Bytes
-
-  "Initiator DID"
-  initiatorDID: Bytes
-
-  "Counterparty DID"
-  counterpartyDID: Bytes
-
-  "FIDO authentication used"
-  fidoUsed: Boolean!
-
-  "Asset ID if linked"
-  assetId: BigInt
-
-  "Created timestamp"
   createdAt: BigInt!
-
-  "Last updated timestamp"
   updatedAt: BigInt!
 }
 
+enum Role {
+  "Oracle operator (Oracle.OracleRegistered; revokeOracle emits no event, so revocations are not visible)"
+  ORACLE_OPERATOR
+  "ILRM allowed to freeze/unfreeze assets (AssetRegistry.ILRMAuthorizationChanged)"
+  AUTHORIZED_ILRM
+  "Account allowed to bridge disputes to L3 (L3Bridge.DisputeBridgerUpdated)"
+  L3_DISPUTE_BRIDGER
+  "Account allowed to relay settlement batches (L3Bridge.SettlementRelayerUpdated)"
+  L3_SETTLEMENT_RELAYER
+}
+
+"""
+Role membership of one account on one contract
+"""
+type RoleMember @entity(immutable: false) {
+  "<contract>-<role>-<account>"
+  id: ID!
+
+  contract: ProtocolContract!
+  role: Role!
+  account: Bytes!
+  active: Boolean!
+
+  "Oracle operators only: registered public key hash"
+  publicKeyHash: Bytes
+
+  updatedAt: BigInt!
+  updatedTx: Bytes!
+}
+
+"""
+Low-volume configuration, role, ownership, pause and fund-management events,
+kept as one uniform log so new admin events need no schema change
+"""
+type AdminEvent @entity(immutable: true) {
+  "<txHash>-<logIndex>"
+  id: ID!
+
+  contract: ProtocolContract!
+
+  "Solidity event name, e.g. SubsidyTreasuryUpdated"
+  event: String!
+
+  "Main address argument (new owner, new treasury, recipient, account, ...)"
+  account: Bytes
+
+  "Previous address where the event carries one"
+  previousAccount: Bytes
+
+  "Boolean argument (authorized, ...)"
+  flag: Boolean
+
+  "Amount argument (withdrawn or deposited amount, ...)"
+  amount: BigInt
+
+  "Other arguments, rendered as text"
+  details: String
+
+  blockNumber: BigInt!
+  timestamp: BigInt!
+  txHash: Bytes!
+}
+
+# =============================================================================
+# Disputes (ILRM)
+# =============================================================================
+
 enum DisputeState {
+  "Initiator staked; waiting for the counterparty stake"
   INITIATED
+  "Both sides staked"
   ACTIVE
   RESOLVED
 }
@@ -118,9 +159,128 @@ enum DisputeOutcome {
 }
 
 """
+Core dispute entity tracking the full lifecycle
+"""
+type Dispute @entity(immutable: false) {
+  "Dispute ID from contract"
+  id: ID!
+
+  "Dispute initiator"
+  initiator: Party!
+
+  "Dispute counterparty"
+  counterparty: Party!
+
+  "Initiator stake (ILRM.disputes() at initiation; fixed once staked)"
+  initiatorStake: BigInt!
+
+  "Counterparty stake (StakeDeposited), including any treasury subsidy"
+  counterpartyStake: BigInt!
+
+  "Treasury-funded part of the counterparty stake (StakeSubsidized)"
+  stakeSubsidy: StakeSubsidy
+
+  "Block timestamp when dispute was initiated"
+  startTime: BigInt!
+
+  "Block when dispute was initiated"
+  startBlock: BigInt!
+
+  "Evidence hash at initiation"
+  initialEvidenceHash: Bytes!
+
+  "Latest evidence hash (updated by counter-proposals sent directly to ILRM, see Counter.evidenceHash)"
+  evidenceHash: Bytes!
+
+  state: DisputeState!
+
+  outcome: DisputeOutcome!
+
+  "Whether initiator accepted the live proposal"
+  initiatorAccepted: Boolean!
+
+  "Whether counterparty accepted the live proposal"
+  counterpartyAccepted: Boolean!
+
+  "Counter-proposals so far (= current Oracle round)"
+  counterCount: Int!
+
+  "Proposals stored so far (including superseded ones)"
+  proposalCount: Int!
+
+  "Live proposal; null before the first proposal and after a counter-proposal clears it"
+  currentProposal: Proposal
+
+  "Fallback license terms hash (ILRM.disputes() at initiation)"
+  fallbackTermsHash: Bytes
+
+  "Fallback license duration in seconds (ILRM.disputes() at initiation)"
+  fallbackDuration: BigInt
+
+  "Fallback royalty cap in basis points (ILRM.disputes() at initiation)"
+  fallbackRoyaltyCap: BigInt
+
+  "All proposals for this dispute"
+  proposals: [Proposal!]! @derivedFrom(field: "dispute")
+
+  "All counter-proposals"
+  counters: [Counter!]! @derivedFrom(field: "dispute")
+
+  "Stake amount burned on timeout (StakesBurned)"
+  burnAmount: BigInt
+
+  "Counter-proposal fees burned (ETH)"
+  counterFeesBurned: BigInt!
+
+  "Block timestamp of resolution"
+  resolvedAt: BigInt
+
+  "Block number of resolution"
+  resolvedBlock: BigInt
+
+  "Transaction hash of resolution"
+  resolvedTx: Bytes
+
+  "Assets frozen for this dispute (AssetRegistry.AssetsFrozen)"
+  assetFreezes: [AssetFreeze!]! @derivedFrom(field: "dispute")
+
+  "Oracle-side state (Oracle events)"
+  oracle: OracleDispute @derivedFrom(field: "dispute")
+
+  "L3 bridging record (L3Bridge.DisputeBridgedToL3)"
+  l3: L3BridgedDispute @derivedFrom(field: "dispute")
+
+  "Created timestamp"
+  createdAt: BigInt!
+
+  "Last updated timestamp"
+  updatedAt: BigInt!
+}
+
+"""
+Voluntary reconciliation request (ILRM.initiateVoluntaryRequest emits
+DisputeInitiated with disputeId = type(uint256).max and creates no dispute)
+"""
+type VoluntaryRequest @entity(immutable: true) {
+  "<txHash>-<logIndex>"
+  id: ID!
+
+  initiator: Party!
+  counterparty: Party!
+  evidenceHash: Bytes!
+
+  "ETH fee burned; known only when the transaction called ILRM directly, else null"
+  feeBurned: BigInt
+
+  timestamp: BigInt!
+  blockNumber: BigInt!
+  txHash: Bytes!
+}
+
+"""
 Party (participant) in the protocol
 """
-type Party @entity {
+type Party @entity(immutable: false) {
   "Address of the party"
   id: ID!
 
@@ -130,32 +290,38 @@ type Party @entity {
   "Disputes where this party is counterparty"
   counterpartyDisputes: [Dispute!]! @derivedFrom(field: "counterparty")
 
+  "Assets registered by this party (transfers emit no event and are not reflected)"
+  assets: [Asset!]! @derivedFrom(field: "owner")
+
   "Total disputes participated in"
   totalDisputes: Int!
 
-  "Disputes won (accepted proposal)"
+  "Disputes resolved by accepted proposal"
   disputesResolved: Int!
 
-  "Disputes timed out"
+  "Disputes timed out with burn"
   disputesTimedOut: Int!
 
-  "Total amount staked"
+  "Disputes resolved by default license (counterparty never staked)"
+  disputesDefaulted: Int!
+
+  "Own funds staked (counterparty stakes exclude the treasury subsidy)"
   totalStaked: BigInt!
 
-  "Total amount burned"
+  "Own share of timeout burns (pro rata to own funds when a subsidy co-staked)"
   totalBurned: BigInt!
 
-  "Current harassment score"
+  "ILRM harassment score (ILRM.HarassmentScoreUpdated)"
   harassmentScore: BigInt!
 
-  "Total subsidies received"
+  "Treasury harassment score, 0-100 (Treasury.HarassmentScoreUpdated)"
+  treasuryHarassmentScore: BigInt!
+
+  "Treasury subsidies escrowed into this party's stakes (ILRM.StakeSubsidized)"
   totalSubsidiesReceived: BigInt!
 
-  "Associated DID"
-  did: Bytes
-
-  "DID sybil score"
-  sybilScore: BigInt
+  "Voluntary requests sent"
+  voluntaryRequestsSent: Int!
 
   "First seen timestamp"
   firstSeen: BigInt!
@@ -164,37 +330,66 @@ type Party @entity {
   lastActive: BigInt!
 }
 
+enum ProposalStatus {
+  "Live proposal of the current round"
+  LIVE
+  "Replaced in the same round after an Oracle owner reset (ProposalSuperseded)"
+  SUPERSEDED
+  "Cleared by a counter-proposal"
+  VOIDED_BY_COUNTER
+  "Accepted by both parties"
+  ACCEPTED
+  "Still live when the dispute timed out"
+  EXPIRED
+}
+
 """
-LLM proposal for a dispute
+LLM proposal stored in ILRM (ProposalSubmitted)
 """
-type Proposal @entity {
-  "Unique ID: disputeId-proposalIndex"
+type Proposal @entity(immutable: false) {
+  "<disputeId>-<index>"
   id: ID!
 
   "Parent dispute"
   dispute: Dispute!
 
-  "Proposal content (may be IPFS hash or on-chain)"
+  "0-based order of submission within the dispute"
+  index: Int!
+
+  "Oracle round (dispute counterCount when stored)"
+  round: Int!
+
+  "Proposal content"
   content: String!
 
-  "Submitter address (oracle)"
+  "keccak256(content), the hash Oracle and ILRM events use"
+  proposalHash: Bytes!
+
+  status: ProposalStatus!
+
+  "Proposal that replaced this one in the same round"
+  supersededBy: Proposal
+
+  initiatorAccepted: Boolean!
+  counterpartyAccepted: Boolean!
+
+  "Transaction sender (the oracle operator account)"
   submitter: Bytes!
 
   "Block timestamp"
   timestamp: BigInt!
 
+  blockNumber: BigInt!
+
   "Transaction hash"
   txHash: Bytes!
-
-  "Proposal index within dispute"
-  index: Int!
 }
 
 """
-Counter-proposal record
+Counter-proposal record (CounterProposed)
 """
-type Counter @entity {
-  "Unique ID: disputeId-counterIndex"
+type Counter @entity(immutable: true) {
+  "<disputeId>-<counterNumber>"
   id: ID!
 
   "Parent dispute"
@@ -203,100 +398,36 @@ type Counter @entity {
   "Party who submitted counter"
   party: Party!
 
-  "New evidence hash"
-  evidenceHash: Bytes!
-
   "Counter number (1-3)"
   counterNumber: Int!
 
-  "Fee paid for counter"
-  feePaid: BigInt!
+  "New evidence hash; decoded from calldata when the transaction called ILRM.counterPropose directly, else null"
+  evidenceHash: Bytes
+
+  "ETH fee burned: COUNTER_FEE_BASE * 2^(counterNumber - 1); any excess paid went to the ILRM treasury"
+  feeBurned: BigInt!
 
   "Block timestamp"
   timestamp: BigInt!
 
-  "Transaction hash"
-  txHash: Bytes!
-}
-
-# =============================================================================
-# Treasury Entities
-# =============================================================================
-
-"""
-Treasury metrics over time
-"""
-type TreasuryMetric @entity {
-  "Day timestamp as ID"
-  id: ID!
-
-  "Date"
-  date: BigInt!
-
-  "Total subsidies distributed"
-  totalSubsidies: BigInt!
-
-  "Total burns recorded"
-  totalBurns: BigInt!
-
-  "Total received"
-  totalReceived: BigInt!
-
-  "Number of subsidy transactions"
-  subsidyCount: Int!
-
-  "Number of burn transactions"
-  burnCount: Int!
-
-  "Current subsidy cap"
-  subsidyCap: BigInt!
-
-  "Current burn cap"
-  burnCap: BigInt!
-}
-
-"""
-Individual subsidy distribution
-"""
-type Subsidy @entity {
-  "Transaction hash"
-  id: ID!
-
-  "Recipient address"
-  recipient: Party!
-
-  "Distributor address"
-  distributor: Bytes!
-
-  "Amount distributed"
-  amount: BigInt!
-
-  "Reason/category"
-  reason: String!
-
-  "Block timestamp"
-  timestamp: BigInt!
+  blockNumber: BigInt!
 
   "Transaction hash"
   txHash: Bytes!
 }
 
 """
-Burn record
+Token burn of dispute stakes on timeout (StakesBurned)
 """
-type Burn @entity {
-  "Transaction hash + log index"
+type Burn @entity(immutable: true) {
+  "<txHash>-<logIndex>"
   id: ID!
 
-  "Dispute ID if applicable"
-  disputeId: BigInt
+  dispute: Dispute!
 
   "Amount burned"
   amount: BigInt!
 
-  "Reason"
-  reason: String!
-
   "Block timestamp"
   timestamp: BigInt!
 
@@ -304,15 +435,23 @@ type Burn @entity {
   txHash: Bytes!
 }
 
+enum ScoreSource {
+  ILRM
+  TREASURY
+}
+
 """
-Harassment score update
+Harassment score update (ILRM and Treasury keep separate scores)
 """
-type HarassmentScore @entity {
-  "Address + update index"
+type HarassmentScore @entity(immutable: true) {
+  "<txHash>-<logIndex>"
   id: ID!
 
   "Affected party"
   party: Party!
+
+  "Contract that holds the score"
+  source: ScoreSource!
 
   "Previous score"
   oldScore: BigInt!
@@ -328,174 +467,516 @@ type HarassmentScore @entity {
 }
 
 # =============================================================================
-# Oracle Entities
+# Stake subsidies (ILRM escrow + Treasury grants)
 # =============================================================================
 
 """
-Oracle proposal request
+Treasury-funded part of a counterparty stake, escrowed in ILRM (StakeSubsidized).
+The funder is repaid its pro-rata share of the counterparty payout (SubsidyReturned).
 """
-type OracleProposal @entity {
-  "Dispute ID"
+type StakeSubsidy @entity(immutable: false) {
+  "Dispute id (at most one subsidy per dispute)"
   id: ID!
 
-  "Requester address"
-  requester: Bytes!
+  dispute: Dispute!
+  counterparty: Party!
 
-  "Evidence hash"
-  evidenceHash: Bytes!
+  "Treasury that funded the subsidy"
+  funder: Bytes!
 
-  "Request timestamp"
-  requestedAt: BigInt!
+  "Subsidized amount"
+  amount: BigInt!
 
-  "Submission timestamp"
-  submittedAt: BigInt
+  "Repaid to the funder so far (in full on acceptance, net of its burn share on timeout)"
+  amountReturned: BigInt!
 
-  "Proposal content"
-  proposal: String
+  returns: [SubsidyReturn!]! @derivedFrom(field: "subsidy")
 
-  "Submitter (oracle address)"
-  submitter: Bytes
-
-  "Whether proposal was reset"
-  wasReset: Boolean!
-
-  "Reset reason if applicable"
-  resetReason: String
-}
-
-"""
-Oracle statistics
-"""
-type OracleMetric @entity {
-  "Day timestamp as ID"
-  id: ID!
-
-  "Date"
-  date: BigInt!
-
-  "Proposals requested"
-  proposalsRequested: Int!
-
-  "Proposals submitted"
-  proposalsSubmitted: Int!
-
-  "Proposals reset"
-  proposalsReset: Int!
-
-  "Average response time (blocks)"
-  avgResponseBlocks: BigInt!
-}
-
-# =============================================================================
-# L3 Bridge Entities
-# =============================================================================
-
-"""
-L3 batch submission
-"""
-type L3Batch @entity {
-  "Batch ID"
-  id: ID!
-
-  "State root hash"
-  stateRoot: Bytes!
-
-  "Number of disputes in batch"
-  disputeCount: Int!
-
-  "Submitter address"
-  submitter: Bytes!
-
-  "Submission timestamp"
-  submittedAt: BigInt!
-
-  "Finalization timestamp"
-  finalizedAt: BigInt
-
-  "Whether batch was challenged"
-  challenged: Boolean!
-
-  "Challenge result if applicable"
-  challengeSucceeded: Boolean
-
-  "Status: PENDING, FINALIZED, REVERTED"
-  status: BatchStatus!
-}
-
-enum BatchStatus {
-  PENDING
-  FINALIZED
-  REVERTED
-}
-
-"""
-L3 protocol metrics
-"""
-type L3Metric @entity {
-  "Day timestamp as ID"
-  id: ID!
-
-  "Date"
-  date: BigInt!
-
-  "Batches submitted"
-  batchesSubmitted: Int!
-
-  "Batches finalized"
-  batchesFinalized: Int!
-
-  "Challenges initiated"
-  challengesInitiated: Int!
-
-  "Challenges succeeded"
-  challengesSucceeded: Int!
-
-  "Total disputes batched"
-  totalDisputesBatched: Int!
-}
-
-"""
-Fraud proof challenge
-"""
-type FraudProofChallenge @entity {
-  "Batch ID + challenger"
-  id: ID!
-
-  "Challenged batch"
-  batch: L3Batch!
-
-  "Challenger address"
-  challenger: Bytes!
-
-  "Initiated timestamp"
-  initiatedAt: BigInt!
-
-  "Resolved timestamp"
-  resolvedAt: BigInt
-
-  "Whether challenge succeeded"
-  succeeded: Boolean
-
-  "Transaction hash"
+  timestamp: BigInt!
   txHash: Bytes!
 }
 
+"""
+Repayment of a stake subsidy to its funder on resolution (SubsidyReturned)
+"""
+type SubsidyReturn @entity(immutable: true) {
+  "<txHash>-<logIndex>"
+  id: ID!
+
+  subsidy: StakeSubsidy!
+  dispute: Dispute!
+  funder: Bytes!
+  amount: BigInt!
+  timestamp: BigInt!
+  txHash: Bytes!
+}
+
+"""
+Subsidy grant as recorded by the Treasury (Treasury.SubsidyFunded)
+"""
+type TreasurySubsidy @entity(immutable: true) {
+  "<txHash>-<logIndex>"
+  id: ID!
+
+  treasury: Bytes!
+
+  "Subsidized counterparty"
+  participant: Party!
+
+  disputeId: BigInt!
+
+  "Linked ILRM dispute"
+  dispute: Dispute
+
+  amount: BigInt!
+  timestamp: BigInt!
+  txHash: Bytes!
+}
+
+"""
+Funds received by the Treasury (Treasury.TreasuryReceived)
+"""
+type TreasuryDeposit @entity(immutable: true) {
+  "<txHash>-<logIndex>"
+  id: ID!
+
+  treasury: Bytes!
+  from: Bytes!
+
+  "Token amount, or wei when isEth"
+  amount: BigInt!
+
+  "Reason string: free text for deposit(), \"burn\" for depositBurn(), \"eth\" for plain ETH"
+  reason: String!
+
+  "True for plain ETH transfers (reason \"eth\")"
+  isEth: Boolean!
+
+  timestamp: BigInt!
+  txHash: Bytes!
+}
+
+"""
+Daily Treasury statistics
+"""
+type TreasuryMetric @entity(immutable: false) {
+  "Day start timestamp"
+  id: ID!
+
+  date: BigInt!
+
+  "Subsidies granted (SubsidyFunded)"
+  totalSubsidies: BigInt!
+
+  subsidyCount: Int!
+
+  "Token inflows of every reason except \"eth\""
+  totalReceived: BigInt!
+
+  "Token inflows with reason \"burn\" (depositBurn), included in totalReceived"
+  totalBurnDeposits: BigInt!
+
+  burnDepositCount: Int!
+
+  "ETH received (reason \"eth\")"
+  totalReceivedEth: BigInt!
+}
+
 # =============================================================================
-# Asset Registry Entities
+# Oracle
+# =============================================================================
+
+"""
+Oracle-side state of one dispute
+"""
+type OracleDispute @entity(immutable: false) {
+  "Dispute id"
+  id: ID!
+
+  "Linked ILRM dispute"
+  dispute: Dispute
+
+  "Mirror of Oracle.pendingRequests: set by requests and resets, cleared by submissions and cancellations"
+  pending: Boolean!
+
+  "Proposal requests (ProposalRequested with a non-zero timestamp)"
+  requestCount: Int!
+
+  "Requests cancelled by the owner (ProposalRequested with zero values)"
+  cancelCount: Int!
+
+  lastRequestedAt: BigInt
+  lastRequestEvidenceHash: Bytes
+
+  "Bookkeeping: time of the request (or owner reset) still awaiting a proposal; null when none"
+  openRequestAt: BigInt
+
+  "Nonce the next operator signature must use"
+  nextNonce: BigInt!
+
+  "Latest round that received a proposal"
+  currentRound: BigInt
+
+  submissionCount: Int!
+  resetCount: Int!
+
+  "Bookkeeping: operator and transaction of the latest ProposalSubmittedToILRM"
+  lastOperator: Bytes
+  lastSubmissionTx: Bytes
+
+  "Bookkeeping: latest reset, completed by ProposalRoundReopened in the same transaction"
+  lastReset: OracleReset
+  lastResetTx: Bytes
+
+  rounds: [OracleRound!]! @derivedFrom(field: "oracleDispute")
+  submissions: [OracleSubmission!]! @derivedFrom(field: "oracleDispute")
+  resets: [OracleReset!]! @derivedFrom(field: "oracleDispute")
+
+  updatedAt: BigInt!
+}
+
+"""
+One negotiation round (dispute counterCount): at most one live proposal
+"""
+type OracleRound @entity(immutable: false) {
+  "<disputeId>-<round>"
+  id: ID!
+
+  oracleDispute: OracleDispute!
+  round: BigInt!
+
+  "Live proposal hash; null while the round is open"
+  proposalHash: Bytes
+
+  filled: Boolean!
+
+  "Times filled (more than once after an owner reset)"
+  fillCount: Int!
+
+  "Times re-opened by an owner reset (ProposalRoundReopened)"
+  reopenCount: Int!
+
+  currentSubmission: OracleSubmission
+
+  lastFilledAt: BigInt
+  lastReopenedAt: BigInt
+}
+
+"""
+Proposal admitted by the Oracle (ProposalRoundFilled + ProposalSubmittedToILRM)
+"""
+type OracleSubmission @entity(immutable: false) {
+  "<disputeId>-<round>-<nonce>"
+  id: ID!
+
+  oracleDispute: OracleDispute!
+  round: OracleRound!
+  proposalHash: Bytes!
+
+  "Nonce the signature consumed"
+  nonce: BigInt!
+
+  "Oracle operator that submitted (ProposalSubmittedToILRM)"
+  operator: Bytes!
+
+  "Evidence hash signed over (DisputeProcessed)"
+  evidenceHash: Bytes
+
+  "Voided by an owner reset (ProposalRoundReopened)"
+  voided: Boolean!
+
+  "Seconds since the request (or owner reset) this proposal answered, when one was indexed"
+  responseTime: BigInt
+
+  timestamp: BigInt!
+  txHash: Bytes!
+}
+
+"""
+Owner reset of a live proposal (ProposalReset + ProposalRoundReopened)
+"""
+type OracleReset @entity(immutable: false) {
+  "<txHash>-<logIndex>"
+  id: ID!
+
+  oracleDispute: OracleDispute!
+
+  "Round re-opened (ProposalRoundReopened); null if that event was not seen"
+  round: BigInt
+
+  voidedProposalHash: Bytes!
+  reason: String!
+  timestamp: BigInt!
+  txHash: Bytes!
+}
+
+"""
+Daily Oracle statistics
+"""
+type OracleMetric @entity(immutable: false) {
+  "Day start timestamp"
+  id: ID!
+
+  date: BigInt!
+  proposalsRequested: Int!
+  requestsCancelled: Int!
+  proposalsSubmitted: Int!
+  proposalsReset: Int!
+
+  "Running mean of OracleSubmission.responseTime (seconds) for the day"
+  avgResponseSeconds: BigInt!
+
+  "Submissions included in avgResponseSeconds"
+  responseSamples: Int!
+}
+
+# =============================================================================
+# L3 Bridge
+# =============================================================================
+
+enum L3BridgeStatus {
+  ACTIVE
+  PAUSED
+  DEPRECATED
+}
+
+enum L3CommitmentStatus {
+  "Committed and canonical, not finalized"
+  PENDING
+  FINALIZED
+  "Rejected by a successful fraud proof"
+  REJECTED
+  "Descendant of a rejected root; can never finalize"
+  ORPHANED
+}
+
+"""
+Chain-tracking state of one L3Bridge (mirrors its committed/finalized heads)
+"""
+type L3Chain @entity(immutable: false) {
+  "Bridge address"
+  id: ID!
+
+  latestCommittedRoot: Bytes
+  latestCommittedHeight: BigInt!
+  latestFinalizedRoot: Bytes
+  latestFinalizedHeight: BigInt!
+  latestFinalizedL3Block: BigInt!
+
+  totalCommitments: BigInt!
+  totalBridgedDisputes: BigInt!
+  totalSettlements: BigInt!
+}
+
+"""
+Canonical root at a chain height (bookkeeping for orphaning descendants on rollback)
+"""
+type L3ChainSlot @entity(immutable: false) {
+  "<bridge>-<height>"
+  id: ID!
+
+  root: Bytes!
+}
+
+"""
+L3 state commitment (StateCommitmentSubmitted)
+"""
+type L3StateCommitment @entity(immutable: false) {
+  "State root"
+  id: ID!
+
+  bridge: Bytes!
+  stateRoot: Bytes!
+
+  "L3 block number"
+  l3BlockNumber: BigInt!
+
+  "Disputes in the batch"
+  disputeCount: BigInt!
+
+  sequencer: Bytes!
+
+  "1-based chain height"
+  height: BigInt!
+
+  "Parent root (committed head, or finalized head when none is pending)"
+  previousRoot: Bytes
+
+  "Timestamp from which the root may be finalized (L3Bridge.getChallengeDeadline at submission)"
+  challengeDeadline: BigInt
+
+  status: L3CommitmentStatus!
+
+  submittedAt: BigInt!
+  submittedBlock: BigInt!
+  txHash: Bytes!
+
+  finalizedAt: BigInt
+
+  "When the root was rejected or orphaned"
+  invalidatedAt: BigInt
+
+  "Successful fraud proof (REJECTED roots only)"
+  challenge: FraudProofChallenge
+
+  "Bookkeeping: latest reveal against this root, linked to FraudProofValidated in the same transaction"
+  lastRevealCommitment: FraudProofCommitment
+  lastRevealTx: Bytes
+
+  fraudProofCommitments: [FraudProofCommitment!]! @derivedFrom(field: "stateCommitment")
+}
+
+enum FraudProofCommitmentStatus {
+  "Bond escrowed, awaiting reveal"
+  PENDING
+  "Valid proof rejected the root: bond + reward paid"
+  WON
+  "Valid proof, but the root was already rejected or orphaned: bond returned"
+  REFUNDED
+  "Invalid or mismatched proof, or never revealed: bond kept by the bridge"
+  FORFEITED
+}
+
+"""
+Bonded fraud-proof commitment (commit-reveal)
+"""
+type FraudProofCommitment @entity(immutable: false) {
+  "<challenger>-<commitHash>"
+  id: ID!
+
+  commitHash: Bytes!
+  stateCommitment: L3StateCommitment!
+  challenger: Bytes!
+  bond: BigInt!
+  status: FraudProofCommitmentStatus!
+
+  "Reward paid on WON"
+  reward: BigInt
+
+  committedAt: BigInt!
+  revealedAt: BigInt
+  resolvedAt: BigInt
+  commitTx: Bytes!
+  resolveTx: Bytes
+}
+
+enum FraudProofMode {
+  "commitFraudProof + revealFraudProof"
+  COMMIT_REVEAL
+  "Legacy submitFraudProof (only while commit-reveal is disabled)"
+  DIRECT
+}
+
+"""
+Successful fraud proof: one per rejected root
+"""
+type FraudProofChallenge @entity(immutable: false) {
+  "Rejected state root"
+  id: ID!
+
+  stateCommitment: L3StateCommitment!
+  challenger: Bytes!
+
+  "Affected dispute named in the proof"
+  disputeId: BigInt!
+
+  mode: FraudProofMode!
+
+  "Winning commitment (COMMIT_REVEAL only)"
+  commitment: FraudProofCommitment
+
+  "Reward paid (FraudProofValidated)"
+  reward: BigInt
+
+  "Committed head after the rollback (CommittedChainRolledBack)"
+  newHead: Bytes
+  newHeight: BigInt
+
+  "Descendants orphaned by the rollback"
+  orphanedCount: Int!
+
+  timestamp: BigInt!
+  txHash: Bytes!
+}
+
+enum L3DisputeState {
+  PENDING
+  ACTIVE
+  PROPOSAL_SUBMITTED
+  ACCEPTED
+  TIMED_OUT
+  SETTLED
+}
+
+"""
+Dispute bridged to L3 (DisputeBridgedToL3 / DisputeSettledFromL3)
+"""
+type L3BridgedDispute @entity(immutable: false) {
+  "L2 (ILRM) dispute id"
+  id: ID!
+
+  "Linked ILRM dispute"
+  dispute: Dispute
+
+  l3DisputeId: BigInt!
+  initiator: Bytes!
+  stakeAmount: BigInt!
+  bridgedAt: BigInt!
+  bridgeTx: Bytes!
+
+  "Re-bridge attempts skipped by bridgeDisputeBatchToL3 (DisputeBridgeSkipped)"
+  skippedRebridges: Int!
+
+  settled: Boolean!
+  outcome: L3DisputeState
+  initiatorReturn: BigInt
+  counterpartyReturn: BigInt
+  settledAt: BigInt
+  settlementTx: Bytes
+}
+
+"""
+Daily L3 statistics
+"""
+type L3Metric @entity(immutable: false) {
+  "Day start timestamp"
+  id: ID!
+
+  date: BigInt!
+  commitmentsSubmitted: Int!
+  commitmentsFinalized: Int!
+  commitmentsRejected: Int!
+  commitmentsOrphaned: Int!
+
+  "Disputes in submitted commitments"
+  totalDisputesCommitted: BigInt!
+
+  fraudProofsCommitted: Int!
+  fraudProofsWon: Int!
+  fraudProofsRefunded: Int!
+  fraudProofsForfeited: Int!
+  bondsForfeited: BigInt!
+  rewardsPaid: BigInt!
+  disputesBridged: Int!
+  disputesSettled: Int!
+}
+
+# =============================================================================
+# Asset Registry
 # =============================================================================
 
 """
 Registered IP asset
 """
-type Asset @entity {
-  "Asset ID"
+type Asset @entity(immutable: false) {
+  "Asset id (bytes32)"
   id: ID!
 
-  "Owner address"
+  "Registering owner (transferAsset emits no event, so later transfers are not reflected)"
   owner: Party!
 
-  "Content hash"
-  contentHash: Bytes!
+  "Current license terms hash (registration, then FallbackLicenseApplied)"
+  licenseTermsHash: Bytes!
 
   "Registration timestamp"
   registeredAt: BigInt!
@@ -503,10 +984,13 @@ type Asset @entity {
   "Whether currently frozen"
   frozen: Boolean!
 
-  "Dispute causing freeze"
+  "Dispute causing the current freeze"
   frozenByDispute: BigInt
 
-  "Associated licenses"
+  "Fallback licenses applied to this asset"
+  fallbackLicenseCount: Int!
+
+  "License grants"
   licenses: [License!]! @derivedFrom(field: "asset")
 
   "Freeze history"
@@ -514,49 +998,50 @@ type Asset @entity {
 }
 
 """
-License associated with an asset
+License grant to one licensee (LicenseModified)
 """
-type License @entity {
-  "Asset ID + license index"
+type License @entity(immutable: false) {
+  "<assetId>-<licensee>"
   id: ID!
 
-  "Parent asset"
   asset: Asset!
+  licensee: Party!
 
-  "License terms hash"
+  "Current terms hash (last grant)"
   termsHash: Bytes!
 
-  "License type"
-  licenseType: String!
+  active: Boolean!
 
-  "Granted timestamp"
-  grantedAt: BigInt!
+  "Times granted or re-granted"
+  grantCount: Int!
 
-  "Expiry timestamp"
+  "From AssetRegistry.getLicense at the end of the grant block"
+  grantedAt: BigInt
   expiresAt: BigInt
-
-  "Royalty rate in basis points"
   royaltyBps: BigInt
+  nonExclusive: Boolean
 
-  "Whether applied as fallback"
-  isFallback: Boolean!
-
-  "Dispute ID if fallback"
-  fromDispute: BigInt
+  revokedAt: BigInt
+  updatedTx: Bytes!
 }
 
 """
-Asset freeze event
+Asset frozen for a dispute (AssetsFrozen / AssetsUnfrozen)
 """
-type AssetFreeze @entity {
-  "Asset ID + freeze index"
+type AssetFreeze @entity(immutable: false) {
+  "<assetId>-<disputeId>"
   id: ID!
 
-  "Frozen asset"
   asset: Asset!
 
   "Dispute ID causing freeze"
   disputeId: BigInt!
+
+  "Linked ILRM dispute"
+  dispute: Dispute
+
+  "Party whose assets were frozen"
+  party: Bytes!
 
   "Freeze timestamp"
   frozenAt: BigInt!
@@ -564,7 +1049,39 @@ type AssetFreeze @entity {
   "Unfreeze timestamp"
   unfrozenAt: BigInt
 
-  "Transaction hash"
+  "Transaction hash of the freeze"
+  txHash: Bytes!
+}
+
+"""
+Assets frozen by one dispute (bookkeeping for AssetsUnfrozen, which lists no assets)
+"""
+type DisputeAssetSet @entity(immutable: false) {
+  "Dispute id"
+  id: ID!
+
+  assets: [Asset!]!
+
+  "Resolution outcome passed to unfreezeAssets (proposal text or abi-encoded outcome)"
+  unfreezeOutcome: Bytes
+  unfrozenAt: BigInt
+}
+
+"""
+Fallback license applied to a dispute's frozen assets (FallbackLicenseApplied)
+"""
+type FallbackLicenseApplication @entity(immutable: true) {
+  "<txHash>-<logIndex>"
+  id: ID!
+
+  disputeId: BigInt!
+
+  "Linked ILRM dispute"
+  dispute: Dispute
+
+  termsHash: Bytes!
+  assets: [Asset!]!
+  timestamp: BigInt!
   txHash: Bytes!
 }
 
@@ -575,82 +1092,80 @@ type AssetFreeze @entity {
 """
 Daily protocol statistics
 """
-type DailyMetric @entity {
-  "Date timestamp"
+type DailyMetric @entity(immutable: false) {
+  "Day start timestamp"
   id: ID!
 
-  "Date"
   date: BigInt!
 
-  "Disputes initiated"
   disputesInitiated: Int!
-
-  "Disputes resolved"
   disputesResolved: Int!
-
-  "Disputes timed out"
   disputesTimedOut: Int!
+  disputesDefaulted: Int!
 
-  "Total staked"
+  "Stakes deposited (both sides, subsidies included)"
   totalStaked: BigInt!
 
-  "Total burned"
+  "Stake tokens burned on timeout"
   totalBurned: BigInt!
 
-  "Total subsidies"
+  "Stake subsidies escrowed (StakeSubsidized)"
   totalSubsidies: BigInt!
 
-  "Unique participants"
-  uniqueParticipants: Int!
+  "Stake subsidies repaid to funders (SubsidyReturned)"
+  totalSubsidiesReturned: BigInt!
 
-  "Counter-proposals submitted"
+  "Parties whose first dispute was initiated this day"
+  newParticipants: Int!
+
   counterProposals: Int!
-
-  "Proposals submitted"
   proposals: Int!
+  voluntaryRequests: Int!
 
-  "L3 batches"
-  l3Batches: Int!
+  "L3 state commitments submitted"
+  l3Commitments: Int!
 }
 
 """
 Cumulative protocol statistics
 """
-type ProtocolMetric @entity {
+type ProtocolMetric @entity(immutable: false) {
   "Singleton ID: 'protocol'"
   id: ID!
 
-  "Total disputes ever"
   totalDisputes: BigInt!
-
-  "Active disputes"
   activeDisputes: BigInt!
-
-  "Resolved disputes"
   resolvedDisputes: BigInt!
-
-  "Timed out disputes"
   timedOutDisputes: BigInt!
+  defaultedDisputes: BigInt!
 
-  "Total value staked all time"
+  "Stakes deposited all time (both sides, subsidies included)"
   totalValueStaked: BigInt!
 
-  "Total value burned all time"
+  "Stake tokens burned all time"
   totalValueBurned: BigInt!
 
-  "Total subsidies distributed"
+  "Stake subsidies escrowed (StakeSubsidized)"
   totalSubsidiesDistributed: BigInt!
 
-  "Unique participants"
+  "Stake subsidies repaid to funders (SubsidyReturned)"
+  totalSubsidiesReturned: BigInt!
+
+  "Addresses that took part in at least one dispute"
   uniqueParticipants: BigInt!
 
-  "Total counter-proposals"
+  totalProposals: BigInt!
   totalCounterProposals: BigInt!
 
-  "Total L3 batches"
-  totalL3Batches: BigInt!
+  "Counter-proposal fees burned (ETH)"
+  totalCounterFeesBurned: BigInt!
 
-  "Average resolution time (blocks)"
+  totalVoluntaryRequests: BigInt!
+
+  "L3 state commitments submitted"
+  totalL3Commitments: BigInt!
+
+  "Mean blocks from initiation to resolution"
   avgResolutionBlocks: BigInt!
 
   "Last updated block"
