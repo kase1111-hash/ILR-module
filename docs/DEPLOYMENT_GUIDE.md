@@ -23,8 +23,8 @@
 ### Required Tools
 
 ```bash
-# Node.js v20+
-node --version  # Should be >= 20.0.0
+# Node.js v20.19+
+node --version  # Should be >= 20.19.0
 
 # Foundry (for contract compilation and testing)
 curl -L https://foundry.paradigm.xyz | bash

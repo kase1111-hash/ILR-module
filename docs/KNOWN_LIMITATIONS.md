@@ -77,7 +77,9 @@ These need a real fraud-proof system. They are pinned by `test/L3KnownLimitation
   mixes old and new partials blocks execution until every member re-signs. Removing or rotating a signer after
   `signatureTimeout` can strand a warrant that could already execute.
 - `decryptedKeyHash` is `keccak256(sigma)`, and sigma is public once `threshold` partials are on chain; it is
-  not a secret. HYBRID_ATTESTED records the operator's attested hash without recomputing it.
+  not a secret. HYBRID_ATTESTED records the operator's attested hash without recomputing it, and (with no
+  precompiles on chain) counts current partials that were never verified on chain; the operator attestation
+  is what protects that mode.
 - A failing EIP-2537 precompile consumes all gas forwarded to it, so calls with malformed points use most of
   their gas limit before failing closed.
 - The SDK's viewing-key reconstruction reveals every share; partial or threshold signatures must never be used
@@ -99,6 +101,8 @@ See `docs/MULTISIG_CONFIG.md` ("Residual Design Limits").
 ## DIDRegistry and FIDOVerifier (deferred)
 - Five or more colluding trusted issuers can fill a DID's 50 credential slots, and a still-trusted issuer can
   refill its 10 slots after the controller clears them, until the owner removes it.
+- Renewing in place needs `renewCredential`; an issuer that renews through `issueCredential` uses a new slot
+  each time and can hit its 10-slot limit until old credentials expire and are pruned.
 - A low-trust issuer can lower a DID's score through the weighted average.
 - `minSybilScore` is not enforced on chain; the live score views cost up to about 0.6M gas.
 - The pure-Solidity P-256 fallback is correct but costs about 38M gas, so the RIP-7212 precompile is
@@ -112,7 +116,8 @@ See `docs/MULTISIG_CONFIG.md` ("Residual Design Limits").
 - `minBatchSize` is not an anonymity floor (cancelled padding counts), and FIFO spam of record-only entries
   can push a relayed transaction past `maxQueueTime`.
 - A full 100-transaction release costs about 6.5M gas, above common Chainlink Automation limits; `checkUpkeep`
-  does not signal a partially executed batch (anyone can call `executeBatch` to finish it).
+  does not signal a partially executed batch (anyone can call `executeBatch` to finish it). The dummy
+  generator's keeper upkeep needs a gas limit of at least 1,000,000.
 
 ## Subgraph
 - Some contract actions emit no event and are not indexed: `AssetRegistry.transferAsset`,

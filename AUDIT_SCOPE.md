@@ -10,17 +10,17 @@
 
 | Contract | File | Lines | Purpose |
 |----------|------|-------|---------|
-| `ILRM` | `contracts/ILRM.sol` | 729 | Core dispute resolution (stakes, proposals, timeouts), oracle consumer |
-| `NatLangChainTreasury` | `contracts/Treasury.sol` | 472 | Burns, fees, defensive subsidies, harassment scores |
-| `NatLangChainOracle` | `contracts/Oracle.sol` | 496 | EIP-712 signature verification, LLM proposal relay, owner recovery |
+| `ILRM` | `contracts/ILRM.sol` | 897 | Core dispute resolution (stakes, proposals, timeouts), oracle consumer |
+| `NatLangChainTreasury` | `contracts/Treasury.sol` | 500 | Burns, fees, defensive subsidies, harassment scores |
+| `NatLangChainOracle` | `contracts/Oracle.sol` | 502 | EIP-712 signature verification, LLM proposal relay, owner recovery |
 | `NatLangChainAssetRegistry` | `contracts/AssetRegistry.sol` | 384 | IP asset registration, dispute freezes, fallback licenses |
-| **Total** | | **2,081** | |
+| **Total** | | **2,283** | |
 
 ### Interfaces in Scope
 
 | Interface | File | Lines |
 |-----------|------|-------|
-| `IILRM` | `contracts/interfaces/IILRM.sol` | 239 |
+| `IILRM` | `contracts/interfaces/IILRM.sol` | 257 |
 | `IOracle`, `IOracleConsumer` | `contracts/interfaces/IOracle.sol` | 125 |
 | `IAssetRegistry` | `contracts/interfaces/IAssetRegistry.sol` | 162 |
 
