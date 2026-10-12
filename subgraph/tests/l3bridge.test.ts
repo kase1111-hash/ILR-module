@@ -14,10 +14,16 @@ import {
   FraudProofSubmitted,
   FraudProofValidated,
   SequencerUpdated,
+  SettlementSkipped,
   StateCommitmentFinalized,
   StateCommitmentSubmitted
 } from "../generated/L3Bridge/L3Bridge";
-import { L3StateCommitment } from "../generated/schema";
+import {
+  FraudProofChallenge,
+  FraudProofCommitment,
+  L3SettlementSkip,
+  L3StateCommitment
+} from "../generated/schema";
 import {
   handleBridgeStatusChanged,
   handleCommittedChainRolledBack,
@@ -32,9 +38,11 @@ import {
   handleFraudProofSubmitted,
   handleFraudProofValidated,
   handleSequencerUpdated,
+  handleSettlementSkipped,
   handleStateCommitmentFinalized,
   handleStateCommitmentSubmitted
 } from "../src/l3bridge";
+import { eventId } from "../src/common";
 import {
   ALICE,
   BOB,
@@ -122,6 +130,12 @@ function rejectRoot(r: Bytes, newHead: Bytes, newHeight: i32, disputeId: i32, ch
 
 function commitmentKey(challenger: Address, hash: Bytes): string {
   return challenger.toHexString() + "-" + hash.toHexString();
+}
+
+function settlementSkipped(l2Id: i32, l3Id: i32, reason: i32): SettlementSkipped {
+  return changetype<SettlementSkipped>(
+    mockEvent(L3_ADDRESS, [pInt("l2DisputeId", l2Id), pInt("l3DisputeId", l3Id), pInt("reason", reason)])
+  );
 }
 
 describe("L3Bridge state commitments and fraud proofs", () => {
@@ -231,6 +245,38 @@ describe("L3Bridge state commitments and fraud proofs", () => {
     assert.fieldEquals("ProtocolMetric", "protocol", "totalL3Commitments", "4");
   });
 
+  test("a forfeited reveal earlier in the transaction is not credited with a direct win", () => {
+    beginTx(50, 1000);
+    submitRoot(root(7), 10, 1, 87400);
+    beginTx(51, 2000);
+    commit(commitHash(7), root(7), ALICE);
+
+    // One transaction (e.g. from ALICE's contract, after the owner disabled commit-reveal): an invalid
+    // reveal forfeits the bond, then submitFraudProof rejects the root directly
+    beginTx(52, 3000);
+    reveal(commitHash(7), root(7), ALICE);
+    handleFraudProofForfeited(
+      changetype<FraudProofForfeited>(
+        mockEvent(L3_ADDRESS, [
+          pB32("commitHash", commitHash(7)),
+          pB32("stateRoot", root(7)),
+          pAddr("challenger", ALICE),
+          pUint("bond", BOND)
+        ])
+      )
+    );
+    rejectRoot(root(7), word(0), 0, 3, ALICE, REWARD);
+
+    assert.fieldEquals("FraudProofChallenge", root(7).toHexString(), "mode", "DIRECT");
+    assert.assertTrue(FraudProofChallenge.load(root(7).toHexString())!.commitment === null);
+    assert.fieldEquals("FraudProofChallenge", root(7).toHexString(), "reward", REWARD.toString());
+    assert.fieldEquals("FraudProofCommitment", commitmentKey(ALICE, commitHash(7)), "status", "FORFEITED");
+    assert.assertTrue(FraudProofCommitment.load(commitmentKey(ALICE, commitHash(7)))!.reward === null);
+    assert.fieldEquals("L3StateCommitment", root(7).toHexString(), "status", "REJECTED");
+    assert.fieldEquals("L3Metric", "0", "fraudProofsForfeited", "1");
+    assert.fieldEquals("L3Metric", "0", "bondsForfeited", BOND.toString());
+  });
+
   test("legacy direct fraud proof rejecting the genesis root", () => {
     beginTx(20, 1000);
     submitRoot(root(5), 10, 1, 87400);
@@ -287,6 +333,68 @@ describe("L3Bridge dispute bridging and configuration", () => {
     assert.fieldEquals("L3BridgedDispute", "9", "outcome", "ACCEPTED");
     assert.fieldEquals("L3BridgedDispute", "9", "counterpartyReturn", "90");
     assert.fieldEquals("L3Chain", L3_ADDRESS.toHexString(), "totalSettlements", "1");
+  });
+
+  test("batch settlements record each skipped message with its reason", () => {
+    beginTx(60, 1000);
+    handleDisputeBridgedToL3(
+      changetype<DisputeBridgedToL3>(
+        mockEvent(L3_ADDRESS, [
+          pInt("l2DisputeId", 12),
+          pInt("l3DisputeId", 4),
+          pAddr("initiator", ALICE),
+          pInt("stakeAmount", 100)
+        ])
+      )
+    );
+    assert.fieldEquals("L3BridgedDispute", "12", "skippedSettlements", "0");
+
+    // batchProcessSettlements: settle 12, skip its in-batch duplicate, a message for a dispute never
+    // bridged, and one naming an unfinalized state root
+    beginTx(61, 2000);
+    handleDisputeSettledFromL3(
+      changetype<DisputeSettledFromL3>(
+        mockEvent(L3_ADDRESS, [
+          pInt("l2DisputeId", 12),
+          pInt("l3DisputeId", 4),
+          pInt("outcome", 3),
+          pInt("initiatorReturn", 100),
+          pInt("counterpartyReturn", 100)
+        ])
+      )
+    );
+    const duplicate = settlementSkipped(12, 4, 3);
+    const unbridged = settlementSkipped(77, 9, 1);
+    const unfinalized = settlementSkipped(12, 4, 4);
+    handleSettlementSkipped(duplicate);
+    handleSettlementSkipped(unbridged);
+    handleSettlementSkipped(unfinalized);
+
+    assert.fieldEquals("L3SettlementSkip", eventId(duplicate), "reason", "ALREADY_SETTLED");
+    assert.fieldEquals("L3SettlementSkip", eventId(duplicate), "reasonCode", "3");
+    assert.fieldEquals("L3SettlementSkip", eventId(duplicate), "l2DisputeId", "12");
+    assert.fieldEquals("L3SettlementSkip", eventId(duplicate), "l3DisputeId", "4");
+    assert.fieldEquals("L3SettlementSkip", eventId(duplicate), "bridgedDispute", "12");
+    assert.fieldEquals("L3SettlementSkip", eventId(duplicate), "dispute", "12");
+    assert.fieldEquals("L3SettlementSkip", eventId(unbridged), "reason", "NOT_BRIDGED");
+    assert.assertTrue(L3SettlementSkip.load(eventId(unbridged))!.bridgedDispute === null);
+    assert.fieldEquals("L3SettlementSkip", eventId(unfinalized), "reason", "STATE_ROOT_NOT_FINALIZED");
+    assert.fieldEquals("L3BridgedDispute", "12", "skippedSettlements", "2");
+    assert.fieldEquals("L3BridgedDispute", "12", "settled", "true");
+    assert.fieldEquals("L3Metric", "0", "settlementsSkipped", "3");
+    assert.fieldEquals("L3Metric", "0", "disputesSettled", "1");
+    assert.fieldEquals("L3Chain", L3_ADDRESS.toHexString(), "totalSettlements", "1");
+    assert.entityCount("L3SettlementSkip", 3);
+
+    // L3_DISPUTE_ID_MISMATCH and a code this subgraph does not know
+    beginTx(62, 3000);
+    const mismatch = settlementSkipped(12, 5, 2);
+    const unknown = settlementSkipped(12, 4, 9);
+    handleSettlementSkipped(mismatch);
+    handleSettlementSkipped(unknown);
+    assert.fieldEquals("L3SettlementSkip", eventId(mismatch), "reason", "L3_DISPUTE_ID_MISMATCH");
+    assert.fieldEquals("L3SettlementSkip", eventId(unknown), "reason", "UNKNOWN");
+    assert.fieldEquals("L3SettlementSkip", eventId(unknown), "reasonCode", "9");
   });
 
   test("status, sequencer and roles", () => {

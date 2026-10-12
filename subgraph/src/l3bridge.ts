@@ -9,6 +9,9 @@
 //                           FraudProofSubmitted, FraudProofValidated
 //   revealFraudProof (else): FraudProofRevealed, FraudProofForfeited | FraudProofRefunded
 //   submitFraudProof:       CommittedChainRolledBack, FraudProofSubmitted, FraudProofValidated
+//   batchProcessSettlements: per message, DisputeSettledFromL3 | SettlementSkipped
+// One transaction can hold several of these calls (e.g. from a contract), so a reveal of the
+// same transaction is linked to a success only while its commitment is still PENDING.
 // =============================================================================
 
 import { Address, BigInt, Bytes, ethereum } from "@graphprotocol/graph-ts";
@@ -32,6 +35,7 @@ import {
   Paused,
   SequencerUpdated,
   SettlementRelayerUpdated,
+  SettlementSkipped,
   StateCommitmentFinalized,
   StateCommitmentSubmitted,
   Unpaused
@@ -43,6 +47,7 @@ import {
   L3Chain,
   L3ChainSlot,
   L3Metric,
+  L3SettlementSkip,
   L3StateCommitment
 } from "../generated/schema";
 import {
@@ -50,6 +55,7 @@ import {
   ONE,
   ZERO,
   dayStart,
+  eventId,
   getOrCreateContract,
   getOrCreateDailyMetric,
   getOrCreateProtocolMetric,
@@ -69,6 +75,14 @@ function bridgeStatusName(value: i32): string {
   if (value == 1) return "PAUSED";
   if (value == 2) return "DEPRECATED";
   return "ACTIVE";
+}
+
+function settlementSkipReasonName(value: i32): string {
+  if (value == 1) return "NOT_BRIDGED";
+  if (value == 2) return "L3_DISPUTE_ID_MISMATCH";
+  if (value == 3) return "ALREADY_SETTLED";
+  if (value == 4) return "STATE_ROOT_NOT_FINALIZED";
+  return "UNKNOWN"; // 0 = None is never emitted for a skip
 }
 
 function l3DisputeStateName(value: i32): string {
@@ -127,6 +141,7 @@ function getOrCreateL3Metric(timestamp: BigInt): L3Metric {
     metric.rewardsPaid = ZERO;
     metric.disputesBridged = 0;
     metric.disputesSettled = 0;
+    metric.settlementsSkipped = 0;
   }
   return metric;
 }
@@ -357,8 +372,15 @@ export function handleFraudProofSubmitted(event: FraudProofSubmitted): void {
     const revealId = stateCommitment.lastRevealCommitment;
     const revealTx = stateCommitment.lastRevealTx;
     if (revealId !== null && revealTx !== null && revealTx.equals(event.transaction.hash)) {
+      // The winning reveal is still PENDING here (FraudProofValidated settles it). A reveal earlier in
+      // the same transaction that was already forfeited or refunded is not this challenge's commitment:
+      // linking it would relabel its kept bond WON (e.g. a forfeited reveal, then submitFraudProof).
       const commitment = FraudProofCommitment.load(revealId);
-      if (commitment != null && commitment.challenger.equals(event.params.challenger)) {
+      if (
+        commitment != null &&
+        commitment.status == "PENDING" &&
+        commitment.challenger.equals(event.params.challenger)
+      ) {
         challenge.mode = "COMMIT_REVEAL";
         challenge.commitment = commitment.id;
       }
@@ -407,6 +429,7 @@ export function handleDisputeBridgedToL3(event: DisputeBridgedToL3): void {
   bridged.bridgedAt = event.block.timestamp;
   bridged.bridgeTx = event.transaction.hash;
   bridged.skippedRebridges = 0;
+  bridged.skippedSettlements = 0;
   bridged.settled = false;
   bridged.save();
 
@@ -443,6 +466,32 @@ export function handleDisputeSettledFromL3(event: DisputeSettledFromL3): void {
 
   const metric = getOrCreateL3Metric(event.block.timestamp);
   metric.disputesSettled = metric.disputesSettled + 1;
+  metric.save();
+}
+
+export function handleSettlementSkipped(event: SettlementSkipped): void {
+  // batchProcessSettlements skips a message that fails a check instead of reverting the batch
+  const id = event.params.l2DisputeId.toString();
+  const skip = new L3SettlementSkip(eventId(event));
+  skip.bridge = event.address;
+  skip.l2DisputeId = event.params.l2DisputeId;
+  skip.l3DisputeId = event.params.l3DisputeId;
+  skip.reason = settlementSkipReasonName(event.params.reason);
+  skip.reasonCode = event.params.reason;
+  skip.dispute = id;
+  const bridged = L3BridgedDispute.load(id);
+  if (bridged != null) {
+    skip.bridgedDispute = bridged.id;
+    bridged.skippedSettlements = bridged.skippedSettlements + 1;
+    bridged.save();
+  }
+  skip.timestamp = event.block.timestamp;
+  skip.blockNumber = event.block.number;
+  skip.txHash = event.transaction.hash;
+  skip.save();
+
+  const metric = getOrCreateL3Metric(event.block.timestamp);
+  metric.settlementsSkipped = metric.settlementsSkipped + 1;
   metric.save();
 }
 

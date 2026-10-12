@@ -4,9 +4,9 @@
 // Handles every event of contracts/Oracle.sol (NatLangChainOracle).
 // Event order inside one transaction mirrors the contract:
 //   submitProposal:       (ILRM events), ProposalSubmittedToILRM, ProposalRoundFilled, DisputeProcessed
-//   resetProposal:        ProposalReset, ProposalRoundReopened
+//   resetProposal:        ProposalReset, ProposalRoundReopened, (ILRM ProposalVoided)
 //   requestProposal:      ProposalRequested, DisputeProcessed (proposalHash = 0)
-//   cancelPendingRequest: ProposalRequested with zero evidenceHash and timestamp
+//   cancelPendingRequest: ProposalRequestCancelled
 // =============================================================================
 
 import { BigInt, ethereum } from "@graphprotocol/graph-ts";
@@ -15,6 +15,7 @@ import {
   OracleRegistered,
   OwnershipTransferStarted,
   OwnershipTransferred,
+  ProposalRequestCancelled,
   ProposalRequested,
   ProposalReset,
   ProposalRoundFilled,
@@ -82,6 +83,7 @@ function getOrCreateOracleMetric(timestamp: BigInt): OracleMetric {
     metric.proposalsSubmitted = 0;
     metric.proposalsReset = 0;
     metric.avgResponseSeconds = ZERO;
+    metric.totalResponseSeconds = ZERO;
     metric.responseSamples = 0;
   }
   return metric;
@@ -92,24 +94,32 @@ function getOrCreateOracleMetric(timestamp: BigInt): OracleMetric {
 // =============================================================================
 
 export function handleProposalRequested(event: ProposalRequested): void {
+  // Emitted only by requestProposal (ILRM-only), always with the block timestamp
   const od = getOrCreateOracleDispute(event.params.disputeId, event);
-  const metric = getOrCreateOracleMetric(event.block.timestamp);
-
-  if (event.params.timestamp.equals(ZERO)) {
-    // cancelPendingRequest re-uses this event with zero values
-    od.pending = false;
-    od.openRequestAt = null;
-    od.cancelCount = od.cancelCount + 1;
-    metric.requestsCancelled = metric.requestsCancelled + 1;
-  } else {
-    od.pending = true;
-    od.requestCount = od.requestCount + 1;
-    od.lastRequestedAt = event.params.timestamp;
-    od.lastRequestEvidenceHash = event.params.evidenceHash;
-    od.openRequestAt = event.params.timestamp;
-    metric.proposalsRequested = metric.proposalsRequested + 1;
-  }
+  od.pending = true;
+  od.requestCount = od.requestCount + 1;
+  od.lastRequestedAt = event.params.timestamp;
+  od.lastRequestEvidenceHash = event.params.evidenceHash;
+  od.openRequestAt = event.params.timestamp;
   od.save();
+
+  const metric = getOrCreateOracleMetric(event.block.timestamp);
+  metric.proposalsRequested = metric.proposalsRequested + 1;
+  metric.save();
+}
+
+export function handleProposalRequestCancelled(event: ProposalRequestCancelled): void {
+  // cancelPendingRequest withdraws the advisory pending flag (it reverts unless one is set). Advisory
+  // only: a later submission is still admitted, without a responseTime since no request is open.
+  const od = getOrCreateOracleDispute(event.params.disputeId, event);
+  od.pending = false;
+  od.openRequestAt = null;
+  od.cancelCount = od.cancelCount + 1;
+  od.lastCancelledAt = event.block.timestamp;
+  od.save();
+
+  const metric = getOrCreateOracleMetric(event.block.timestamp);
+  metric.requestsCancelled = metric.requestsCancelled + 1;
   metric.save();
 }
 
@@ -152,9 +162,10 @@ export function handleProposalRoundFilled(event: ProposalRoundFilled): void {
   if (openRequestAt !== null && timestamp.ge(openRequestAt)) {
     const responseTime = timestamp.minus(openRequestAt);
     submission.responseTime = responseTime;
-    const n = BigInt.fromI32(metric.responseSamples + 1);
-    metric.avgResponseSeconds = metric.avgResponseSeconds.times(n.minus(ONE)).plus(responseTime).div(n);
+    // Mean derived from the exact sum (a running mean of rounded values drifts down)
+    metric.totalResponseSeconds = metric.totalResponseSeconds.plus(responseTime);
     metric.responseSamples = metric.responseSamples + 1;
+    metric.avgResponseSeconds = metric.totalResponseSeconds.div(BigInt.fromI32(metric.responseSamples));
   }
   submission.save();
 

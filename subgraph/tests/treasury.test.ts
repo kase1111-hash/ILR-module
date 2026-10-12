@@ -1,4 +1,5 @@
 import { afterEach, assert, clearStore, describe, test } from "matchstick-as/assembly/index";
+import { Address } from "@graphprotocol/graph-ts";
 import {
   CapsUpdated,
   HarassmentScoreUpdated,
@@ -16,12 +17,33 @@ import {
   handleTreasuryReceived
 } from "../src/treasury";
 import { eventId } from "../src/common";
-import { ALICE, BOB, ILRM_ADDRESS, TREASURY_ADDRESS, beginTx, bi, mockEvent, pAddr, pInt, pStr, pUint } from "./helpers";
+import {
+  ALICE,
+  BOB,
+  CAROL,
+  ILRM_ADDRESS,
+  TREASURY_ADDRESS,
+  beginTx,
+  bi,
+  mockEvent,
+  pAddr,
+  pInt,
+  pStr,
+  pUint
+} from "./helpers";
+
+function receivedFrom(from: Address, amount: i32, reason: string): TreasuryReceived {
+  return changetype<TreasuryReceived>(
+    mockEvent(TREASURY_ADDRESS, [pAddr("from", from), pInt("amount", amount), pStr("reason", reason)])
+  );
+}
 
 function received(amount: i32, reason: string): TreasuryReceived {
-  return changetype<TreasuryReceived>(
-    mockEvent(TREASURY_ADDRESS, [pAddr("from", ALICE), pInt("amount", amount), pStr("reason", reason)])
-  );
+  return receivedFrom(ALICE, amount, reason);
+}
+
+function ilrmUpdated(oldIlrm: Address, newIlrm: Address): ILRMUpdated {
+  return changetype<ILRMUpdated>(mockEvent(TREASURY_ADDRESS, [pAddr("oldILRM", oldIlrm), pAddr("newILRM", newIlrm)]));
 }
 
 describe("Treasury", () => {
@@ -47,15 +69,54 @@ describe("Treasury", () => {
 
   test("inflows are split by reason", () => {
     beginTx(2, 1000);
+    handleILRMUpdated(ilrmUpdated(Address.zero(), ILRM_ADDRESS));
     handleTreasuryReceived(received(100, "fees"));
-    handleTreasuryReceived(received(30, "burn"));
+    // depositBurn(): ILRM-only, labelled "burn"
+    const burn = receivedFrom(ILRM_ADDRESS, 30, "burn");
+    handleTreasuryReceived(burn);
     const eth = received(7, "eth");
     handleTreasuryReceived(eth);
     assert.fieldEquals("TreasuryDeposit", eventId(eth), "isEth", "true");
+    assert.fieldEquals("TreasuryDeposit", eventId(eth), "isBurn", "false");
+    assert.fieldEquals("TreasuryDeposit", eventId(burn), "isBurn", "true");
     assert.fieldEquals("TreasuryMetric", "0", "totalReceived", "130");
     assert.fieldEquals("TreasuryMetric", "0", "totalBurnDeposits", "30");
     assert.fieldEquals("TreasuryMetric", "0", "burnDepositCount", "1");
     assert.fieldEquals("TreasuryMetric", "0", "totalReceivedEth", "7");
+  });
+
+  test("a \"burn\" label is only trusted from the Treasury's ILRM", () => {
+    // deposit(amount, "burn") is permissionless: anyone can choose the label
+    beginTx(4, 1000);
+    const spoofed = received(500, "burn");
+    handleTreasuryReceived(spoofed);
+    assert.fieldEquals("TreasuryDeposit", eventId(spoofed), "reason", "burn");
+    assert.fieldEquals("TreasuryDeposit", eventId(spoofed), "isBurn", "false");
+    assert.fieldEquals("TreasuryMetric", "0", "totalReceived", "500");
+    assert.fieldEquals("TreasuryMetric", "0", "totalBurnDeposits", "0");
+    assert.fieldEquals("TreasuryMetric", "0", "burnDepositCount", "0");
+
+    // Not even from the ILRM before the Treasury points at it
+    beginTx(5, 2000);
+    handleTreasuryReceived(receivedFrom(ILRM_ADDRESS, 40, "burn"));
+    assert.fieldEquals("TreasuryMetric", "0", "burnDepositCount", "0");
+
+    // Once ILRMUpdated names it, the ILRM's "burn" inflows count; a spoofed one still does not
+    beginTx(6, 3000);
+    handleILRMUpdated(ilrmUpdated(Address.zero(), ILRM_ADDRESS));
+    handleTreasuryReceived(receivedFrom(ILRM_ADDRESS, 60, "burn"));
+    handleTreasuryReceived(receivedFrom(BOB, 70, "burn"));
+    assert.fieldEquals("TreasuryMetric", "0", "totalBurnDeposits", "60");
+    assert.fieldEquals("TreasuryMetric", "0", "burnDepositCount", "1");
+
+    // A replaced ILRM is no longer trusted
+    beginTx(7, 4000);
+    handleILRMUpdated(ilrmUpdated(ILRM_ADDRESS, CAROL));
+    handleTreasuryReceived(receivedFrom(ILRM_ADDRESS, 80, "burn"));
+    handleTreasuryReceived(receivedFrom(CAROL, 90, "burn"));
+    assert.fieldEquals("TreasuryMetric", "0", "totalBurnDeposits", "150");
+    assert.fieldEquals("TreasuryMetric", "0", "burnDepositCount", "2");
+    assert.fieldEquals("TreasuryMetric", "0", "totalReceived", "840");
   });
 
   test("configuration, pause and the Treasury's own harassment score", () => {

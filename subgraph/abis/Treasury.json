@@ -144,7 +144,7 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "",
+        "name": "disputeId",
         "type": "uint256"
       }
     ],
@@ -163,7 +163,7 @@
     "inputs": [
       {
         "internalType": "uint256",
-        "name": "",
+        "name": "disputeId",
         "type": "uint256"
       }
     ],
@@ -485,6 +485,30 @@
     "name": "setMinReserve",
     "outputs": [],
     "stateMutability": "nonpayable",
+    "type": "function"
+  },
+  {
+    "inputs": [
+      {
+        "internalType": "address",
+        "name": "ilrm",
+        "type": "address"
+      },
+      {
+        "internalType": "uint256",
+        "name": "disputeId",
+        "type": "uint256"
+      }
+    ],
+    "name": "subsidyRecipientOf",
+    "outputs": [
+      {
+        "internalType": "address",
+        "name": "participant",
+        "type": "address"
+      }
+    ],
+    "stateMutability": "view",
     "type": "function"
   },
   {

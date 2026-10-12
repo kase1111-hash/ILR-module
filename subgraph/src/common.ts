@@ -135,6 +135,7 @@ export function getOrCreateDailyMetric(timestamp: BigInt): DailyMetric {
     metric.totalBurned = ZERO;
     metric.totalSubsidies = ZERO;
     metric.totalSubsidiesReturned = ZERO;
+    metric.initiatorIncentivesPaid = ZERO;
     metric.newParticipants = 0;
     metric.counterProposals = 0;
     metric.proposals = 0;
@@ -157,12 +158,17 @@ export function getOrCreateProtocolMetric(block: ethereum.Block): ProtocolMetric
     metric.totalValueBurned = ZERO;
     metric.totalSubsidiesDistributed = ZERO;
     metric.totalSubsidiesReturned = ZERO;
+    metric.totalInitiatorIncentivesPaid = ZERO;
+    metric.totalInitiatorIncentivesUncapped = ZERO;
+    metric.cappedInitiatorIncentives = ZERO;
+    metric.totalOracleRequestFailures = ZERO;
     metric.uniqueParticipants = ZERO;
     metric.totalProposals = ZERO;
     metric.totalCounterProposals = ZERO;
     metric.totalCounterFeesBurned = ZERO;
     metric.totalVoluntaryRequests = ZERO;
     metric.totalL3Commitments = ZERO;
+    metric.totalResolutionBlocks = ZERO;
     metric.avgResolutionBlocks = ZERO;
   }
   metric.lastUpdatedBlock = block.number;
