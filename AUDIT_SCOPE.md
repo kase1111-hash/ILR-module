@@ -1,7 +1,7 @@
 # ILRM Core Audit Scope
 
-**Date:** 2026-02-08
-**Version:** Post-Phase 1 (Strip & Harden)
+**Date:** 2026-02-08 (updated 2026-10-12)
+**Version:** Post-Phase 1 (Strip & Harden), plus the 2026-10 correctness and security fixes (see CHANGELOG.md)
 **Prepared for:** External auditor engagement
 
 ---
@@ -24,8 +24,7 @@
 | `IOracle`, `IOracleConsumer` | `contracts/interfaces/IOracle.sol` | 125 |
 | `IAssetRegistry` | `contracts/interfaces/IAssetRegistry.sol` | 162 |
 
-Line counts are `wc -l` on the oracle-recovery branch. The `ILRM`, `IILRM` and `Treasury` rows must be
-recounted after the core-treasury branch is merged.
+Line counts are `wc -l` at the commit that last updated this file.
 
 `IOracle.sol` also defines `IOracleConsumer`, the lean interface through which `NatLangChainOracle` reads and
 writes the dispute contract it serves (`oracleContext`, `submitLLMProposal`, `voidLLMProposal`). It is
@@ -86,9 +85,15 @@ Oracle owner -> Oracle.resetProposal() / resetProposalExact()
   or
 Anyone -> ILRM.enforceTimeout() [50% burn + fallback license]
 
-Counterparty -> ILRM.depositStakeWithSubsidy() -> Treasury.fundStakeSubsidy() [onlyILRM, approves ILRM] -> ILRM pulls subsidy + counterparty top-up
+Counterparty -> ILRM.depositStakeWithSubsidy(id, maxSubsidy, maxTopUp)
+  -> Treasury.fundStakeSubsidy() [onlyILRM; records keyed by (ILRM, disputeId); approves ILRM for the grant]
+  -> ILRM pulls the subsidy + the counterparty top-up [top-up <= maxTopUp, checked before and after the Treasury call]
   Treasury -> IILRM.disputes() [verifies dispute state and the committed symmetric stake]
   ILRM -> funding Treasury [pro-rata repayment of the counterparty payout on resolution, plain ERC20 transfer]
+
+Anyone -> ILRM.enforceTimeout() on a never-staked dispute (non-participation)
+  ILRM -> initiator [full stake + incentive = min(10% of stake, maxIncentivePerDispute,
+                     maxIncentivePerWindow - paid this window, tokenReserves); never reverts on a cap]
 ```
 
 ---
@@ -135,9 +140,20 @@ Counterparty -> ILRM.depositStakeWithSubsidy() -> Treasury.fundStakeSubsidy() [o
    - Subsidy never exceeds the dispute's stake (`subsidy <= initiatorStake`) and is escrowed, never paid to a wallet
    - Pro-rata repayment to the recorded funder on acceptance/timeout (`_payCounterpartySide` rounding) and
      resolution liveness (no Treasury call during resolution; works with the Treasury paused or the pointer rotated)
+   - Slippage: a front-run that shrinks the grant can only make `depositStakeWithSubsidy` revert (`maxTopUp`),
+     never charge the defender more than the bound they signed
+   - Subsidy records keyed by (ILRM, disputeId): re-pointing `Treasury.setILRM` at a redeployed ILRM cannot
+     collide with old dispute IDs
    - Harassment score manipulation
 
-6. **Timeout/cooldown enforcement accuracy** (ILRM.sol)
+6. **Initiator-incentive farming bound** (ILRM.sol)
+   - Non-participation pays the initiator an incentive from `tokenReserves`; a sybil counterparty that never
+     stakes can farm it. The caps (`maxIncentivePerDispute`, `maxIncentivePerWindow`, `incentiveWindow`,
+     owner-set within `MIN_/MAX_INCENTIVE_WINDOW`) must bound total payouts to the per-window cap
+   - The lazily rolled window, `incentivePaidInWindow` accounting, and that a cap or empty reserves never
+     revert or strand the initiator's stake
+
+7. **Timeout/cooldown enforcement accuracy** (ILRM.sol)
    - `STAKE_WINDOW` (3 days) enforcement
    - `RESOLUTION_TIMEOUT` (7 days) enforcement
    - `COOLDOWN_PERIOD` (30 days) enforcement
@@ -145,19 +161,19 @@ Counterparty -> ILRM.depositStakeWithSubsidy() -> Treasury.fundStakeSubsidy() [o
 
 ### High Priority
 
-7. **Access control consistency**
+8. **Access control consistency**
    - `onlyOwner` on admin functions (all contracts use `Ownable2Step`)
    - `onlyILRM` on Treasury burn deposits and harassment score updates
    - `onlyOracle` on Oracle proposal submission
    - Oracle `onlyILRM` for proposal requests
    - ILRM `voidLLMProposal` and `submitLLMProposal` callable only by the oracle
 
-8. **Integer overflow/underflow** (Solidity 0.8.20 has built-in checks, but verify edge cases)
+9. **Integer overflow/underflow** (Solidity 0.8.20 has built-in checks, but verify edge cases)
    - Escalation multiplier: `stakeAmount * (ESCALATION_MULTIPLIER ** disputes)`
    - Counter fee: `COUNTER_FEE_BASE * (2 ** counterCount)`
    - Harassment score delta arithmetic
 
-9. **Front-running risks**
+10. **Front-running risks**
    - Can an attacker front-run `acceptProposal` to manipulate resolution?
    - Can an acceptance land on a proposal other than the one the party reviewed (reset, replacement, new round)?
      `acceptProposalWithHash` must revert "Proposal changed" in every such case
@@ -167,12 +183,12 @@ Counterparty -> ILRM.depositStakeWithSubsidy() -> Treasury.fundStakeSubsidy() [o
 
 ### Medium Priority
 
-10. **AssetRegistry freeze/unfreeze correctness**
+11. **AssetRegistry freeze/unfreeze correctness**
    - Assets frozen during dispute must be unfrozen on resolution
    - Fallback license application on timeout
    - DoS via `MAX_ASSETS_PER_OWNER` limit
 
-11. **ETH handling**
+12. **ETH handling**
     - `receive()` on ILRM and Treasury
     - Counter-proposal ETH fee burns to `0xdead`
     - `emergencyWithdrawETH` in Treasury
@@ -198,6 +214,11 @@ Counterparty -> ILRM.depositStakeWithSubsidy() -> Treasury.fundStakeSubsidy() [o
 | `test/OracleRequestWiring.t.sol` | Foundry | 10 | Advisory proposal requests never block; gas floor |
 | `test/OracleMultiParty.t.sol` | Foundry | 17 | Oracle serving MultiPartyILRM (deferred module) |
 | `test/OracleRecovery.test.js` | Hardhat | 6 | Reviewer PoC, hash-bound acceptance via ethers v6 |
+| `test/TreasurySubsidy.t.sol`, `test/TreasurySubsidyRegression.t.sol` | Foundry | 41 | Escrowed subsidies, pro-rata repayment, collusion fuzz |
+| `test/TreasurySubsidyFollowups.t.sol`, `test/TreasuryFollowupsRegression.t.sol` | Foundry | - | maxTopUp slippage bound, incentive caps and farming bound, (ILRM, disputeId) keys |
+| `test/ILRMProposalReplacement.t.sol` | Foundry | 10 | Storing a proposal voids acceptances |
+
+Run `forge test` and `npx hardhat test` for current counts; every suite above passes in CI.
 
 ---
 
@@ -207,3 +228,8 @@ Counterparty -> ILRM.depositStakeWithSubsidy() -> Treasury.fundStakeSubsidy() [o
 2. **Owner-controlled parameters** - Stake windows, timeouts, fees controlled by single owner. Phase 5 adds governance timelock.
 3. **No on-chain evidence verification** - Evidence hashes are opaque; content verification is off-chain.
 4. **String-based error messages in ILRM** - ILRM uses `require(condition, "message")` instead of custom errors. Treasury uses custom errors. This is inconsistent but functional.
+5. **Initiator incentive is farmable up to its caps** - a sybil counterparty that never stakes still lets the
+   initiator collect the incentive; the caps bound this to `maxIncentivePerWindow` per window (see 6 above).
+
+The full list of accepted residual risks, including the deferred modules, is in
+[docs/KNOWN_LIMITATIONS.md](docs/KNOWN_LIMITATIONS.md).
