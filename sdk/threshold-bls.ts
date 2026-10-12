@@ -20,6 +20,11 @@
  *   only canonical encodings, as the contract does
  * - A warrant's decryptedKeyHash is keccak256 of the 256-byte encoding of its threshold signature
  *   (computeDecryptedKeyHash); any valid t-subset of partial signatures aggregates to the same value
+ * - Only the partial signatures that currently count may be aggregated: ComplianceCouncil.getSignatures
+ *   also lists stale ones (signer removed, or key rotated since). aggregateWarrantSignature reads
+ *   getCurrentSignatures through COMPLIANCE_COUNCIL_ABI, re-checks currency against the active members
+ *   (selectCurrentSubmissions), verifies every partial and the aggregate off chain and returns the
+ *   decryptedKeyHash a HYBRID_ATTESTED operator attests
  *
  * Dependencies:
  * - @noble/curves for BLS12-381
@@ -91,6 +96,67 @@ export interface WarrantSigningMessage {
 /** A 32-byte word as bytes or 0x-prefixed hex (as returned by ethers). */
 export type SolidityWord = Uint8Array | string;
 
+/** A BLSPublicKey or BLSSignature struct as read from the contract (words as bytes or hex) */
+export interface SolidityPoint {
+  x: ArrayLike<SolidityWord>;
+  y: ArrayLike<SolidityWord>;
+}
+
+/** A uint256 as returned by ethers (bigint), or a number */
+export type SolidityUint = bigint | number;
+
+/**
+ * A ComplianceCouncil SignatureSubmission, as getCurrentSignatures / getSignatures return it (ethers
+ * Result objects expose the struct fields by name). It counts toward the threshold while its signer is
+ * an active member whose keyId still equals the submission's keyId.
+ */
+export interface CouncilSignatureSubmission {
+  memberIndex: SolidityUint;
+  signature: SolidityPoint;
+  verified: boolean;
+  signer: string;
+  keyId: SolidityUint;
+}
+
+/** A ComplianceCouncil CouncilMember, as getActiveMembers / getMember return it */
+export interface CouncilMemberRecord {
+  memberAddress: string;
+  publicKey: SolidityPoint;
+  keyIndex: SolidityUint;
+  isActive: boolean;
+  keyId: SolidityUint;
+}
+
+/** The ComplianceCouncil views aggregateWarrantSignature reads, e.g. an ethers Contract on COMPLIANCE_COUNCIL_ABI */
+export interface ComplianceCouncilReader {
+  getCurrentSignatures(warrantId: bigint): Promise<ArrayLike<CouncilSignatureSubmission>>;
+  getActiveMembers(): Promise<ArrayLike<CouncilMemberRecord>>;
+  getSigningMessage(warrantId: bigint): Promise<SolidityWord>;
+  getAggregatedPublicKey(): Promise<SolidityPoint>;
+  getConfig(): Promise<{ threshold: SolidityUint }>;
+}
+
+/** Inputs of aggregateCurrentPartials, as read from the council */
+export interface WarrantPartials {
+  /** getCurrentSignatures(warrantId); getSignatures output works too, its stale entries are dropped */
+  submissions: ArrayLike<CouncilSignatureSubmission>;
+  /** getActiveMembers(): decides which submissions are current and holds the signers' keys */
+  members: ArrayLike<CouncilMemberRecord>;
+  /** getSigningMessage(warrantId) */
+  message: Uint8Array;
+  /** DKG group key (compressed or uncompressed G1), e.g. decodeBLSPublicKeyFromSolidity(getAggregatedPublicKey()) */
+  groupPublicKey: Uint8Array;
+  /** getConfig().threshold */
+  threshold: number;
+}
+
+/** A warrant's threshold signature, checked against the group key, and its decryptedKeyHash */
+export interface WarrantThresholdSignature {
+  thresholdSignature: ThresholdSignature;
+  /** computeDecryptedKeyHash(thresholdSignature.aggregatedSignature): the attestHybridVerification input */
+  decryptedKeyHash: Uint8Array;
+}
+
 // ============ Constants ============
 
 /**
@@ -111,6 +177,32 @@ const BLS_G2_SIZE = 96;
 const UINT256_MAX = (1n << 256n) - 1n;
 /** BLS12-381 base field modulus p */
 const FP_ORDER = bls.fields.Fp.ORDER;
+
+const BLS_PUBLIC_KEY_TUPLE = "tuple(bytes32[2] x, bytes32[2] y)";
+const SIGNATURE_SUBMISSION_TUPLE =
+  "tuple(uint256 memberIndex, tuple(bytes32[4] x, bytes32[4] y) signature, uint256 timestamp, bool verified, " +
+  "address signer, uint256 keyId)";
+const COUNCIL_MEMBER_TUPLE =
+  `tuple(address memberAddress, uint8 role, ${BLS_PUBLIC_KEY_TUPLE} publicKey, uint256 keyIndex, bool isActive, ` +
+  "uint256 joinedAt, uint256 votesParticipated, uint256 signaturesProvided, uint256 keyId, uint256 membershipId)";
+
+/**
+ * Human-readable ABI of the ComplianceCouncil functions the signing / attestation flow uses
+ * (new ethers.Contract(councilAddress, COMPLIANCE_COUNCIL_ABI, runner)).
+ */
+export const COMPLIANCE_COUNCIL_ABI: readonly string[] = [
+  `function getCurrentSignatures(uint256 warrantId) view returns (${SIGNATURE_SUBMISSION_TUPLE}[] submissions)`,
+  `function getSignatures(uint256 warrantId) view returns (${SIGNATURE_SUBMISSION_TUPLE}[] submissions)`,
+  `function getActiveMembers() view returns (${COUNCIL_MEMBER_TUPLE}[] members)`,
+  `function getMember(address addr) view returns (${COUNCIL_MEMBER_TUPLE} member)`,
+  "function getSigningMessage(uint256 warrantId) view returns (bytes32 message)",
+  `function getAggregatedPublicKey() view returns (${BLS_PUBLIC_KEY_TUPLE} aggregatedKey)`,
+  "function getConfig() view returns (tuple(uint256 threshold, uint256 totalMembers, uint256 votingPeriod, " +
+    "uint256 executionDelay, uint256 appealWindow, uint256 signatureTimeout, bool requiresUserNotification) config)",
+  "function submitSignature(uint256 warrantId, tuple(bytes32[4] x, bytes32[4] y) signature)",
+  "function attestHybridVerification(uint256 warrantId, bytes32 attestationHash, string verificationMethod)",
+  "function getHybridAttestation(uint256 warrantId) view returns (bool attested, bytes32 attestationHash)",
+];
 
 // ============ Distributed Key Generation ============
 
@@ -362,7 +454,9 @@ function computeLagrangeCoefficient(
  * @param partialSignatures Array of partial signatures
  * @returns Aggregated threshold signature; signerIndices are sorted ascending (the aggregate itself
  *          does not depend on the order), as ComplianceCouncil.verifyThresholdSignature expects
- * @throws on an empty input, a non-positive or non-integer index, or a duplicate index
+ * @throws on an empty input, a non-positive or non-integer index, a duplicate index, or an aggregate
+ *         that is the point at infinity (partials that cancel out; the contract and the encoders reject
+ *         the infinity signature too)
  */
 export function aggregateSignatures(
   partialSignatures: PartialSignature[]
@@ -388,6 +482,9 @@ export function aggregateSignatures(
     const lambda = computeLagrangeCoefficient(partialSig.signerIndex, signerIndices);
     const sigPoint = bls.G2.ProjectivePoint.fromHex(partialSig.signature);
     aggregated = aggregated.add(sigPoint.multiply(lambda));
+  }
+  if (aggregated.equals(bls.G2.ProjectivePoint.ZERO)) {
+    throw new Error("Aggregate is the point at infinity");
   }
 
   return {
@@ -660,7 +757,7 @@ export function decodeBLSPublicKeyFromSolidity(pk: {
 }
 
 /**
- * Decode a ComplianceCouncil BLSSignature struct (e.g. from getSignatures or aggregateSignatures)
+ * Decode a ComplianceCouncil BLSSignature struct (e.g. from getCurrentSignatures or aggregateSignatures)
  * @param sig Struct with 32-byte words as bytes or 0x-hex strings
  * @returns 96-byte compressed G2 point
  * @throws if a coordinate limb is not a canonical Fp encoding, or the point is not a valid,
@@ -701,6 +798,141 @@ export function decodeBLSSignatureFromSolidity(sig: {
 export function computeDecryptedKeyHash(signature: Uint8Array): Uint8Array {
   const enc = encodeBLSSignatureForSolidity(signature);
   return keccak_256(concatBytes(...enc.x, ...enc.y));
+}
+
+// ============ Council submissions (operator flow) ============
+
+/**
+ * The submissions that currently count toward a warrant's threshold, in submission order: those whose
+ * signer is an active member still holding the key registration (keyId) the submission was made under.
+ * This is the contract's rule, so for members read at the same block the result equals
+ * ComplianceCouncil.getCurrentSignatures.
+ *
+ * Apply it to getSignatures output, which also lists stale submissions: a removed member's, or one made
+ * under a key rotated away since. Aggregating those gives a bad threshold signature: the old key need not
+ * be a share of the group key, and a stale entry can repeat a key index a current entry uses.
+ *
+ * @param submissions getSignatures or getCurrentSignatures output
+ * @param members The members, e.g. getActiveMembers() (inactive entries are ignored)
+ */
+export function selectCurrentSubmissions<T extends CouncilSignatureSubmission>(
+  submissions: ArrayLike<T>,
+  members: ArrayLike<CouncilMemberRecord>
+): T[] {
+  const keyIds = new Map<string, bigint>();
+  for (const m of Array.from(members)) {
+    const keyId = BigInt(m.keyId);
+    if (m.isActive && keyId !== 0n) keyIds.set(m.memberAddress.toLowerCase(), keyId);
+  }
+  return Array.from(submissions).filter((s) => {
+    const keyId = BigInt(s.keyId);
+    return keyId !== 0n && keyIds.get(s.signer.toLowerCase()) === keyId;
+  });
+}
+
+/**
+ * Aggregate a warrant's threshold signature from the partial signatures that currently count.
+ *
+ * Takes the current submissions (selectCurrentSubmissions) in order, skips any that do not decode or do
+ * not verify against the signer's registered key (in HYBRID_ATTESTED nothing is verified on chain), stops
+ * at `threshold` valid partials, Lagrange-aggregates them and checks the result against the group key.
+ * BLS uniqueness makes the result, and so decryptedKeyHash, the same for every valid subset: it equals
+ * what STRICT_ONCHAIN executeReconstruction computes on chain.
+ *
+ * @throws if fewer than `threshold` valid current partials exist, a key index is not a safe integer
+ *         (the SDK's PartialSignature index type), or the aggregate does not verify against the group key
+ *         (a signer's registered key is not a share of it)
+ */
+export function aggregateCurrentPartials(input: WarrantPartials): WarrantThresholdSignature {
+  const { message, groupPublicKey, threshold } = input;
+  if (!Number.isSafeInteger(threshold) || threshold < 1) {
+    throw new Error(`Invalid threshold ${threshold}`);
+  }
+
+  const keys = new Map<string, Uint8Array>();
+  for (const m of Array.from(input.members)) {
+    try {
+      keys.set(m.memberAddress.toLowerCase(), decodeBLSPublicKeyFromSolidity(m.publicKey));
+    } catch {
+      // An unusable key: its partials are skipped below
+    }
+  }
+
+  const partials: PartialSignature[] = [];
+  for (const sub of selectCurrentSubmissions(input.submissions, input.members)) {
+    if (partials.length === threshold) break;
+    const index = BigInt(sub.memberIndex);
+    if (index > BigInt(Number.MAX_SAFE_INTEGER)) {
+      throw new Error(`Key index ${index} exceeds the SDK's safe-integer range`);
+    }
+    const key = keys.get(sub.signer.toLowerCase());
+    let signature: Uint8Array;
+    try {
+      signature = decodeBLSSignatureFromSolidity(sub.signature);
+    } catch {
+      continue;
+    }
+    if (key && verifyBls(signature, message, key)) {
+      partials.push({ signerIndex: Number(index), signature });
+    }
+  }
+  if (partials.length < threshold) {
+    throw new Error(`Need ${threshold} valid current partial signatures, found ${partials.length}`);
+  }
+
+  const thresholdSignature = aggregateSignatures(partials);
+  if (!verifyBls(thresholdSignature.aggregatedSignature, message, groupPublicKey)) {
+    throw new Error("Threshold signature does not verify against the group key");
+  }
+  return {
+    thresholdSignature,
+    decryptedKeyHash: computeDecryptedKeyHash(thresholdSignature.aggregatedSignature),
+  };
+}
+
+/**
+ * Read a warrant's current partial signatures from the council and aggregate them
+ * (aggregateCurrentPartials). A HYBRID_ATTESTED operator then calls
+ * attestHybridVerification(warrantId, decryptedKeyHash, ...); in STRICT_ONCHAIN the result predicts the
+ * decryptedKeyHash executeReconstruction records.
+ *
+ * The reads may straddle blocks: a submission is used only if it is current both in getCurrentSignatures
+ * and against the getActiveMembers snapshot, so a concurrent removal or rotation can only make the call
+ * fail for lack of partials, never change its result.
+ *
+ * @param council e.g. new ethers.Contract(councilAddress, COMPLIANCE_COUNCIL_ABI, provider)
+ * @param warrantId Warrant id
+ */
+export async function aggregateWarrantSignature(
+  council: ComplianceCouncilReader,
+  warrantId: SolidityUint
+): Promise<WarrantThresholdSignature> {
+  const id = BigInt(warrantId);
+  const [submissions, members, message, groupKey, config] = await Promise.all([
+    council.getCurrentSignatures(id),
+    council.getActiveMembers(),
+    council.getSigningMessage(id),
+    council.getAggregatedPublicKey(),
+    council.getConfig(),
+  ]);
+
+  let groupPublicKey: Uint8Array;
+  try {
+    groupPublicKey = decodeBLSPublicKeyFromSolidity(groupKey);
+  } catch {
+    throw new Error("Group public key is unset or invalid");
+  }
+  const threshold = BigInt(config.threshold);
+  if (threshold > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw new Error(`Invalid threshold ${threshold}`);
+  }
+  return aggregateCurrentPartials({
+    submissions,
+    members,
+    message: wordToBytes(message),
+    groupPublicKey,
+    threshold: Number(threshold),
+  });
 }
 
 /**
@@ -788,6 +1020,15 @@ function decodeFpWords(coords: ArrayLike<SolidityWord>[], wordsPerCoord: number)
     }
     return values;
   });
+}
+
+/** bls.verify under the council DST; false instead of throwing on a malformed input */
+function verifyBls(signature: Uint8Array, message: Uint8Array, publicKey: Uint8Array): boolean {
+  try {
+    return bls.verify(signature, message, publicKey, HTF);
+  } catch {
+    return false;
+  }
 }
 
 function modPow(base: bigint, exp: bigint, mod: bigint): bigint {

@@ -17,7 +17,8 @@ pragma solidity ^0.8.20;
  * - H(m) is RFC 9380 hash_to_curve to G2 (BLS12381G2_XMD:SHA-256_SSWU_RO_) with the DST
  *   "ILRM-COMPLIANCE-COUNCIL-V01-CS01-with-BLS12381G2_XMD:SHA-256_SSWU_RO_"
  * - A signature is valid iff e(pk, H(m)) * e(-G1, sig) == 1
- * - Precompiles: G1ADD 0x0b, G1MSM 0x0c, G2ADD 0x0d, PAIRING_CHECK 0x0f, MAP_FP2_TO_G2 0x11 (and MODEXP 0x05)
+ * - Precompiles: G1ADD 0x0b, G1MSM 0x0c, G2ADD 0x0d, G2MSM 0x0e, PAIRING_CHECK 0x0f, MAP_FP2_TO_G2 0x11
+ *   (and MODEXP 0x05)
  * - Points use the EIP-2537 encoding: every Fp element is 64 bytes big-endian (16 zero bytes followed by
  *   the 48-byte value) and the all-zero encoding is the point at infinity
  * - Individual (partial) signatures verify against each member's key share
@@ -27,7 +28,11 @@ pragma solidity ^0.8.20;
  *   group key is g1^f(0). Key indices and keys are unique among active members and no member key equals the
  *   group key.
  * - A partial signature counts toward the threshold only while its signer still holds the key registration
- *   it was verified under: removing the member or rotating its key voids it
+ *   it was verified under: removing the member or rotating its key voids it (getCurrentSignatures lists the
+ *   partials that count)
+ * - Likewise a vote counts only while its voter is still a member under the membership it voted in: removing
+ *   the member voids it (a re-added member votes again); rotating the member's BLS key does not, votes are
+ *   authenticated by the member's address
  *
  * The reconstructed key (decryptedKeyHash):
  * - BLS signatures are unique, so the group signature sigma = f(0) * H(m) on a warrant's message m is one
@@ -127,6 +132,7 @@ interface IComplianceCouncil {
         uint256 votesParticipated;
         uint256 signaturesProvided;
         uint256 keyId; // Registration id of publicKey, fresh on every add and rotation; 0 once removed
+        uint256 membershipId; // Fresh on every add (the keyId that add hands out), kept on rotation; 0 once removed
     }
 
     /// @notice Council configuration
@@ -152,17 +158,21 @@ interface IComplianceCouncil {
         uint256 votingEndsAt;
         uint256 executionTime; // When execution can begin
         WarrantStatus status;
-        uint256 approvalsCount;
-        uint256 rejectionsCount;
+        uint256 approvalsCount; // Approvals that count (see Vote): live while Pending, then the tally at closing
+        uint256 rejectionsCount; // Rejections that count, likewise
         bytes32 decryptedKeyHash; // keccak256 of the group signature on the warrant, set on execution
     }
 
-    /// @notice Vote record
+    /**
+     * @notice Vote record
+     * @dev The vote counts while getMember(voter).membershipId == membershipId
+     */
     struct Vote {
         address voter;
         bool approved;
         uint256 timestamp;
         string reason;
+        uint256 membershipId; // Voter's membership id at casting
     }
 
     /**
@@ -198,7 +208,7 @@ interface IComplianceCouncil {
         bytes32 documentHash
     );
 
-    /// @notice Emitted when a council member votes
+    /// @notice Emitted when a council member votes; the counts are the votes that currently count
     event VoteCast(
         uint256 indexed warrantId, address indexed voter, bool approved, uint256 approvalsCount, uint256 rejectionsCount
     );
@@ -246,7 +256,7 @@ interface IComplianceCouncil {
 
     /**
      * @notice Remove a council member
-     * @dev Frees the member's key index and key and voids the partial signatures it submitted
+     * @dev Frees the member's key index and key and voids the votes it cast and the partial signatures it submitted
      * @param member Member address to remove
      */
     function removeMember(address member) external;
@@ -254,7 +264,7 @@ interface IComplianceCouncil {
     /**
      * @notice Update member's BLS public key (key rotation)
      * @dev Same key checks as addMember (the current key counts as in use). Voids the partial signatures made
-     *      under the old key; the member may sign those warrants again with the new key.
+     *      under the old key; the member may sign those warrants again with the new key. Votes are kept.
      * @param member Member address
      * @param newPublicKey New BLS public key
      */
@@ -300,7 +310,8 @@ interface IComplianceCouncil {
     /**
      * @notice Cast vote on a warrant request
      * @dev Caller must be an active member (added through addMember and not removed); MEMBER_ROLE alone is not
-     *      enough
+     *      enough. One vote per membership. Approvals and rejections count only the votes of current members (see
+     *      Vote); voting concludes early once every active member has a vote that counts.
      * @param warrantId Warrant to vote on
      * @param approve True to approve, false to reject
      * @param reason Reason for vote
@@ -309,7 +320,8 @@ interface IComplianceCouncil {
 
     /**
      * @notice Conclude voting on a warrant
-     * @dev Can be called after voting period ends
+     * @dev Can be called after voting period ends. Approved iff at least threshold votes that still count approve;
+     *      a member removed after voting no longer counts. Records that tally in the warrant.
      * @param warrantId Warrant to conclude
      */
     function concludeVoting(uint256 warrantId) external;
@@ -323,6 +335,8 @@ interface IComplianceCouncil {
 
     /**
      * @notice Get warrant details
+     * @dev While Pending, approvalsCount and rejectionsCount are computed live from the votes that count; once
+     *      voting closes (concluded, or cancelled while Pending) they are the tally stored at that moment
      * @param warrantId Warrant ID
      * @return warrant Warrant details
      */
@@ -330,6 +344,7 @@ interface IComplianceCouncil {
 
     /**
      * @notice Get votes for a warrant
+     * @dev Every vote cast, including the ones that no longer count (see Vote)
      * @param warrantId Warrant ID
      * @return votes Array of votes
      */
@@ -365,8 +380,10 @@ interface IComplianceCouncil {
     /**
      * @notice Aggregate multiple BLS signatures as a plain G2 sum
      * @dev Requires the BLS precompiles. Reverts unless every element (also a single one) is a canonical,
-     *      non-infinity G2 point on the curve and in the prime-order subgroup. This is plain (non-threshold)
-     *      aggregation; threshold (Lagrange) aggregation is done by the SDK and by executeReconstruction.
+     *      non-infinity G2 point on the curve and in the prime-order subgroup ("Invalid signature"), and if the sum
+     *      is the point at infinity, e.g. for [P, -P] ("Infinity aggregate"): like an infinity element it would
+     *      only verify under the infinity key. This is plain (non-threshold) aggregation; threshold (Lagrange)
+     *      aggregation is done by the SDK and by executeReconstruction.
      * @param signatures Array of signatures to aggregate
      * @return aggregated The aggregated signature
      */
@@ -406,10 +423,23 @@ interface IComplianceCouncil {
 
     /**
      * @notice Get signatures collected for a warrant
+     * @dev Every submission, including stale ones (signer removed or key rotated since) that no longer count and
+     *      must not be aggregated: use getCurrentSignatures (or the SDK's selectCurrentSubmissions) for that
      * @param warrantId Warrant ID
      * @return submissions Array of signature submissions
      */
     function getSignatures(uint256 warrantId) external view returns (SignatureSubmission[] memory submissions);
+
+    /**
+     * @notice Get the signature submissions that currently count toward the threshold
+     * @dev The submissions whose signer still holds the key registration they were made under, in submission
+     *      order, at most one per member. In STRICT_ONCHAIN executeReconstruction combines the first threshold of
+     *      them; in HYBRID_ATTESTED the operator verifies and aggregates them off chain (SDK
+     *      aggregateWarrantSignature), as without the precompiles nothing is verified on chain (verified is false).
+     * @param warrantId Warrant ID
+     * @return submissions The current submissions
+     */
+    function getCurrentSignatures(uint256 warrantId) external view returns (SignatureSubmission[] memory submissions);
 
     // ============ View Functions ============
 
@@ -448,10 +478,11 @@ interface IComplianceCouncil {
     function getWarrantsByStatus(WarrantStatus status) external view returns (uint256[] memory warrantIds);
 
     /**
-     * @notice Check if member has voted on warrant
+     * @notice Check if member has a vote on the warrant that currently counts
+     * @dev False again once the member is removed (a re-added member may vote again)
      * @param warrantId Warrant ID
      * @param member Member address
-     * @return hasVoted True if member has voted
+     * @return hasVoted True if the member's vote under its current membership exists
      */
     function hasVoted(uint256 warrantId, address member) external view returns (bool hasVoted);
 

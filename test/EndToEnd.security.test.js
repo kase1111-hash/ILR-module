@@ -242,7 +242,9 @@ describe("END-TO-END SECURITY TESTS", function () {
      * TEST 16: HYBRID requires attestation
      */
     it("TEST 16: HYBRID_ATTESTED requires operator attestation", async function () {
-      // executeReconstruction checks _isHybridAttested[warrantId]
+      // executeReconstruction requires a nonzero _hybridAttestations[warrantId] (the operator-attested
+      // decryptedKeyHash), set by attestHybridVerification; exercised in test/ComplianceCouncilFollowUps.t.sol
+      // and test/ComplianceCouncil.bls.test.js
       expect(true).to.be.true; // Verified in code review
     });
 
