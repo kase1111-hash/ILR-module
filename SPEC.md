@@ -119,26 +119,26 @@ The IP & Licensing Reconciliation Module (ILRM) is a non-adjudicative coordinati
 
 | Feature | Status | Location | Notes |
 |---------|--------|----------|-------|
-| Transaction Queuing | ✅ | `BatchQueue.sol:115-175` | Multiple tx types |
-| Batch Release Logic | ✅ | `BatchQueue.sol:195-275` | Time + count based |
-| Batch Execution | ✅ | `BatchQueue.sol:280-320` | On target contract |
-| Order Randomization | ✅ | `BatchQueue.sol:385-395` | Fisher-Yates shuffle |
-| Chainlink Automation | ✅ | `BatchQueue.sol:325-345` | checkUpkeep/performUpkeep |
-| Token/ETH Escrow | ✅ | `BatchQueue.sol:350-375` | During queue period |
-| Cancellation Support | ✅ | `BatchQueue.sol:180-195` | Configurable |
-| Expiration Handling | ✅ | `BatchQueue.sol:245-250` | Auto-refund |
+| Transaction Queuing | ✅ | `BatchQueue.sol:146-219` | Relayed types (dispute initiation, stake deposit, proposal acceptance) only via typed functions that bind the party to the caller; `queueTransaction` takes record-only types (evidence, ZK proof, viewing key), never sent to ILRM |
+| Batch Release Logic | ✅ | `BatchQueue.sol:258-272, 453-514` | Min batch size + release interval; FIFO from a queue head, at most 500 entries scanned, no external calls |
+| Batch Execution | 🔶 | `BatchQueue.sol:523-638` | Relays to ILRM's `IILRMRelay` entry points for the submitter (gas-capped, resumable). The current ILRM has none and relaying is off by default, so relays fail and their escrow is reclaimable |
+| Order Randomization | ✅ | `BatchQueue.sol:674-692` | Fisher-Yates shuffle; cosmetic and predictable (public block-derived seed), hides nothing |
+| Chainlink Automation | ✅ | `BatchQueue.sol:291-303` | checkUpkeep/performUpkeep (permissionless) |
+| Token Escrow | ✅ | `BatchQueue.sol:149-170, 587-608, 652-664` | Stake of a queued dispute initiation only, tracked per transaction; ILRM gets an allowance of exactly that stake. No ETH escrow: the queue rejects ETH |
+| Cancellation Support | ✅ | `BatchQueue.sol:222-234` | Configurable; returns the escrow, works while paused |
+| Expiration Handling | ✅ | `BatchQueue.sol:237-253, 643-646` | No auto-refund: a transaction not released, or released but not executed, within maxQueueTime expires; its escrow is returned by the permissionless `reclaim()` (works while paused) |
 
 ### Dummy Transaction Generator
 
 | Feature | Status | Location | Notes |
 |---------|--------|----------|-------|
-| Probability-Based Generation | ✅ | `DummyTransactionGenerator.sol:95-140` | Configurable BPS threshold |
-| Multiple Dummy Tx Types | ✅ | `DummyTransactionGenerator.sol:285-340` | Voluntary, BatchQueue, ViewingKey |
-| Dummy Address Registry | ✅ | `DummyTransactionGenerator.sol:175-220` | Excluded from analytics |
-| Treasury Funding | ✅ | `DummyTransactionGenerator.sol:225-260` | Per-period spending limits |
-| Chainlink Automation | ✅ | `DummyTransactionGenerator.sol:145-165` | checkUpkeep/performUpkeep |
-| Random Interval Logic | ✅ | `DummyTransactionGenerator.sol:345-375` | VRF-compatible with fallback |
-| Period-Based Limits | ✅ | `DummyTransactionGenerator.sol:380-400` | Max txs and spend per period |
+| Probability-Based Generation | ✅ | `DummyTransactionGenerator.sol:151-160, 423-449` | Configurable BPS gate; keeper/owner only; one attempt per minInterval whatever its outcome (a failed generation is rolled back and logged, not retried); needs `MIN_ATTEMPT_GAS` (upkeep gas limit of at least 1M) |
+| Multiple Dummy Tx Types | ✅ | `DummyTransactionGenerator.sol:459-505, 533-545` | VoluntaryRequest (burns the 0.01 ETH fee via ILRM), BatchQueueEntry (record-only EvidenceSubmission), ViewingKeyCommit (no call yet); ZKProofSubmit / StakeDeposit fall back to a voluntary request |
+| Dummy Address Registry | ✅ | `DummyTransactionGenerator.sol:227-271` | Labeled so off-chain analytics can exclude them; on chain every dummy is attributable to the generator |
+| Treasury Funding | ✅ | `DummyTransactionGenerator.sol:276-296` | ETH treasury, owner withdrawal; spent only on the voluntary-request fee |
+| Chainlink Automation | ✅ | `DummyTransactionGenerator.sol:212-222` | checkUpkeep/performUpkeep; performUpkeep is keeper/owner only |
+| Random Interval Logic | 🔶 | `DummyTransactionGenerator.sol:321-358, 523-527` | No VRF: block-derived pseudo-randomness, predictable by the keeper, owner and block proposer (no safety property depends on it). Pacing is minInterval plus the probability gate; `maxInterval` is validated but not enforced |
+| Period-Based Limits | ✅ | `DummyTransactionGenerator.sol:459-505, 604-612` | Max txs and spend (including the dummy's own cost) per period, on every generation path |
 
 ### Compliance Council Contract
 
@@ -377,41 +377,41 @@ The following features are documented in the project documentation but not yet i
 **Status:** ✅ IMPLEMENTED
 **Source:** `dispute-membership-circuit.md:71-75`
 
-**Description:** Buffer submissions and release in batches to prevent timing-based inference attacks.
+**Description:** Buffer submissions and release them in batches, so when an action lands on ILRM is decoupled from when it was queued. Batching hides only that timing: every queued transaction (submitter, type, data) is public from the moment it is queued (see the threat model in `IBatchQueue.sol`).
 
 **Implementation:**
-- Contract: `contracts/BatchQueue.sol`
+- Contract: `contracts/scaling/BatchQueue.sol`
 - Interface: `contracts/interfaces/IBatchQueue.sol`
 
 **Features Implemented:**
 - Configurable batch size (min/max) and release intervals
-- Transaction queuing for disputes, stakes, acceptances, ZK proofs
+- Transaction queuing for dispute initiations, stake deposits and acceptances (relayed for the caller; relaying is off by default because the current ILRM has no relay entry points) and record-only evidence, ZK proofs and viewing keys
 - Chainlink Automation compatible (checkUpkeep/performUpkeep)
-- Optional order randomization within batches
-- Token and ETH escrow during queue
+- Optional order randomization within batches (cosmetic and predictable)
+- Per-transaction token escrow for queued dispute initiations; the queue accepts no ETH
 - Cancellation support (configurable)
 - Commitment hashes for verification
-- Expiration handling for stale transactions
+- Expiration of stale transactions; escrow is returned by the permissionless `reclaim()`, not refunded automatically
 
 #### 1.4 Dummy Transactions (dispute-membership-circuit.md)
 **Status:** ✅ IMPLEMENTED
 **Source:** `dispute-membership-circuit.md:76-79`
 
-**Description:** Treasury-funded automated "noop" calls at random intervals to obscure real transaction patterns.
+**Description:** Treasury-funded automated "noop" calls at pseudo-random times that add noise to transaction counts and timing. Dummies are attributable on chain (the generator is the caller of every dummy and emits an event for each), so they add noise only for observers that do not trace call frames or logs (see `IDummyTransactionGenerator.sol`).
 
 **Implementation:**
-- Contract: `contracts/DummyTransactionGenerator.sol`
+- Contract: `contracts/scaling/DummyTransactionGenerator.sol`
 - Interface: `contracts/interfaces/IDummyTransactionGenerator.sol`
 
 **Features Implemented:**
-- Configurable probability-based generation (basis points threshold)
+- Configurable probability-based generation (basis points threshold); keeper/owner only, one attempt per minInterval whatever its outcome
 - Multiple dummy tx types: VoluntaryRequest, BatchQueueEntry, ViewingKeyCommit
-- Dedicated dummy address registry (excluded from analytics)
+- Dedicated dummy address registry (labeled for off-chain analytics; attributable on chain)
 - Treasury-funded with per-period spending limits
 - Chainlink Automation compatible (checkUpkeep/performUpkeep)
-- VRF-compatible randomness (with pseudo-random fallback)
-- Configurable min/max intervals and per-period limits
-- Batch generation for low-activity periods
+- Block-derived pseudo-randomness, predictable; no VRF (no safety property depends on the randomness)
+- Configurable minimum interval and per-period limits (`maxInterval` is validated but not enforced)
+- Batch generation for low-activity periods (owner only, same caps)
 
 #### 1.5 Threshold Decryption for Compliance (dispute-membership-circuit.md)
 **Status:** ✅ IMPLEMENTED

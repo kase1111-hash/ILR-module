@@ -19,8 +19,12 @@ import "../interfaces/IILRM.sol";
  * owner and the block proposer can predict it and choose which block within a slot to attempt in, so
  * they can force at most one generation per minInterval. That is the whole extent of the bias, and it
  * is harmless because:
- * - attempts are keeper/owner-only and limited to one per minInterval; a skipped attempt consumes the
- *   slot, so the probability gate cannot be retried (better randomness could not fix a free retry);
+ * - attempts are keeper/owner-only and limited to one per minInterval; an attempt that draws consumes the
+ *   slot whatever its outcome (skipped, generated, or failed: a generation whose target call fails is
+ *   rolled back in its own call frame and recorded by GenerationFailed, it does not revert the attempt),
+ *   and an attempt needs MIN_ATTEMPT_GAS before it draws, so neither a failing target nor the caller's
+ *   gas limit can undo a drawn attempt and the probability gate cannot be retried (better randomness
+ *   could not fix a free retry);
  * - every generation path enforces maxPerPeriod and maxTreasurySpend (including this dummy's cost), so
  *   the worst case is the spend the owner configured as the per-period cap;
  * - dummies are attributable to this contract anyway, so predictability reveals nothing extra.
@@ -32,8 +36,8 @@ import "../interfaces/IILRM.sol";
  *   amount is the constant fee, so "arbitrary" is a false positive; the real bug was that anyone could
  *   trigger it. Fixed by keeper/owner gating and the per-period caps (no suppression).
  * - weak-prng (tryGenerate gate): the real bug was the free retry. Fixed by gating plus one attempt per
- *   slot; the remaining modulo is suppressed. weak-prng (type and address choice): false positive,
- *   decorrelated from the gate draw and suppressed.
+ *   slot (a failed generation consumes it too); the remaining modulo is suppressed. weak-prng (type and
+ *   address choice): false positive, decorrelated from the gate draw and suppressed.
  * - reentrancy-eth (tryGenerate, _generateDummyTx, generateBatch, forceGenerate): not exploitable
  *   (nonReentrant, owner-set callees), fixed anyway with checks-effects-interactions.
  * - incorrect-equality (getTimeToNextGeneration): sentinel check rewritten. unused-return
@@ -41,8 +45,9 @@ import "../interfaces/IILRM.sol";
  * Also fixed (not reported by Slither): the spend cap was checked before adding the dummy's cost, and
  * forceGenerate / generateBatch ignored the caps; batch-queue dummies were queued as StakeDeposit with
  * data that bricked BatchQueue execution (now EvidenceSubmission, record-only); requestRandomness only
- * simulated a VRF and let the owner set the seed (removed). Dummies remain labeled on-chain (see
- * IDummyTransactionGenerator): that is documented, not fixable here.
+ * simulated a VRF and let the owner set the seed (removed); a failing target call reverted a tryGenerate
+ * attempt, undoing it, so a passed gate could be re-drawn in a later block (now caught and recorded).
+ * Dummies remain labeled on-chain (see IDummyTransactionGenerator): that is documented, not fixable here.
  *
  * Safety Measures:
  * - Dummy addresses are labeled (isDummyAddress) so off-chain analytics and scoring can exclude them;
@@ -68,6 +73,19 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
 
     /// @notice Maximum dummy addresses
     uint256 public constant MAX_DUMMY_ADDRESSES = 50;
+
+    /// @notice Gas forwarded to the generation a tryGenerate attempt runs (its accounting and target call).
+    ///         The costliest generation (50 dummy addresses, a period reset, a first BatchQueue entry)
+    ///         uses about 380k.
+    uint256 public constant GENERATION_GAS_LIMIT = 600_000;
+
+    /// @notice Gas an attempt keeps back, besides the forwarded generation gas, for its own bookkeeping
+    uint256 public constant ATTEMPT_GAS_RESERVE = 60_000;
+
+    /// @notice Gas tryGenerate / performUpkeep need left when they draw: the forwarded generation gas
+    ///         under the 63/64 rule plus the reserve, so a drawn attempt can always record its outcome.
+    ///         With the checks before it, a call needs a gas limit of about 1M (see performUpkeep).
+    uint256 public constant MIN_ATTEMPT_GAS = (GENERATION_GAS_LIMIT * 64) / 63 + ATTEMPT_GAS_RESERVE;
 
     // ============ State Variables ============
 
@@ -174,6 +192,20 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
         }
     }
 
+    /**
+     * @notice Run the generation of a tryGenerate / performUpkeep attempt in its own call frame
+     * @dev Only this contract can call it (from _tryGenerate), so that a failed generation rolls back on
+     *      its own while the attempt that drew it stays recorded. Not nonReentrant on purpose: the calling
+     *      attempt holds the lock, so a target cannot re-enter any generation path, and a target cannot
+     *      call this function (msg.sender would not be this contract).
+     * @param txType The type drawn by the attempt
+     * @return True if a dummy tx was generated (false, without effects, when a cap does not allow it)
+     */
+    function generateForAttempt(DummyTxType txType) external returns (bool) {
+        require(msg.sender == address(this), "Only self");
+        return _generateDummyTx(txType);
+    }
+
     // ============ Chainlink Functions ============
 
     /// @inheritdoc IDummyTransactionGenerator
@@ -184,7 +216,8 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
 
     /// @inheritdoc IDummyTransactionGenerator
     function performUpkeep(bytes calldata) external override onlyKeeperOrOwner nonReentrant whenNotPaused {
-        // Internal call: the outcome is reported by DummyTransactionGenerated / GenerationSkipped
+        // Internal call: the outcome is reported by DummyTransactionGenerated / GenerationSkipped /
+        // GenerationFailed
         _tryGenerate();
     }
 
@@ -378,14 +411,21 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
     // ============ Internal Functions ============
 
     /**
-     * @dev One generation attempt. The attempt is recorded before any randomness is drawn, so a skipped
-     *      attempt cannot be retried until minInterval has passed.
+     * @dev One generation attempt. The attempt is recorded before any randomness is drawn and nothing after
+     *      the draw can revert it, so an attempt (skipped, generated or failed) cannot be retried until
+     *      minInterval has passed:
+     *      - the gas check comes before the draw, so a drawn attempt always has the gas to finish;
+     *      - the generation runs in its own call frame (generateForAttempt) with exactly
+     *        GENERATION_GAS_LIMIT gas: if its target call fails, only the generation (its accounting and
+     *        its DummyTransactionGenerated event) is rolled back, and the attempt records GenerationFailed.
+     *        The failure's returndata is not copied, so a large revert cannot eat the reserve.
      */
     function _tryGenerate() internal returns (bool generated, DummyTxType txType) {
         (bool canGen,) = canGenerate();
         if (!canGen) {
             return (false, DummyTxType.VoluntaryRequest);
         }
+        require(gasleft() >= MIN_ATTEMPT_GAS, "Insufficient gas");
 
         lastAttemptTime = block.timestamp;
         _updateRandomSeed();
@@ -401,7 +441,11 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
 
         _stats.consecutiveSkips = 0;
         txType = _selectRandomTxType();
-        generated = _generateDummyTx(txType);
+        try this.generateForAttempt{gas: GENERATION_GAS_LIMIT}(txType) returns (bool ok) {
+            generated = ok;
+        } catch {
+            emit GenerationFailed(txType);
+        }
     }
 
     /**
@@ -409,6 +453,8 @@ contract DummyTransactionGenerator is IDummyTransactionGenerator, Ownable2Step, 
      *      path: returns false (no effects) when a per-period cap, the treasury or the target does not
      *      allow it. Checks-effects-interactions: all accounting is written before the external call,
      *      and a failed call reverts the whole generation, so accounting always matches the ETH spent.
+     *      On the owner paths (forceGenerate, generateBatch) that revert reaches the caller; a
+     *      tryGenerate attempt catches it (see _tryGenerate).
      */
     function _generateDummyTx(DummyTxType txType) internal returns (bool) {
         _checkAndResetPeriod();
