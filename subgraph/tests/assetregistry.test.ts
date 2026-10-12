@@ -172,15 +172,71 @@ describe("AssetRegistry", () => {
     assert.fieldEquals("License", id, "revokedAt", "3000");
     assert.fieldEquals("License", id, "expiresAt", "3000");
 
-    // Zero terms: grant and revoke both emit (0, 0); the current state disambiguates
+    // Zero terms: grant and revoke both emit (0, 0); the registry's end-of-block state disambiguates
     const zeroId = A2.toHexString() + "-" + BOB.toHexString();
     beginTx(13, 4000);
     mockLicense(A2, BOB, ZERO32, true);
     licenseModified(A2, BOB, ZERO32, ZERO32);
     assert.fieldEquals("License", zeroId, "active", "true");
     beginTx(14, 5000);
+    mockLicense(A2, BOB, ZERO32, false);
     licenseModified(A2, BOB, ZERO32, ZERO32);
     assert.fieldEquals("License", zeroId, "active", "false");
+  });
+
+  test("zero-terms re-grants and revocations follow the registry, not the stored state", () => {
+    beginTx(30, 1000);
+    register(A2, ALICE);
+    const id = A2.toHexString() + "-" + BOB.toHexString();
+
+    mockLicense(A2, BOB, ZERO32, true);
+    licenseModified(A2, BOB, ZERO32, ZERO32);
+    assert.fieldEquals("License", id, "active", "true");
+    assert.fieldEquals("License", id, "grantCount", "1");
+
+    // Re-grant with zero terms (e.g. to extend the duration): still (0, 0), license stays active
+    beginTx(31, 2000);
+    mockLicense(A2, BOB, ZERO32, true);
+    licenseModified(A2, BOB, ZERO32, ZERO32);
+    assert.fieldEquals("License", id, "active", "true");
+    assert.fieldEquals("License", id, "grantCount", "2");
+    assert.fieldEquals("License", id, "revokedAt", "null");
+
+    // Revoke: (0, 0) again, the registry now reports it inactive
+    beginTx(32, 3000);
+    mockLicense(A2, BOB, ZERO32, false);
+    licenseModified(A2, BOB, ZERO32, ZERO32);
+    assert.fieldEquals("License", id, "active", "false");
+    assert.fieldEquals("License", id, "revokedAt", "3000");
+    assert.fieldEquals("License", id, "expiresAt", "3000");
+    assert.fieldEquals("License", id, "grantCount", "2");
+
+    // Grant again after the revoke
+    beginTx(33, 4000);
+    mockLicense(A2, BOB, ZERO32, true);
+    licenseModified(A2, BOB, ZERO32, ZERO32);
+    assert.fieldEquals("License", id, "active", "true");
+    assert.fieldEquals("License", id, "revokedAt", "null");
+    assert.fieldEquals("License", id, "grantCount", "3");
+
+    // Revoke and re-grant in one block: calls see the end-of-block state (active)
+    beginTx(34, 5000);
+    mockLicense(A2, BOB, ZERO32, true);
+    licenseModified(A2, BOB, ZERO32, ZERO32);
+    licenseModified(A2, BOB, ZERO32, ZERO32);
+    assert.fieldEquals("License", id, "active", "true");
+
+    // A fresh zero-terms grant revoked in the same block ends up recorded as revoked
+    const sameBlockId = A2.toHexString() + "-" + CAROL.toHexString();
+    beginTx(35, 6000);
+    mockLicense(A2, CAROL, ZERO32, false);
+    licenseModified(A2, CAROL, ZERO32, ZERO32);
+    licenseModified(A2, CAROL, ZERO32, ZERO32);
+    assert.fieldEquals("License", sameBlockId, "active", "false");
+    assert.fieldEquals("License", sameBlockId, "grantCount", "1");
+    assert.fieldEquals("License", sameBlockId, "revokedAt", "6000");
+    assert.fieldEquals("License", sameBlockId, "grantedAt", "1000");
+    assert.fieldEquals("License", sameBlockId, "licensee", CAROL.toHexString());
   });
 
   test("ILRM authorization", () => {

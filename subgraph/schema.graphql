@@ -1010,6 +1010,7 @@ type License @entity(immutable: false) {
   "Current terms hash (last grant)"
   termsHash: Bytes!
 
+  "Registry's LicenseGrant.active; zero-terms grants and revokes (both LicenseModified(0, 0)) are classified by getLicense at the end of the block"
   active: Boolean!
 
   "Times granted or re-granted"

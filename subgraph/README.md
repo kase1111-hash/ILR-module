@@ -27,11 +27,15 @@ newly added events are easy to spot.
 
 ```bash
 cd subgraph
-npm install          # graph-cli, graph-ts and matchstick are local dev dependencies
+npm ci               # graph-cli, graph-ts and matchstick, exactly as pinned in package-lock.json
 npm run codegen      # generate types from abis/ and schema.graphql
 npm run build        # compile the mappings to WebAssembly
 npm test             # matchstick unit tests (tests/*.test.ts); downloads the matchstick binary once
 ```
+
+`package-lock.json` must stay installable with `npm ci` (npm 10, default peer-dependency
+handling). After changing `package.json`, regenerate it with a plain `npm install` (never
+`--legacy-peer-deps`) and commit the result; `npm ci --dry-run` confirms it is in sync.
 
 ## Keeping the ABIs in sync
 
@@ -150,7 +154,7 @@ npm run deploy-local
 | Entity | Description |
 |--------|-------------|
 | `Asset` | Registered IP asset, freeze state, current license terms |
-| `License` | Grant per licensee (duration, royalty and exclusivity read via `getLicense`) |
+| `License` | Grant per licensee (duration, royalty and exclusivity read via `getLicense`; a zero-terms grant and its revoke both emit `LicenseModified(0, 0)` and are told apart by `getLicense().active`) |
 | `AssetFreeze` | Freeze/unfreeze history per asset and dispute |
 | `FallbackLicenseApplication` | Fallback terms applied to a dispute's frozen assets |
 

@@ -11,6 +11,7 @@
 import { Bytes } from "@graphprotocol/graph-ts";
 import {
   AssetRegistry,
+  AssetRegistry__getLicenseResultValue0Struct,
   AssetRegistered,
   AssetsFrozen,
   AssetsUnfrozen,
@@ -149,47 +150,62 @@ export function handleFallbackLicenseApplied(event: FallbackLicenseApplied): voi
 // =============================================================================
 
 export function handleLicenseModified(event: LicenseModified): void {
-  // grantLicense emits (0, terms) - also when updating an existing grant; revokeLicense emits (terms, 0).
-  // A grant with zero terms and its revocation both emit (0, 0): the current state disambiguates.
+  // grantLicense emits (0, terms) - also when re-granting an active license; revokeLicense emits (terms, 0).
+  // A grant with zero terms and a revocation of it both emit (0, 0). Those are told apart by the
+  // registry's own `active` flag, never by the subgraph's stored state: a zero-terms re-grant of an
+  // active license is not a revoke, and the revoke that follows it is not a grant.
   const assetKey = event.params.assetId.toHexString();
   const id = assetKey + "-" + event.params.licensee.toHexString();
   const oldTerms = event.params.oldTermsHash;
   const newTerms = event.params.newTermsHash;
+  const ambiguous = isZeroBytes(oldTerms) && isZeroBytes(newTerms);
 
   let license = License.load(id);
-  const wasActive = license != null && license.active;
-  const isRevoke = isZeroBytes(newTerms) && (!isZeroBytes(oldTerms) || wasActive);
+  let isRevoke = !ambiguous && isZeroBytes(newTerms);
 
-  if (isRevoke) {
-    if (license == null) return;
-    license.active = false;
-    license.revokedAt = event.block.timestamp;
-    license.expiresAt = event.block.timestamp; // revokeLicense sets expiresAt = block.timestamp
-    license.updatedTx = event.transaction.hash;
-    license.save();
-    return;
+  // The stored grant as of the end of this block: duration, royalty and exclusivity are not in the
+  // event, and its `active` flag classifies (0, 0). Every (0, 0) event of a block sees the same
+  // final state, so the License ends the block in the registry's state even when a zero-terms grant
+  // and its revoke share a block.
+  let grant: AssetRegistry__getLicenseResultValue0Struct | null = null;
+  if (!isRevoke) {
+    const call = AssetRegistry.bind(event.address).try_getLicense(event.params.assetId, event.params.licensee);
+    if (!call.reverted) grant = call.value;
+  }
+  if (ambiguous) {
+    // getLicense is a plain storage read; the fallback only covers a registry without it
+    isRevoke = grant != null ? !grant.active : license != null && license.active;
   }
 
   if (license == null) {
+    // A revoke needs an earlier grant. With (T, 0) the grant predates startBlock: nothing to update.
+    // A (0, 0) revoke is a zero-terms grant revoked later in this same block: record it as revoked.
+    if (isRevoke && !ambiguous) return;
     const licensee = touchParty(event.params.licensee, event.block.timestamp);
     license = new License(id);
     license.asset = assetKey;
     license.licensee = licensee.id;
-    license.grantCount = 0;
+    license.termsHash = newTerms;
+    license.grantCount = isRevoke ? 1 : 0;
   }
-  license.termsHash = newTerms;
-  license.active = true;
-  license.revokedAt = null;
-  license.updatedTx = event.transaction.hash;
-  if (isZeroBytes(oldTerms)) license.grantCount = license.grantCount + 1;
 
-  // Duration, royalty and exclusivity are not in the event; read the stored grant
-  const call = AssetRegistry.bind(event.address).try_getLicense(event.params.assetId, event.params.licensee);
-  if (!call.reverted && call.value.termsHash.equals(newTerms)) {
-    license.grantedAt = call.value.grantedAt;
-    license.expiresAt = call.value.expiresAt;
-    license.royaltyBps = call.value.royaltyBps;
-    license.nonExclusive = call.value.nonExclusive;
+  if (grant != null && grant.termsHash.equals(newTerms)) {
+    license.grantedAt = grant.grantedAt;
+    license.expiresAt = grant.expiresAt;
+    license.royaltyBps = grant.royaltyBps;
+    license.nonExclusive = grant.nonExclusive;
+  }
+  license.updatedTx = event.transaction.hash;
+
+  if (isRevoke) {
+    license.active = false;
+    license.revokedAt = event.block.timestamp;
+    license.expiresAt = event.block.timestamp; // revokeLicense sets expiresAt = block.timestamp
+  } else {
+    license.termsHash = newTerms;
+    license.active = true;
+    license.revokedAt = null;
+    if (isZeroBytes(oldTerms)) license.grantCount = license.grantCount + 1;
   }
   license.save();
 }
