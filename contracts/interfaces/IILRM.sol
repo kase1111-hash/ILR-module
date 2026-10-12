@@ -57,8 +57,9 @@ interface IILRM {
     /// @notice Emitted when oracle submits LLM proposal
     event ProposalSubmitted(uint256 indexed disputeId, string proposal);
 
-    /// @notice Emitted when a live proposal is replaced in the same round (Oracle owner recovery);
-    ///         all acceptances of the previous proposal are void
+    /// @notice Emitted only if an oracle relays a proposal over a live one in the same round; all acceptances of the
+    ///         previous proposal are void. NatLangChainOracle voids the live proposal first (ProposalVoided), so its
+    ///         replacements emit only ProposalSubmitted.
     event ProposalSuperseded(
         uint256 indexed disputeId, uint256 indexed round, bytes32 previousProposalHash, bytes32 newProposalHash
     );
@@ -140,14 +141,27 @@ interface IILRM {
 
     /**
      * @notice Accept the current LLM proposal
-     * @dev Dispute resolves when both parties accept
+     * @dev Accepts whatever proposal is live when the tx executes; prefer acceptProposalWithHash.
+     *      Dispute resolves when both parties accept.
      * @param disputeId The dispute to accept
      */
     function acceptProposal(uint256 disputeId) external;
 
     /**
+     * @notice Accept the live LLM proposal only if it is the one the caller reviewed
+     * @dev Reverts "Proposal changed" unless keccak256(live proposal) == proposalHash. That covers voided, replaced
+     *      and later-round text (with no live proposal it reverts "No proposal yet"). Clients should prefer it over
+     *      acceptProposal. Identical text in a later round is accepted (same terms).
+     *      Dispute resolves when both parties accept.
+     * @param disputeId The dispute to accept
+     * @param proposalHash keccak256 of the proposal text being accepted
+     */
+    function acceptProposalWithHash(uint256 disputeId, bytes32 proposalHash) external;
+
+    /**
      * @notice Submit a counter-proposal with updated evidence
-     * @dev Fee increases exponentially; max 3 counters (Invariant 4)
+     * @dev Fee increases exponentially; max 3 counters (Invariant 4). Reverts "Timeout passed" after the
+     *      resolution deadline, so a counter cannot revive a timed-out dispute.
      * @param disputeId The dispute to counter
      * @param newEvidenceHash Updated evidence bundle hash
      */

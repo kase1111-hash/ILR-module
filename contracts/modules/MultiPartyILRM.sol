@@ -29,7 +29,7 @@ import "../interfaces/IAssetRegistry.sol";
  * - Quorum required for acceptance
  * - Proportional burns on timeout
  */
-contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2Step {
+contract MultiPartyILRM is IMultiPartyILRM, IOracleConsumer, ReentrancyGuard, Pausable, Ownable2Step {
     using SafeERC20 for IERC20;
 
     // ============ Constants ============
@@ -92,6 +92,9 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
 
     /// @notice Treasury for counter fees
     uint256 public treasury;
+
+    /// @dev disputeId => party => (round + 1) of the party's last submitEvidence (0 = never)
+    mapping(uint256 => mapping(address => uint256)) private _evidenceRound;
 
     // ============ Constructor ============
 
@@ -266,6 +269,12 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
         require(!d.resolved, "Dispute resolved");
         require(_partyIndex[disputeId][msg.sender] > 0, "Not a party");
         require(_partyInfo[disputeId][msg.sender].hasStaked, "Must stake first");
+        // Oracle signatures bind the aggregate evidence hash: unlimited free changes would let any staked party
+        // invalidate every relay, so evidence changes are bounded per round and frozen while a proposal is live
+        require(block.timestamp <= _resolutionDeadline(d), "Timeout passed");
+        require(bytes(d.llmProposal).length == 0, "Proposal live");
+        require(_evidenceRound[disputeId][msg.sender] != d.counterCount + 1, "Evidence already submitted");
+        _evidenceRound[disputeId][msg.sender] = d.counterCount + 1;
 
         _partyInfo[disputeId][msg.sender].evidenceHash = evidenceHash;
 
@@ -277,13 +286,13 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
     }
 
     /**
-     * @notice Oracle submits LLM proposal
-     * @param disputeId The dispute ID
-     * @param proposal The proposal text
-     * @param signature Oracle signature
+     * @inheritdoc IOracleConsumer
+     * @dev Rejected after the resolution deadline. Storing any proposal clears every vote, so a vote always
+     *      refers to the live proposal.
      */
     function submitLLMProposal(uint256 disputeId, string calldata proposal, bytes calldata signature)
         external
+        override
         nonReentrant
     {
         require(msg.sender == oracle, "Only oracle");
@@ -291,30 +300,78 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
         MultiPartyDispute storage d = _disputes[disputeId];
         require(!d.resolved, "Dispute resolved");
         require(_allPartiesStaked(disputeId), "Not all parties staked");
+        require(block.timestamp <= _resolutionDeadline(d), "Timeout passed");
         require(bytes(proposal).length > 0, "Empty proposal");
 
         // Verify signature
         bytes32 proposalHash = keccak256(bytes(proposal));
         require(IOracle(oracle).verifySignature(disputeId, proposalHash, signature), "Invalid signature");
 
+        // Defence in depth: NatLangChainOracle voids a live proposal before any replacement
+        if (bytes(d.llmProposal).length != 0) {
+            emit ProposalSuperseded(disputeId, d.counterCount, keccak256(bytes(d.llmProposal)), proposalHash);
+        }
+
+        // Every vote refers to the live proposal: storing any proposal clears them all
+        _clearVotes(disputeId, d);
         d.llmProposal = proposal;
 
-        // Reset acceptance counts for new proposal
-        d.acceptanceCount = 0;
-        d.rejectionCount = 0;
+        emit ProposalSubmitted(disputeId, proposal);
+    }
 
-        // Reset all party acceptance states
-        address[] storage parties = _partyList[disputeId];
-        for (uint256 i = 0; i < parties.length; i++) {
-            _partyInfo[disputeId][parties[i]].hasAccepted = false;
-            _partyInfo[disputeId][parties[i]].hasRejected = false;
-        }
+    /**
+     * @inheritdoc IOracleConsumer
+     * @dev Plain view (not nonReentrant): the Oracle STATICCALLs it while submitLLMProposal is executing
+     */
+    function oracleContext(uint256 disputeId)
+        external
+        view
+        override
+        returns (uint256 round, bytes32 evidenceHash, bool resolved, uint256 deadline)
+    {
+        MultiPartyDispute storage d = _disputes[disputeId];
+        return (d.counterCount, d.evidenceHash, d.resolved, _resolutionDeadline(d));
+    }
+
+    /**
+     * @inheritdoc IOracleConsumer
+     * @dev Deliberately not whenNotPaused: recovery must work while paused. No external calls.
+     */
+    function voidLLMProposal(uint256 disputeId, bytes32 proposalHash) external override nonReentrant {
+        require(msg.sender == oracle, "Only oracle");
+
+        MultiPartyDispute storage d = _disputes[disputeId];
+        require(!d.resolved, "Dispute resolved");
+        require(block.timestamp <= _resolutionDeadline(d), "Timeout passed");
+
+        // Nothing live: every vote is necessarily clear already
+        if (bytes(d.llmProposal).length == 0) return;
+
+        // Compare-and-clear: never void a proposal the oracle did not name
+        require(keccak256(bytes(d.llmProposal)) == proposalHash, "Proposal mismatch");
+
+        d.llmProposal = "";
+        _clearVotes(disputeId, d);
+
+        emit ProposalVoided(disputeId, d.counterCount, proposalHash);
     }
 
     /**
      * @inheritdoc IMultiPartyILRM
      */
     function acceptProposal(uint256 disputeId) external override nonReentrant {
+        _acceptProposal(disputeId, false, bytes32(0));
+    }
+
+    /**
+     * @inheritdoc IMultiPartyILRM
+     */
+    function acceptProposalWithHash(uint256 disputeId, bytes32 proposalHash) external override nonReentrant {
+        _acceptProposal(disputeId, true, proposalHash);
+    }
+
+    /// @dev Shared body of acceptProposal and acceptProposalWithHash
+    function _acceptProposal(uint256 disputeId, bool bound, bytes32 proposalHash) private {
         MultiPartyDispute storage d = _disputes[disputeId];
         require(!d.resolved, "Dispute resolved");
         require(_partyIndex[disputeId][msg.sender] > 0, "Not a party");
@@ -322,7 +379,8 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
         require(bytes(d.llmProposal).length > 0, "No proposal yet");
         require(!_partyInfo[disputeId][msg.sender].hasAccepted, "Already accepted");
         require(!_partyInfo[disputeId][msg.sender].hasRejected, "Already rejected");
-        require(block.timestamp <= d.startTime + d.config.stakeWindow + d.config.resolutionTimeout, "Timeout passed");
+        require(block.timestamp <= _resolutionDeadline(d), "Timeout passed");
+        require(!bound || keccak256(bytes(d.llmProposal)) == proposalHash, "Proposal changed");
 
         _partyInfo[disputeId][msg.sender].hasAccepted = true;
         d.acceptanceCount++;
@@ -366,6 +424,9 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
 
     /**
      * @inheritdoc IMultiPartyILRM
+     * @dev Requires every party staked (a counter before that would only move the stake window) and is rejected
+     *      after the resolution deadline (a late counter must not revive a timed-out dispute). All state updates
+     *      happen before the fee burn (checks-effects-interactions).
      */
     function counterPropose(uint256 disputeId, bytes32 newEvidenceHash)
         external
@@ -378,15 +439,13 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
         require(!d.resolved, "Dispute resolved");
         require(_partyIndex[disputeId][msg.sender] > 0, "Not a party");
         require(_partyInfo[disputeId][msg.sender].hasStaked, "Must stake first");
+        require(_allPartiesStaked(disputeId), "Not all parties staked");
+        require(block.timestamp <= _resolutionDeadline(d), "Timeout passed");
         require(d.counterCount < MAX_COUNTERS, "Max counters reached");
 
         // Exponential fee
         uint256 fee = COUNTER_FEE_BASE * (1 << d.counterCount);
         require(msg.value >= fee, "Insufficient counter fee");
-
-        // Burn the fee
-        (bool success,) = BURN_ADDRESS.call{value: fee}("");
-        require(success, "Burn failed");
 
         if (msg.value > fee) {
             treasury += msg.value - fee;
@@ -395,21 +454,19 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
         d.counterCount++;
         d.evidenceHash = newEvidenceHash;
         d.llmProposal = "";
-        d.acceptanceCount = 0;
-        d.rejectionCount = 0;
-
-        // Reset all party states
-        address[] storage parties = _partyList[disputeId];
-        for (uint256 i = 0; i < parties.length; i++) {
-            _partyInfo[disputeId][parties[i]].hasAccepted = false;
-            _partyInfo[disputeId][parties[i]].hasRejected = false;
-        }
+        _clearVotes(disputeId, d);
 
         // FIX M-FINAL-01: Extend timeout only if within MAX_TIME_EXTENSION
         uint256 currentExtension = d.counterCount * 1 days;
         if (currentExtension <= MAX_TIME_EXTENSION) {
             d.startTime += 1 days;
         }
+
+        // Burn the fee (after state updates: checks-effects-interactions)
+        (bool success,) = BURN_ADDRESS.call{value: fee}("");
+        require(success, "Burn failed");
+
+        emit CounterProposed(disputeId, msg.sender, d.counterCount);
     }
 
     /**
@@ -420,7 +477,7 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
         require(!d.resolved, "Already resolved");
 
         uint256 stakeDeadline = d.startTime + d.config.stakeWindow;
-        uint256 resolutionDeadline = stakeDeadline + d.config.resolutionTimeout;
+        uint256 resolutionDeadline = _resolutionDeadline(d);
 
         if (!_allPartiesStaked(disputeId)) {
             // Not all parties staked - check stake window
@@ -517,6 +574,24 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
         } else {
             // Custom
             return (totalParties * d.config.customQuorumBps) / BPS_DENOMINATOR;
+        }
+    }
+
+    /// @dev Last timestamp (inclusive) at which proposals, votes, counters, evidence and resets are allowed
+    function _resolutionDeadline(MultiPartyDispute storage d) internal view returns (uint256) {
+        return d.startTime + d.config.stakeWindow + d.config.resolutionTimeout;
+    }
+
+    /// @dev Clear every acceptance and rejection of the dispute (the live proposal changed or was voided)
+    function _clearVotes(uint256 disputeId, MultiPartyDispute storage d) internal {
+        d.acceptanceCount = 0;
+        d.rejectionCount = 0;
+
+        address[] storage parties = _partyList[disputeId];
+        for (uint256 i = 0; i < parties.length; i++) {
+            PartyInfo storage info = _partyInfo[disputeId][parties[i]];
+            info.hasAccepted = false;
+            info.hasRejected = false;
         }
     }
 
@@ -618,8 +693,8 @@ contract MultiPartyILRM is IMultiPartyILRM, ReentrancyGuard, Pausable, Ownable2S
         // FIX: Call unfreezeAssets once (not in loop) for all parties
         assetRegistry.unfreezeAssets(disputeId, abi.encode(d.outcome));
 
-        // Handle dust
-        uint256 dust = remainder - (returnPerParty * partyCount);
+        // Handle dust (exactly what the per-party division left over)
+        uint256 dust = remainder % partyCount;
         if (dust > 0) {
             token.safeTransfer(BURN_ADDRESS, dust);
         }

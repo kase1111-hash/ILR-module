@@ -34,7 +34,7 @@ import "./interfaces/IAssetRegistry.sol";
  * Identity/privacy modules (ZK, FIDO, DID, viewing keys) are available as
  * separate composable contracts in contracts/modules/.
  */
-contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
+contract ILRM is IILRM, IOracleConsumer, ReentrancyGuard, Pausable, Ownable2Step {
     using SafeERC20 for IERC20;
 
     // ============ Constants (from Appendix A) ============
@@ -258,6 +258,7 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         d.counterpartyStake = d.initiatorStake;
 
         emit StakeDeposited(_disputeId, msg.sender, d.initiatorStake);
+        _requestOracleProposal(_disputeId);
     }
 
     /**
@@ -265,12 +266,12 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
      * @dev Only trusted oracle can submit proposals
      * @dev FIX H-01: Signature verification is now enforced via Oracle contract
      * @dev The Oracle admits one proposal per round (counterCount); a live proposal is replaced only via the
-     *      Oracle owner's recovery path. Storing any proposal voids both acceptances, so an acceptance always
-     *      refers to the live proposal.
+     *      Oracle owner's recovery path, which voids it first (voidLLMProposal). Storing any proposal voids both
+     *      acceptances, so an acceptance always refers to the live proposal.
      */
     function submitLLMProposal(uint256 _disputeId, string calldata _proposal, bytes calldata _signature)
         external
-        override
+        override(IILRM, IOracleConsumer)
         nonReentrant
     {
         require(msg.sender == oracle, "Only oracle");
@@ -286,7 +287,8 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         bytes32 proposalHash = keccak256(bytes(_proposal));
         require(IOracle(oracle).verifySignature(_disputeId, proposalHash, _signature), "Invalid signature");
 
-        // Replacing a live proposal in the same round (Oracle owner recovery)
+        // Replacing a live proposal in the same round. Defence in depth: NatLangChainOracle voids the live
+        // proposal (voidLLMProposal) before any replacement, so this branch does not trigger on that path.
         if (bytes(d.llmProposal).length != 0) {
             emit ProposalSuperseded(_disputeId, d.counterCount, keccak256(bytes(d.llmProposal)), proposalHash);
         }
@@ -301,10 +303,24 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
 
     /// @inheritdoc IILRM
     function acceptProposal(uint256 _disputeId) external override nonReentrant {
+        _acceptProposal(_disputeId, false, bytes32(0));
+    }
+
+    /// @inheritdoc IILRM
+    function acceptProposalWithHash(uint256 _disputeId, bytes32 _proposalHash) external override nonReentrant {
+        _acceptProposal(_disputeId, true, _proposalHash);
+    }
+
+    /**
+     * @dev Shared body of acceptProposal and acceptProposalWithHash. With _bound, the acceptance only counts if the
+     *      live proposal hashes to _proposalHash (computed from the stored text; no extra storage).
+     */
+    function _acceptProposal(uint256 _disputeId, bool _bound, bytes32 _proposalHash) private {
         Dispute storage d = _disputes[_disputeId];
         require(!d.resolved, "Dispute resolved");
         require(bytes(d.llmProposal).length > 0, "No proposal yet");
         require(block.timestamp <= d.startTime + RESOLUTION_TIMEOUT, "Timeout passed");
+        require(!_bound || keccak256(bytes(d.llmProposal)) == _proposalHash, "Proposal changed");
 
         if (msg.sender == d.initiator) {
             require(!d.initiatorAccepted, "Already accepted");
@@ -326,7 +342,9 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
 
     /**
      * @inheritdoc IILRM
-     * @dev Implements Invariant 4 (Bounded Griefing) - capped counters, exponential fees
+     * @dev Implements Invariant 4 (Bounded Griefing) - capped counters, exponential fees.
+     *      Rejected after startTime + RESOLUTION_TIMEOUT: a late counter must not push startTime forward and
+     *      revive a timed-out dispute. Requests a proposal for the new round from the Oracle (advisory).
      */
     function counterPropose(uint256 _disputeId, bytes32 _newEvidenceHash)
         external
@@ -339,6 +357,8 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         require(msg.sender == d.initiator || msg.sender == d.counterparty, "Not a party");
         require(!d.resolved, "Dispute resolved");
         require(d.counterpartyStake > 0, "Not fully staked");
+        // A timed-out dispute is only resolvable via enforceTimeout; a late counter must not revive it
+        require(block.timestamp <= d.startTime + RESOLUTION_TIMEOUT, "Timeout passed");
         require(d.counterCount < MAX_COUNTERS, "Max counters reached");
 
         // Exponential fee: base * 2^count (Invariant 4: Bounded Griefing)
@@ -374,6 +394,77 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         require(success, "Burn failed");
 
         emit CounterProposed(_disputeId, msg.sender, d.counterCount);
+        _requestOracleProposal(_disputeId);
+    }
+
+    // ============ Oracle consumer ============
+
+    /// @notice Gas forwarded to the advisory Oracle.requestProposal call
+    uint256 public constant ORACLE_REQUEST_GAS = 100_000;
+
+    /**
+     * @inheritdoc IOracleConsumer
+     * @dev Plain view (not nonReentrant); reads the storage fields directly, without copying the Dispute struct.
+     */
+    function oracleContext(uint256 _disputeId)
+        external
+        view
+        override
+        returns (uint256 round, bytes32 evidenceHash, bool resolved, uint256 deadline)
+    {
+        Dispute storage d = _disputes[_disputeId];
+        return (d.counterCount, d.evidenceHash, d.resolved, d.startTime + RESOLUTION_TIMEOUT);
+    }
+
+    /**
+     * @inheritdoc IOracleConsumer
+     * @dev Deliberately not whenNotPaused: recovery must work while ILRM is paused (acceptProposal is not
+     *      pausable either). No external calls.
+     */
+    function voidLLMProposal(uint256 _disputeId, bytes32 _proposalHash) external override nonReentrant {
+        require(msg.sender == oracle, "Only oracle");
+
+        Dispute storage d = _disputes[_disputeId];
+        require(!d.resolved, "Dispute resolved");
+        require(block.timestamp <= d.startTime + RESOLUTION_TIMEOUT, "Timeout passed");
+
+        // Nothing live (e.g. a stale Oracle slot after re-pointing setILRM): the acceptance flags are
+        // necessarily false, since storing or clearing a proposal always clears them
+        if (bytes(d.llmProposal).length == 0) return;
+
+        // Compare-and-clear: never void a proposal the oracle did not name
+        require(keccak256(bytes(d.llmProposal)) == _proposalHash, "Proposal mismatch");
+
+        d.llmProposal = "";
+        d.initiatorAccepted = false;
+        d.counterpartyAccepted = false;
+
+        emit ProposalVoided(_disputeId, d.counterCount, _proposalHash);
+    }
+
+    /**
+     * @dev Ask the Oracle for a proposal of the dispute's current round. Advisory: never blocks staking or
+     *      countering. The Oracle's requestProposal is onlyILRM and makes no calls; every caller is nonReentrant
+     *      and calls this as its last statement.
+     *      - No code at the oracle: emit and return (try/catch cannot catch Solidity's pre-call extcodesize revert
+     *        for a function with no return values).
+     *      - Gas floor: with this much gas left, EIP-150 always forwards the full ORACLE_REQUEST_GAS, so a
+     *        transaction that succeeds never silently dropped the request for lack of gas.
+     *      - Capped try/catch: a reverting or gas-burning Oracle only costs ORACLE_REQUEST_GAS and emits
+     *        OracleRequestFailed. catch without parameters copies no returndata.
+     * @param _disputeId Dispute ID
+     */
+    function _requestOracleProposal(uint256 _disputeId) internal {
+        Dispute storage d = _disputes[_disputeId];
+        if (oracle.code.length == 0) {
+            emit OracleRequestFailed(_disputeId, d.counterCount);
+            return;
+        }
+        require(gasleft() >= ORACLE_REQUEST_GAS + ORACLE_REQUEST_GAS / 63 + 10_000, "Insufficient gas");
+        try IOracle(oracle).requestProposal{gas: ORACLE_REQUEST_GAS}(_disputeId, d.evidenceHash) {}
+        catch {
+            emit OracleRequestFailed(_disputeId, d.counterCount);
+        }
     }
 
     /**
@@ -457,6 +548,7 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
 
         emit StakeSubsidized(_disputeId, msg.sender, funder, subsidy);
         emit StakeDeposited(_disputeId, msg.sender, stake);
+        _requestOracleProposal(_disputeId);
     }
 
     // ============ View Functions ============

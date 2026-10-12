@@ -352,10 +352,37 @@ describe("Integration Tests", function () {
       );
       await oracle.connect(oracleOperator).submitProposal(0, proposal, signature);
 
-      await oracle.resetProposal(0, "new round");
+      // A replacement signed for the live context (round 0, same evidence, nonce 1) verifies before the reset
+      const replacement = '{"round":1,"fixed":true}';
+      const replacementHash = ethers.keccak256(ethers.toUtf8Bytes(replacement));
+      const domain = { name: "NatLangChainOracle", version: "1", chainId, verifyingContract: oracle.target };
+      const types = { Proposal: [
+        { name: "disputeId", type: "uint256" },
+        { name: "round", type: "uint256" },
+        { name: "evidenceHash", type: "bytes32" },
+        { name: "proposalHash", type: "bytes32" },
+        { name: "nonce", type: "uint256" }
+      ] };
+      const preResetSignature = await oracleOperator.signTypedData(domain, types, {
+        disputeId: 0, round: 0, evidenceHash: ethers.ZeroHash, proposalHash: replacementHash, nonce: 1
+      });
+      expect(await oracle.verifySignature(0, replacementHash, preResetSignature)).to.be.true;
 
+      await oracle.resetProposal(0, "new round");
+      // The reset alone bumps the nonce: only the round context is unchanged, so this isolates the nonce bump
+      expect(await oracle.getNonce(0)).to.equal(2);
+
+      await expect(oracle.connect(oracleOperator).submitProposal(0, replacement, preResetSignature))
+        .to.be.revertedWithCustomError(oracle, "InvalidSignature");
       await expect(oracle.connect(oracleOperator).submitProposal(0, proposal, signature))
         .to.be.revertedWithCustomError(oracle, "InvalidSignature");
+
+      // A fresh signature at nonce 2 lands
+      const freshSignature = await oracleOperator.signTypedData(domain, types, {
+        disputeId: 0, round: 0, evidenceHash: ethers.ZeroHash, proposalHash: replacementHash, nonce: 2
+      });
+      await oracle.connect(oracleOperator).submitProposal(0, replacement, freshSignature);
+      expect((await ilrm.disputes(0)).llmProposal).to.equal(replacement);
     });
   });
 

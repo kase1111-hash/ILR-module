@@ -112,6 +112,18 @@ interface IMultiPartyILRM {
     /// @notice Emitted when evidence is aggregated
     event EvidenceAggregated(uint256 indexed disputeId, address indexed party, bytes32 newAggregateHash);
 
+    /// @notice Emitted when the oracle submits an LLM proposal (same signature as IILRM)
+    event ProposalSubmitted(uint256 indexed disputeId, string proposal);
+
+    /// @notice Emitted only if an oracle relays a proposal over a live one in the same round; every vote on the
+    ///         previous proposal is void (same signature as IILRM)
+    event ProposalSuperseded(
+        uint256 indexed disputeId, uint256 indexed round, bytes32 previousProposalHash, bytes32 newProposalHash
+    );
+
+    /// @notice Emitted when a counter-proposal opens a new round (same signature as IILRM)
+    event CounterProposed(uint256 indexed disputeId, address indexed party, uint256 counterNumber);
+
     // ============ Core Functions ============
 
     /**
@@ -145,6 +157,9 @@ interface IMultiPartyILRM {
 
     /**
      * @notice Submit evidence for the dispute
+     * @dev Oracle signatures bind the aggregate evidence hash, so evidence changes are limited: staked parties only,
+     *      at or before the resolution deadline, never while a proposal is live, and once per party per round
+     *      (counterPropose opens a new round).
      * @param disputeId The dispute ID
      * @param evidenceHash Party's evidence hash
      */
@@ -152,9 +167,18 @@ interface IMultiPartyILRM {
 
     /**
      * @notice Accept the LLM proposal
+     * @dev Accepts whatever proposal is live when the tx executes; prefer acceptProposalWithHash
      * @param disputeId The dispute ID
      */
     function acceptProposal(uint256 disputeId) external;
+
+    /**
+     * @notice Accept the live LLM proposal only if it is the one the caller reviewed
+     * @dev Reverts "Proposal changed" unless keccak256(live proposal) == proposalHash
+     * @param disputeId The dispute ID
+     * @param proposalHash keccak256 of the proposal text being accepted
+     */
+    function acceptProposalWithHash(uint256 disputeId, bytes32 proposalHash) external;
 
     /**
      * @notice Reject the LLM proposal
@@ -164,6 +188,7 @@ interface IMultiPartyILRM {
 
     /**
      * @notice Submit counter-proposal (triggers new LLM round)
+     * @dev Requires every party staked; reverts "Timeout passed" after the resolution deadline
      * @param disputeId The dispute ID
      * @param newEvidenceHash Updated evidence
      */
