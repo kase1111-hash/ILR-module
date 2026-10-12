@@ -32,6 +32,11 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
     /// @dev Bounds every per-DID credential loop (FIX M-04). Revoked/expired entries are pruned to make room.
     uint256 public constant MAX_CREDENTIALS_FOR_SCORE = 50;
 
+    /// @notice Maximum credentials a single issuer can hold in one DID's credential array.
+    /// @dev Keeps one issuer (even a trust-1 issuer issuing zero-weight, never-expiring credentials) from filling
+    ///      a DID it does not control: filling all MAX_CREDENTIALS_FOR_SCORE slots takes at least five issuers.
+    uint256 public constant MAX_CREDENTIALS_PER_ISSUER = 10;
+
     /// @notice Maximum sybil score
     uint256 public constant MAX_SYBIL_SCORE = 100;
 
@@ -61,6 +66,11 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
 
     /// @notice DID to credentials mapping
     mapping(bytes32 => bytes32[]) private _didCredentials;
+
+    /// @notice Entries each issuer holds in a DID's credential array: did => issuer => count
+    /// @dev Incremented on issuance, decremented when an entry is pruned from the array; revoked and expired
+    ///      entries keep counting until pruned.
+    mapping(bytes32 => mapping(address => uint256)) private _issuerCredentialCount;
 
     /// @notice Credential counter for unique IDs
     uint256 private _credentialCounter;
@@ -171,8 +181,9 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
         }
         _requireController(did);
 
+        // Allowlist the suspendable states (Inactive is never assigned to a registered DID; Revoked is final)
         DIDStatus oldStatus = _didDocuments[did].status;
-        if (oldStatus == DIDStatus.Revoked) revert DIDNotActive(did);
+        if (oldStatus != DIDStatus.Active && oldStatus != DIDStatus.Suspended) revert DIDNotActive(did);
 
         _didDocuments[did].status = DIDStatus.Suspended;
         _didDocuments[did].updated = block.timestamp;
@@ -309,14 +320,25 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
         // Verify DID exists and is active
         _requireActiveDID(did);
 
+        // Reject credentials that would never be valid: expiry must be 0 (never) or strictly in the future
+        if (expiresAt != 0 && expiresAt <= block.timestamp) revert ExpiryNotInFuture(expiresAt);
+
         // Cap weight at 100
         if (weight > 100) weight = 100;
 
         // FIX M-04: a DID holds at most MAX_CREDENTIALS_FOR_SCORE credentials so the score always covers all of
-        // them. When full, prune revoked/expired entries first; reject if every slot is still held.
-        if (_didCredentials[did].length >= MAX_CREDENTIALS_FOR_SCORE) {
+        // them, and one issuer holds at most MAX_CREDENTIALS_PER_ISSUER of them so it cannot fill the DID alone.
+        // When either limit is reached, prune revoked/expired entries first; reject if it is still reached.
+        bytes32[] storage credIds = _didCredentials[did];
+        if (
+            _issuerCredentialCount[did][msg.sender] >= MAX_CREDENTIALS_PER_ISSUER
+                || credIds.length >= MAX_CREDENTIALS_FOR_SCORE
+        ) {
             _pruneCredentials(did);
-            if (_didCredentials[did].length >= MAX_CREDENTIALS_FOR_SCORE) revert TooManyCredentials(did);
+            if (_issuerCredentialCount[did][msg.sender] >= MAX_CREDENTIALS_PER_ISSUER) {
+                revert IssuerCredentialLimit(did, msg.sender);
+            }
+            if (credIds.length >= MAX_CREDENTIALS_FOR_SCORE) revert TooManyCredentials(did);
         }
 
         // Generate credential ID
@@ -338,8 +360,9 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
             weight: weight
         });
 
-        // Add to DID's credentials
+        // Add to DID's credentials (written through the mapping so static analysis sees the array initialized)
         _didCredentials[did].push(credentialId);
+        _issuerCredentialCount[did][msg.sender]++;
         totalCredentials++;
 
         // Recalculate sybil score (covers any entries pruned above and the new credential)
@@ -371,6 +394,37 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
     }
 
     /**
+     * @inheritdoc IDIDRegistry
+     * @dev Bounded: two passes over the DID's credential array, which never exceeds MAX_CREDENTIALS_FOR_SCORE.
+     *      Not pausable, like revokeCredential and cleanupCredentials.
+     */
+    function revokeIssuerCredentials(bytes32 did, address issuer, string calldata reason)
+        external
+        override
+        nonReentrant
+        returns (uint256 revokedCount)
+    {
+        address controller = _didDocuments[did].controller;
+        if (controller == address(0)) revert DIDNotFound(did);
+        // Same authority as revokeCredential: the DID controller, or the issuer for its own credentials
+        if (msg.sender != controller && msg.sender != issuer) revert NotDIDController(did, msg.sender);
+
+        bytes32[] storage credIds = _didCredentials[did];
+        for (uint256 i = 0; i < credIds.length; ++i) {
+            Credential storage cred = _credentials[credIds[i]];
+            if (cred.issuer == issuer && !cred.revoked) {
+                cred.revoked = true;
+                ++revokedCount;
+                emit CredentialRevoked(credIds[i], msg.sender, reason);
+            }
+        }
+
+        // Free the slots at once: removes every revoked/expired entry, including all of the issuer's
+        _pruneCredentials(did);
+        _updateSybilScore(did);
+    }
+
+    /**
      * @notice FIX M-04: Clean up revoked and expired credentials from DID's credential array
      * @dev Removes credentials that are revoked or expired (swap-and-pop). Permissionless and callable while
      *      paused. Bounded: at most MAX_CREDENTIALS_FOR_SCORE (50) iterations, since a DID never holds more.
@@ -390,7 +444,8 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
      * @notice Remove revoked and expired credentials from a DID's credential array (swap-and-pop)
      * @dev Bounded by MAX_CREDENTIALS_FOR_SCORE: the array can never exceed it. Emits nothing and does not
      *      update the sybil score; callers do. Zero-weight and inactive-issuer credentials are kept on purpose:
-     *      they count again if the issuer is re-added, consistent with verifyCredential.
+     *      they count again if the issuer is re-added, consistent with verifyCredential. Keeps the per-issuer
+     *      entry counts in step with the array.
      * @param did The DID to prune
      * @return removedCount Number of credentials removed
      */
@@ -405,6 +460,7 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
             bool shouldRemove = cred.revoked || (cred.expiresAt != 0 && block.timestamp > cred.expiresAt);
 
             if (shouldRemove) {
+                _issuerCredentialCount[did][cred.issuer]--;
                 // Swap with last element and pop
                 credIds[i] = credIds[credIds.length - 1];
                 credIds.pop();
@@ -431,6 +487,18 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
                 ++count;
             }
         }
+    }
+
+    /**
+     * @notice Number of entries `issuer` holds in `did`'s credential array, counted against
+     *         MAX_CREDENTIALS_PER_ISSUER
+     * @dev Includes revoked/expired entries not yet pruned; issuance at the limit prunes them first
+     * @param did The DID
+     * @param issuer The issuer
+     * @return Entries held by the issuer
+     */
+    function getIssuerCredentialCount(bytes32 did, address issuer) external view returns (uint256) {
+        return _issuerCredentialCount[did][issuer];
     }
 
     /**
@@ -465,26 +533,44 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
 
     /**
      * @inheritdoc IDIDRegistry
+     * @dev Uses the live score (see getSybilScore), never the recorded one.
      */
     function meetsSybilRequirement(bytes32 did, uint256 requiredScore) external view override returns (bool) {
         if (_didDocuments[did].controller == address(0)) return false;
         if (_didDocuments[did].status != DIDStatus.Active) return false;
-        return _didDocuments[did].sybilScore >= requiredScore;
+        return _computeSybilScore(did) >= requiredScore;
     }
 
     /**
      * @inheritdoc IDIDRegistry
+     * @dev Computed live, so credential expiry and issuer removal / trust changes take effect immediately.
+     *      Bounded: at most MAX_CREDENTIALS_FOR_SCORE credentials are read.
      */
     function getSybilScore(bytes32 did) external view override returns (uint256) {
-        return _didDocuments[did].sybilScore;
+        return _computeSybilScore(did);
     }
 
     /**
-     * @notice Internal function to update sybil score
-     * @dev Scores every credential the DID holds (array length <= MAX_CREDENTIALS_FOR_SCORE); the length cap
-     *      below is defensive only.
+     * @notice Recompute the score and record it in the DID document, emitting SybilScoreUpdated on change
+     * @dev The recorded value only feeds the event; every view reads the live score.
      */
     function _updateSybilScore(bytes32 did) internal returns (uint256 score) {
+        score = _computeSybilScore(did);
+
+        uint256 oldScore = _didDocuments[did].sybilScore;
+        if (oldScore != score) {
+            _didDocuments[did].sybilScore = score;
+            emit SybilScoreUpdated(did, oldScore, score);
+        }
+    }
+
+    /**
+     * @notice Live sybil score: weight-averaged issuer trust over the DID's valid credentials
+     * @dev Scores every credential the DID holds (array length <= MAX_CREDENTIALS_FOR_SCORE); the length cap
+     *      below is defensive only. Skips revoked and expired credentials and those of inactive issuers, and
+     *      uses each issuer's current trust level.
+     */
+    function _computeSybilScore(bytes32 did) internal view returns (uint256 score) {
         bytes32[] storage credIds = _didCredentials[did];
         uint256 totalWeight = 0;
         uint256 weightedScore = 0;
@@ -518,15 +604,6 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
                 score = MAX_SYBIL_SCORE;
             }
         }
-
-        uint256 oldScore = _didDocuments[did].sybilScore;
-        _didDocuments[did].sybilScore = score;
-
-        if (oldScore != score) {
-            emit SybilScoreUpdated(did, oldScore, score);
-        }
-
-        return score;
     }
 
     // ============ Issuer Management (Admin) ============
@@ -623,17 +700,26 @@ contract DIDRegistry is IDIDRegistry, ReentrancyGuard, Pausable, Ownable2Step {
 
     /**
      * @inheritdoc IDIDRegistry
+     * @dev The returned sybilScore is the live score (see getSybilScore).
      */
     function getDIDByController(address controller) external view override returns (DIDDocument memory) {
-        bytes32 did = _addressToDID[controller];
-        return _didDocuments[did];
+        return _documentWithLiveScore(_addressToDID[controller]);
     }
 
     /**
      * @inheritdoc IDIDRegistry
+     * @dev The returned sybilScore is the live score (see getSybilScore).
      */
     function getDIDDocument(bytes32 did) external view override returns (DIDDocument memory) {
-        return _didDocuments[did];
+        return _documentWithLiveScore(did);
+    }
+
+    /**
+     * @notice Copy of a DID document whose sybilScore is the live score rather than the recorded one
+     */
+    function _documentWithLiveScore(bytes32 did) internal view returns (DIDDocument memory doc) {
+        doc = _didDocuments[did];
+        doc.sybilScore = _computeSybilScore(did);
     }
 
     /**

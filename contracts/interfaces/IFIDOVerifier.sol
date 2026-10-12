@@ -148,6 +148,8 @@ interface IFIDOVerifier {
      * @notice Generate a challenge for signing
      * @dev Combines nonce, action, and timestamp for replay protection.
      *      Increments user nonce to prevent challenge reuse/front-running.
+     *      challenge = keccak256(abi.encode(msg.sender, action, data, nonce, block.timestamp, block.chainid)),
+     *      so the action/data boundary is unambiguous.
      * @param action The action being authorized (e.g., "accept-proposal")
      * @param data Additional data to include in challenge (e.g., disputeId)
      * @return challenge The challenge to be signed
