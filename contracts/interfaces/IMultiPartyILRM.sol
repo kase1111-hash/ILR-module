@@ -182,6 +182,7 @@ interface IMultiPartyILRM {
 
     /**
      * @notice Reject the LLM proposal
+     * @dev Reverts "Timeout passed" after the resolution deadline (only enforceTimeout may change the dispute then)
      * @param disputeId The dispute ID
      */
     function rejectProposal(uint256 disputeId) external;

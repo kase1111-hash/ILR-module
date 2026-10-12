@@ -302,7 +302,7 @@ contract TreasuryFollowupsRegressionTest is Test {
         revert("funder slot not found");
     }
 
-    function _assertNotRead(bytes32 slot) internal {
+    function _assertNotRead(bytes32 slot) internal view {
         (bytes32[] memory reads,) = vm.accesses(address(ilrm));
         assertGt(reads.length, 0, "no reads recorded");
         for (uint256 i = 0; i < reads.length; i++) {

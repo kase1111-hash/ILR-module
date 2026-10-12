@@ -406,6 +406,8 @@ contract MultiPartyILRM is IMultiPartyILRM, IOracleConsumer, ReentrancyGuard, Pa
         require(bytes(d.llmProposal).length > 0, "No proposal yet");
         require(!_partyInfo[disputeId][msg.sender].hasAccepted, "Already accepted");
         require(!_partyInfo[disputeId][msg.sender].hasRejected, "Already rejected");
+        // After the deadline only enforceTimeout may change the dispute
+        require(block.timestamp <= _resolutionDeadline(d), "Timeout passed");
 
         _partyInfo[disputeId][msg.sender].hasRejected = true;
         d.rejectionCount++;

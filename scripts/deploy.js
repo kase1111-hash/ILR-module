@@ -2,7 +2,149 @@ const { ethers, network } = require("hardhat");
 const fs = require("fs");
 const path = require("path");
 
-async function main() {
+const UINT256_MAX = (1n << 256n) - 1n;
+const DAY = 24n * 60n * 60n;
+const TOKEN = 10n ** 18n; // one token of an 18-decimals token
+
+// Mirror of ILRM's initiator-incentive constants (DEFAULT_*, MIN/MAX_INCENTIVE_WINDOW), so the env values can be
+// checked against the contract's bounds before anything is deployed. test/DeployConfig.test.js keeps it in sync.
+const ILRM_INCENTIVE = {
+  DEFAULT_MAX_PER_DISPUTE: 1n * TOKEN,
+  DEFAULT_MAX_PER_WINDOW: 10n * TOKEN,
+  DEFAULT_WINDOW: 30n * DAY,
+  MIN_WINDOW: 1n * DAY,
+  MAX_WINDOW: 365n * DAY
+};
+
+// Treasury constructor arguments used when MAX_PER_DISPUTE / MAX_PER_PARTICIPANT / WINDOW_DURATION are unset
+const TREASURY_DEFAULTS = {
+  MAX_PER_DISPUTE: 1n * TOKEN,
+  MAX_PER_PARTICIPANT: 10n * TOKEN,
+  WINDOW_DURATION: 30n * DAY
+};
+
+// Token-denominated env values: their defaults assume an 18-decimals token, so a token with other decimals must
+// set every one of them explicitly (INCENTIVE_WINDOW and WINDOW_DURATION are seconds and may stay unset)
+const TOKEN_UNIT_VARS = [
+  "MAX_PER_DISPUTE",
+  "MAX_PER_PARTICIPANT",
+  "INCENTIVE_MAX_PER_DISPUTE",
+  "INCENTIVE_MAX_PER_WINDOW"
+];
+
+const INCENTIVE_VARS = ["INCENTIVE_MAX_PER_DISPUTE", "INCENTIVE_MAX_PER_WINDOW", "INCENTIVE_WINDOW"];
+
+const isSet = (value) => value !== undefined && value !== "";
+
+/**
+ * Parse and validate every environment value this script reads, without touching the chain. Throws one Error
+ * listing every problem, so a bad value fails before the first transaction instead of leaving a partial
+ * deployment. Unset or empty values take the defaults above.
+ * - MAX_PER_DISPUTE, MAX_PER_PARTICIPANT, INCENTIVE_MAX_PER_DISPUTE, INCENTIVE_MAX_PER_WINDOW: raw token base
+ *   units, decimal digits only, 0 to 2^256-1 (zero incentive caps are ILRM's kill switch)
+ * - WINDOW_DURATION: seconds, 0 to 2^256-1 (the Treasury has no bounds)
+ * - INCENTIVE_WINDOW: seconds, 1 day to 365 days inclusive (ILRM's bounds)
+ * - effective incentive per-dispute cap <= effective per-window cap (ILRM's bound), defaults included
+ * - TOKEN_ADDRESS (non-local networks only): required, a non-zero 0x-prefixed address
+ * @param {Record<string, string | undefined>} env The environment (process.env)
+ * @param {{ localNetwork: boolean }} options localNetwork: hardhat/localhost, where a MockToken is deployed instead
+ */
+function parseDeployConfig(env, { localNetwork }) {
+  const errors = [];
+  const explicit = new Set(Object.keys(env).filter((name) => isSet(env[name])));
+
+  const uint = (name, fallback, min = 0n, max = UINT256_MAX) => {
+    if (!explicit.has(name)) return fallback;
+    const text = String(env[name]).trim();
+    if (!/^[0-9]+$/.test(text)) {
+      errors.push(`${name} must be an integer in decimal digits (no exponent, sign, point or hex), got "${env[name]}"`);
+      return undefined;
+    }
+    const value = BigInt(text);
+    if (value < min || value > max) {
+      errors.push(`${name} must be between ${min} and ${max} inclusive, got ${value}`);
+      return undefined;
+    }
+    return value;
+  };
+
+  let tokenAddress;
+  if (!localNetwork) {
+    const raw = explicit.has("TOKEN_ADDRESS") ? String(env.TOKEN_ADDRESS).trim() : "";
+    if (raw === "") {
+      errors.push("TOKEN_ADDRESS environment variable required for non-local deployments");
+    } else if (!/^0x[0-9a-fA-F]{40}$/.test(raw) || !ethers.isAddress(raw) || BigInt(raw) === 0n) {
+      errors.push(`TOKEN_ADDRESS must be a non-zero 0x-prefixed address (valid checksum if mixed case), got "${raw}"`);
+    } else {
+      tokenAddress = ethers.getAddress(raw);
+    }
+  }
+
+  const treasury = {
+    maxPerDispute: uint("MAX_PER_DISPUTE", TREASURY_DEFAULTS.MAX_PER_DISPUTE),
+    maxPerParticipant: uint("MAX_PER_PARTICIPANT", TREASURY_DEFAULTS.MAX_PER_PARTICIPANT),
+    windowDuration: uint("WINDOW_DURATION", TREASURY_DEFAULTS.WINDOW_DURATION)
+  };
+
+  const incentive = {
+    set: INCENTIVE_VARS.some((name) => explicit.has(name)),
+    maxPerDispute: uint("INCENTIVE_MAX_PER_DISPUTE", ILRM_INCENTIVE.DEFAULT_MAX_PER_DISPUTE),
+    maxPerWindow: uint("INCENTIVE_MAX_PER_WINDOW", ILRM_INCENTIVE.DEFAULT_MAX_PER_WINDOW),
+    window: uint(
+      "INCENTIVE_WINDOW",
+      ILRM_INCENTIVE.DEFAULT_WINDOW,
+      ILRM_INCENTIVE.MIN_WINDOW,
+      ILRM_INCENTIVE.MAX_WINDOW
+    )
+  };
+  if (
+    incentive.maxPerDispute !== undefined &&
+    incentive.maxPerWindow !== undefined &&
+    incentive.maxPerDispute > incentive.maxPerWindow
+  ) {
+    const source = (name) => (explicit.has(name) ? name : `the default ${name}`);
+    errors.push(
+      `${source("INCENTIVE_MAX_PER_DISPUTE")} (${incentive.maxPerDispute}) must be <= ` +
+        `${source("INCENTIVE_MAX_PER_WINDOW")} (${incentive.maxPerWindow})`
+    );
+  }
+
+  if (errors.length > 0) {
+    throw new Error(`Invalid deployment configuration (nothing was deployed):\n  - ${errors.join("\n  - ")}`);
+  }
+  return { localNetwork, tokenAddress, explicit, treasury, incentive };
+}
+
+/**
+ * Refuse a token whose decimals are not 18 unless every token-denominated value is set explicitly: the defaults
+ * (1 and 10 tokens) are 18-decimals base units. Setting only a window does not count.
+ * @param {ReturnType<typeof parseDeployConfig>} config The parsed configuration
+ * @param {bigint | number} decimals The token's decimals()
+ */
+function checkTokenDecimals(config, decimals) {
+  if (Number(decimals) === 18) return;
+  const missing = TOKEN_UNIT_VARS.filter((name) => !config.explicit.has(name));
+  if (missing.length > 0) {
+    throw new Error(
+      `Token has ${decimals} decimals but the defaults assume 18; set ${missing.join(", ")} explicitly ` +
+        "in the token's base units"
+    );
+  }
+}
+
+/**
+ * Deploy and wire AssetRegistry, Oracle, ILRM and Treasury (plus a MockToken on hardhat/localhost).
+ * Every env value is parsed and validated, and the token's decimals are checked, before the first protocol
+ * contract is deployed. On non-local networks nothing is sent before those checks; on hardhat/localhost only the
+ * 18-decimals MockToken is.
+ * @param {Record<string, string | undefined>} env The environment (default process.env)
+ * @param {{ save?: boolean }} options save: write deployments/<network>-<time>.json (default true)
+ */
+async function main(env = process.env, { save = true } = {}) {
+  const localNetwork = network.name === "hardhat" || network.name === "localhost";
+  const config = parseDeployConfig(env, { localNetwork });
+  const { maxPerDispute, maxPerParticipant, windowDuration } = config.treasury;
+
   const [deployer] = await ethers.getSigners();
   console.log("Deploying contracts with account:", deployer.address);
   console.log("Network:", network.name);
@@ -10,7 +152,7 @@ async function main() {
 
   // ============ Deploy Token (for testing - use existing in production) ============
   let tokenAddress;
-  if (network.name === "hardhat" || network.name === "localhost") {
+  if (localNetwork) {
     console.log("\n1. Deploying MockToken (testnet only)...");
     const MockToken = await ethers.getContractFactory("MockToken");
     const token = await MockToken.deploy();
@@ -19,33 +161,19 @@ async function main() {
     console.log("   MockToken deployed to:", tokenAddress);
   } else {
     // For production/testnet: use existing token address
-    tokenAddress = process.env.TOKEN_ADDRESS;
-    if (!tokenAddress) {
-      throw new Error("TOKEN_ADDRESS environment variable required for non-local deployments");
-    }
+    tokenAddress = config.tokenAddress;
     console.log("\n1. Using existing token:", tokenAddress);
   }
 
-  // ILRM's initiator-incentive cap defaults (1 token per dispute, 10 tokens per 30-day window) assume an
-  // 18-decimals token. INCENTIVE_MAX_PER_DISPUTE / INCENTIVE_MAX_PER_WINDOW are raw base units (like
-  // MAX_PER_DISPUTE); INCENTIVE_WINDOW is in seconds (1 day to 365 days).
-  const incentiveEnv = {
-    maxPerDispute: process.env.INCENTIVE_MAX_PER_DISPUTE,
-    maxPerWindow: process.env.INCENTIVE_MAX_PER_WINDOW,
-    window: process.env.INCENTIVE_WINDOW
-  };
-  const incentiveCapsSet = Object.values(incentiveEnv).some((v) => v !== undefined && v !== "");
+  // The token-denominated defaults (Treasury caps, ILRM initiator-incentive caps) assume 18 decimals.
+  // MAX_PER_DISPUTE / MAX_PER_PARTICIPANT / INCENTIVE_MAX_PER_* are raw base units; the windows are seconds.
   const tokenDecimals = await new ethers.Contract(
     tokenAddress,
     ["function decimals() view returns (uint8)"],
     deployer
   ).decimals();
   console.log("   Token decimals:", tokenDecimals.toString());
-  if (Number(tokenDecimals) !== 18 && !incentiveCapsSet) {
-    throw new Error(
-      `ILRM incentive defaults assume 18 decimals; set INCENTIVE_* explicitly (token has ${tokenDecimals} decimals)`
-    );
-  }
+  checkTokenDecimals(config, tokenDecimals);
 
   // ============ Deploy AssetRegistry ============
   console.log("\n2. Deploying AssetRegistry...");
@@ -77,10 +205,6 @@ async function main() {
 
   // ============ Deploy Treasury ============
   console.log("\n5. Deploying Treasury...");
-  const maxPerDispute = process.env.MAX_PER_DISPUTE || ethers.parseEther("1");
-  const maxPerParticipant = process.env.MAX_PER_PARTICIPANT || ethers.parseEther("10");
-  const windowDuration = process.env.WINDOW_DURATION || 30 * 24 * 60 * 60;
-
   const Treasury = await ethers.getContractFactory("NatLangChainTreasury");
   const treasury = await Treasury.deploy(
     tokenAddress,
@@ -111,13 +235,10 @@ async function main() {
   await (await ilrm.setSubsidyTreasury(treasuryAddress)).wait();
   console.log("   ILRM: Set subsidy treasury");
 
-  // Initiator-incentive caps: override the constructor defaults only when an INCENTIVE_* variable is set;
-  // unset values keep the current on-chain value
-  if (incentiveCapsSet) {
-    const pick = (value, current) => (value !== undefined && value !== "" ? BigInt(value) : current);
-    const perDispute = pick(incentiveEnv.maxPerDispute, await ilrm.maxIncentivePerDispute());
-    const perWindow = pick(incentiveEnv.maxPerWindow, await ilrm.maxIncentivePerWindow());
-    const window = pick(incentiveEnv.window, await ilrm.incentiveWindow());
+  // Initiator-incentive caps: override the constructor defaults only when an INCENTIVE_* variable is set; unset
+  // values keep the defaults. The values were validated against ILRM's bounds before anything was deployed.
+  if (config.incentive.set) {
+    const { maxPerDispute: perDispute, maxPerWindow: perWindow, window } = config.incentive;
     await (await ilrm.setInitiatorIncentiveCaps(perDispute, perWindow, window)).wait();
     console.log("   ILRM: Set initiator-incentive caps from INCENTIVE_*");
   }
@@ -163,19 +284,21 @@ async function main() {
   console.log("========================================\n");
 
   // Save deployment addresses
-  const deploymentsDir = path.join(__dirname, "..", "deployments");
-  if (!fs.existsSync(deploymentsDir)) {
-    fs.mkdirSync(deploymentsDir, { recursive: true });
+  if (save) {
+    const deploymentsDir = path.join(__dirname, "..", "deployments");
+    if (!fs.existsSync(deploymentsDir)) {
+      fs.mkdirSync(deploymentsDir, { recursive: true });
+    }
+    const filename = `${network.name}-${Date.now()}.json`;
+    fs.writeFileSync(
+      path.join(deploymentsDir, filename),
+      JSON.stringify(addresses, null, 2)
+    );
+    console.log(`Addresses saved to deployments/${filename}`);
   }
-  const filename = `${network.name}-${Date.now()}.json`;
-  fs.writeFileSync(
-    path.join(deploymentsDir, filename),
-    JSON.stringify(addresses, null, 2)
-  );
-  console.log(`Addresses saved to deployments/${filename}`);
 
   // Verification instructions
-  if (network.name !== "hardhat" && network.name !== "localhost") {
+  if (!localNetwork) {
     console.log("\nTo verify contracts on Etherscan:");
     console.log(`  npx hardhat verify --network ${network.name} ${registryAddress}`);
     console.log(`  npx hardhat verify --network ${network.name} ${oracleAddress}`);
@@ -186,9 +309,13 @@ async function main() {
   return addresses;
 }
 
-main()
-  .then(() => process.exit(0))
-  .catch((error) => {
-    console.error(error);
-    process.exit(1);
-  });
+module.exports = { main, parseDeployConfig, checkTokenDecimals, ILRM_INCENTIVE, TREASURY_DEFAULTS, TOKEN_UNIT_VARS };
+
+if (require.main === module) {
+  main()
+    .then(() => process.exit(0))
+    .catch((error) => {
+      console.error(error);
+      process.exit(1);
+    });
+}
