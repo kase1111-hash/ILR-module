@@ -223,6 +223,11 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
         if (uint256(r) == 0 || uint256(r) >= P256_N) return false;
         if (uint256(s) == 0 || uint256(s) >= P256_N) return false;
 
+        // Validate the public key on both paths, like the precompile: canonical coordinates on the curve. The
+        // pure-Solidity path encodes infinity as (0,0) and never uses b, so key (0,0) or an off-curve key (e.g. the
+        // order-2 point (1,0)) would make u2*Q vanish and let anyone forge via x(u1*G) == r. (0,0) is off-curve.
+        if (!_isOnCurve(publicKeyX, publicKeyY)) return false;
+
         // Normalize s to low-s form (malleability fix)
         if (uint256(s) > P256_N / 2) {
             s = bytes32(P256_N - uint256(s));
@@ -352,6 +357,8 @@ contract FIDOVerifier is IFIDOVerifier, Ownable2Step, ReentrancyGuard {
      * @notice Very expensive: about 38M gas per verification (affine double-and-add with one modular inverse
      *         per point operation), above the per-transaction gas cap on EIP-7825 chains. Practical for
      *         eth_call checks; deploy on chains with the RIP-7212 / EIP-7951 P256VERIFY precompile.
+     *         Callers must pass inputs validated by verifyP256Signature (r, s in [1, n-1], key on the curve):
+     *         with an unvalidated key such as (0,0) this check is forgeable.
      */
     function _verifyPureSolidity(bytes32 messageHash, bytes32 r, bytes32 s, bytes32 publicKeyX, bytes32 publicKeyY)
         internal

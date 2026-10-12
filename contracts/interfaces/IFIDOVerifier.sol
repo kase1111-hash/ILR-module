@@ -131,7 +131,9 @@ interface IFIDOVerifier {
 
     /**
      * @notice Verify a P-256 signature directly
-     * @dev Lower-level verification for custom implementations
+     * @dev Lower-level verification for custom implementations. Returns false (on both the precompile and the
+     *      pure-Solidity path) when r or s is outside [1, n-1] or the public key is not a point on P-256 with
+     *      coordinates below p; this includes (0,0), the key read back for an unregistered credential.
      * @param messageHash The hash of the message that was signed
      * @param r Signature R component
      * @param s Signature S component
