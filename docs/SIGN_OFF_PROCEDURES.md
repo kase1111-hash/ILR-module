@@ -5,6 +5,14 @@
 
 This document details the steps required to complete the mainnet sign-off checklist items.
 
+> ⚠️ **L3 is not production-ready and must not be deployed.** The L3 contracts (`L3Bridge`,
+> `L3DisputeBatcher`, `L3StateVerifier`) have known-unsound security: fraud proofs check no state transition,
+> the sequencer posts no bond, settlements are not tied to finalized state roots, and bridged disputes are not
+> validated against the ILRM (see [SPEC.md 4.3](../SPEC.md#43-l3app-specific-rollups-natlangchain-roadmapmd)).
+> No deploy script deploys them. They are **not part of any mainnet sign-off**: do not deploy, configure, fund
+> or transfer them, and do not read a passing L3 test or an L3 gas figure below as a deployment criterion. The
+> L3 steps below are regression and research coverage only.
+
 ---
 
 ## 1. Full Test Suite Passes (`forge test --fuzz-runs 10000`)
@@ -32,8 +40,10 @@ forge test --fuzz-runs 10000 -vv
 
 # For specific high-risk contracts, run even more iterations
 forge test --match-contract ILRM --fuzz-runs 50000
-forge test --match-contract L3Bridge --fuzz-runs 50000
 forge test --match-contract Treasury --fuzz-runs 50000
+
+# Regression coverage only: L3 is not production-ready and must not be deployed
+forge test --match-contract L3Bridge --fuzz-runs 50000
 ```
 - [ ] No fuzz test failures
 - [ ] No invariant violations
@@ -107,10 +117,13 @@ forge test --gas-report --json > gas-report.json
 | ILRM | counterPropose | ~120,000 | 250,000 |
 | ILRM | enforceTimeout | ~80,000 | 150,000 |
 | Treasury | distributeSubsidy | ~60,000 | 120,000 |
-| L3Bridge | bridgeDisputeToL3 | ~200,000 | 400,000 |
-| L3Bridge | commitFraudProof | ~100,000 | 200,000 |
-| L3Bridge | revealFraudProof | ~150,000 | 300,000 |
+| L3Bridge ⚠️ | bridgeDisputeToL3 | ~200,000 | 400,000 |
+| L3Bridge ⚠️ | commitFraudProof | ~100,000 | 200,000 |
+| L3Bridge ⚠️ | revealFraudProof | ~150,000 | 300,000 |
 | Oracle | submitLLMProposal | ~80,000 | 150,000 |
+
+⚠️ The L3Bridge rows are informational only: L3 is not production-ready and must not be deployed, so its gas
+costs are not a sign-off criterion.
 
 ```bash
 # Benchmark specific functions
@@ -137,7 +150,7 @@ Create/update `docs/GAS_COSTS.md`:
 ## Summary
 - Average dispute lifecycle (L2): ~$X.XX
 - Worst case dispute (L2): ~$X.XX
-- L3 bridge operation: ~$X.XX
+- L3 bridge operation: ~$X.XX (informational only: L3 is not production-ready and must not be deployed)
 
 ## Detailed Breakdown
 [Include full gas report]
@@ -198,8 +211,10 @@ Contracts to transfer:
 - [ ] Treasury
 - [ ] Oracle
 - [ ] AssetRegistry
-- [ ] L3Bridge
 - [ ] GovernanceTimelock (set as executor)
+
+Not deployed, so nothing to transfer: L3Bridge, L3DisputeBatcher and L3StateVerifier (L3 is not
+production-ready and must not be deployed; see the warning at the top).
 
 #### Step 3.3: Configure GovernanceTimelock
 
@@ -309,6 +324,7 @@ Before mainnet deployment, ensure all sections are complete:
 | Full Test Suite | ⬜ | | |
 | Gas Costs Documented | ⬜ | | |
 | Multi-Sig Configured | ⬜ | | |
+| No L3 contract deployed (L3Bridge, L3DisputeBatcher, L3StateVerifier) | ⬜ | | |
 
 **Deployment Authorization:**
 

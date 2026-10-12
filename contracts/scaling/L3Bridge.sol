@@ -1079,11 +1079,9 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     }
 
     /**
-     * @notice Check if dispute is settled
-     * @param l2DisputeId The L2 dispute ID to check
-     * @return True if the dispute has been settled
+     * @inheritdoc IL3Bridge
      */
-    function isDisputeSettled(uint256 l2DisputeId) external view returns (bool) {
+    function isDisputeSettled(uint256 l2DisputeId) external view override returns (bool) {
         return _settledDisputes[l2DisputeId];
     }
 
@@ -1115,11 +1113,9 @@ contract L3Bridge is IL3Bridge, ReentrancyGuard, Pausable, Ownable2Step {
     }
 
     /**
-     * @notice Whether a state root is on the current canonical chain
-     * @param stateRoot The state root to query
-     * @return False if never committed, or orphaned by a rejected ancestor (or rejected itself)
+     * @inheritdoc IL3Bridge
      */
-    function isStateCanonical(bytes32 stateRoot) external view returns (bool) {
+    function isStateCanonical(bytes32 stateRoot) external view override returns (bool) {
         return _isCanonical(stateRoot);
     }
 
