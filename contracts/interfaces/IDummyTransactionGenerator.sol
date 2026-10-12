@@ -3,24 +3,28 @@ pragma solidity ^0.8.20;
 
 /**
  * @title IDummyTransactionGenerator
- * @notice Interface for privacy-preserving dummy transaction generation
- * @dev Generates "noop" transactions at random intervals to obscure real patterns
+ * @notice Interface for dummy transaction generation (noise in transaction counts and timing)
+ * @dev Generates treasury-funded "noop" transactions at pseudo-random times.
  *
- * Privacy Model:
- * - Injects dummy transactions that look identical to real transactions
- * - Random intervals prevent timing correlation
- * - Treasury-funded to avoid user cost
- * - Dedicated dummy addresses prevent inflation of real metrics
+ * Privacy Model (limits):
+ * - Dummies are attributable, NOT indistinguishable on-chain: this contract is msg.sender of every
+ *   dummy call (ILRM logs it as the voluntary-request initiator, BatchQueue as the submitter), it emits
+ *   DummyTransactionGenerated for each one, and isDummyAddress is public. Dummies add noise only for
+ *   observers that see aggregate counts or timing and do not trace call frames or logs.
+ * - Randomness is block-derived and NOT unpredictable (no VRF). It only paces generation and picks the
+ *   dummy type and address; no safety property depends on it (see Safety).
  *
- * Chainlink Integration:
- * - Uses Chainlink VRF for verifiable randomness
- * - Chainlink Automation for scheduled execution
- * - Configurable probability thresholds
+ * Automation:
+ * - Chainlink Automation compatible (checkUpkeep / performUpkeep); generation is keeper- or owner-only
  *
  * Safety:
- * - Dummy addresses are marked to exclude from analytics
- * - Doesn't inflate harassment scores or entropy metrics
- * - Bounded treasury spending per period
+ * - Only the keeper or owner can trigger generation, at most one attempt (generated or skipped) per
+ *   minInterval
+ * - Hard per-period caps (count and treasury spend, including the cost of the dummy being generated)
+ *   bound the spend on every generation path, whatever the randomness
+ * - Generation only ever sends ETH to the owner-set, code-checked ILRM (the constant voluntary-request
+ *   fee); the only other outflow is the owner's withdrawTreasury
+ * - Dummy addresses are labeled so off-chain analytics can exclude them
  */
 interface IDummyTransactionGenerator {
     // ============ Enums ============
@@ -90,11 +94,23 @@ interface IDummyTransactionGenerator {
     /// @notice Emitted when a new period starts
     event PeriodReset(uint256 periodStart, uint256 previousGenerated, uint256 previousSpent);
 
+    /// @notice Emitted when the keeper allowed to trigger generation changes
+    event KeeperUpdated(address indexed previousKeeper, address indexed newKeeper);
+
+    /// @notice Emitted when the target contracts change
+    event TargetContractsUpdated(address indexed ilrm, address indexed batchQueue);
+
+    /// @notice Emitted when treasury funds are withdrawn
+    event TreasuryWithdrawn(address indexed to, uint256 amount);
+
     // ============ Generation Functions ============
 
     /**
      * @notice Attempt to generate a dummy transaction
-     * @dev Uses randomness to determine if generation should occur
+     * @dev Keeper or owner only; pausable. Returns (false, VoluntaryRequest) without effects when
+     *      canGenerate() is false. Otherwise records the attempt before drawing, so at most one attempt
+     *      (generated or skipped) happens per minInterval and a skip cannot be retried. Uses block-derived
+     *      randomness to decide whether to generate (see Privacy Model). Reverts if the target call fails.
      * @return generated True if a dummy tx was generated
      * @return txType The type of dummy tx generated (if any)
      */
@@ -102,7 +118,10 @@ interface IDummyTransactionGenerator {
 
     /**
      * @notice Force generate a specific dummy tx type
-     * @dev Only callable by owner/automation
+     * @dev Owner only; pausable; requires the generator to be enabled. Subject to the same per-period
+     *      caps as tryGenerate (count, and spend including this dummy's cost): returns false without
+     *      effects when a cap, the treasury or the target configuration does not allow it. Reverts if the
+     *      target call fails.
      * @param txType The type of dummy tx to generate
      * @return success True if generation succeeded
      */
@@ -110,7 +129,8 @@ interface IDummyTransactionGenerator {
 
     /**
      * @notice Generate multiple dummy transactions
-     * @dev Useful for batch generation during low-activity periods
+     * @dev Owner only; pausable; requires the generator to be enabled; 1 to 10 per call. Stops at the
+     *      first dummy that a per-period cap or the treasury does not allow.
      * @param count Number of dummy txs to generate
      * @return generated Actual number generated
      */
@@ -127,15 +147,11 @@ interface IDummyTransactionGenerator {
 
     /**
      * @notice Chainlink Automation perform function
-     * @param performData Data from checkUpkeep
+     * @dev Keeper or owner only; pausable. Same as tryGenerate (internal call); the outcome is reported
+     *      by DummyTransactionGenerated or GenerationSkipped.
+     * @param performData Data from checkUpkeep (unused)
      */
     function performUpkeep(bytes calldata performData) external;
-
-    /**
-     * @notice Request randomness from Chainlink VRF
-     * @return requestId The VRF request ID
-     */
-    function requestRandomness() external returns (uint256 requestId);
 
     // ============ Address Management ============
 
@@ -206,10 +222,10 @@ interface IDummyTransactionGenerator {
 
     /**
      * @notice Check if generation is currently possible
-     * @return canGenerate True if generation can occur
+     * @return allowed True if generation can occur
      * @return reason Reason if cannot generate
      */
-    function canGenerate() external view returns (bool canGenerate, string memory reason);
+    function canGenerate() external view returns (bool allowed, string memory reason);
 
     /**
      * @notice Get dummy address info
@@ -231,6 +247,12 @@ interface IDummyTransactionGenerator {
      * @param enabled Whether to enable
      */
     function setEnabled(bool enabled) external;
+
+    /**
+     * @notice Set the keeper (e.g. the Chainlink Automation forwarder) allowed to trigger generation
+     * @param keeper Keeper address, or address(0) for owner-only
+     */
+    function setKeeper(address keeper) external;
 
     /**
      * @notice Set the target contracts (ILRM, BatchQueue, etc.)
