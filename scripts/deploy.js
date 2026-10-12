@@ -26,6 +26,27 @@ async function main() {
     console.log("\n1. Using existing token:", tokenAddress);
   }
 
+  // ILRM's initiator-incentive cap defaults (1 token per dispute, 10 tokens per 30-day window) assume an
+  // 18-decimals token. INCENTIVE_MAX_PER_DISPUTE / INCENTIVE_MAX_PER_WINDOW are raw base units (like
+  // MAX_PER_DISPUTE); INCENTIVE_WINDOW is in seconds (1 day to 365 days).
+  const incentiveEnv = {
+    maxPerDispute: process.env.INCENTIVE_MAX_PER_DISPUTE,
+    maxPerWindow: process.env.INCENTIVE_MAX_PER_WINDOW,
+    window: process.env.INCENTIVE_WINDOW
+  };
+  const incentiveCapsSet = Object.values(incentiveEnv).some((v) => v !== undefined && v !== "");
+  const tokenDecimals = await new ethers.Contract(
+    tokenAddress,
+    ["function decimals() view returns (uint8)"],
+    deployer
+  ).decimals();
+  console.log("   Token decimals:", tokenDecimals.toString());
+  if (Number(tokenDecimals) !== 18 && !incentiveCapsSet) {
+    throw new Error(
+      `ILRM incentive defaults assume 18 decimals; set INCENTIVE_* explicitly (token has ${tokenDecimals} decimals)`
+    );
+  }
+
   // ============ Deploy AssetRegistry ============
   console.log("\n2. Deploying AssetRegistry...");
   const AssetRegistry = await ethers.getContractFactory("NatLangChainAssetRegistry");
@@ -90,6 +111,26 @@ async function main() {
   await (await ilrm.setSubsidyTreasury(treasuryAddress)).wait();
   console.log("   ILRM: Set subsidy treasury");
 
+  // Initiator-incentive caps: override the constructor defaults only when an INCENTIVE_* variable is set;
+  // unset values keep the current on-chain value
+  if (incentiveCapsSet) {
+    const pick = (value, current) => (value !== undefined && value !== "" ? BigInt(value) : current);
+    const perDispute = pick(incentiveEnv.maxPerDispute, await ilrm.maxIncentivePerDispute());
+    const perWindow = pick(incentiveEnv.maxPerWindow, await ilrm.maxIncentivePerWindow());
+    const window = pick(incentiveEnv.window, await ilrm.incentiveWindow());
+    await (await ilrm.setInitiatorIncentiveCaps(perDispute, perWindow, window)).wait();
+    console.log("   ILRM: Set initiator-incentive caps from INCENTIVE_*");
+  }
+  const incentiveCaps = {
+    maxPerDispute: (await ilrm.maxIncentivePerDispute()).toString(),
+    maxPerWindow: (await ilrm.maxIncentivePerWindow()).toString(),
+    window: (await ilrm.incentiveWindow()).toString()
+  };
+  console.log(
+    `   ILRM: Initiator-incentive caps: ${incentiveCaps.maxPerDispute} per dispute, ` +
+      `${incentiveCaps.maxPerWindow} per ${incentiveCaps.window}s window (raw token units)`
+  );
+
   // Register deployer as oracle operator (for testnet)
   if (network.name !== "mainnet") {
     const oracleKeyHash = ethers.keccak256(ethers.toUtf8Bytes("testnet-oracle-key"));
@@ -107,6 +148,7 @@ async function main() {
     registry: registryAddress,
     ilrm: ilrmAddress,
     treasury: treasuryAddress,
+    incentiveCaps,
     timestamp: new Date().toISOString()
   };
 

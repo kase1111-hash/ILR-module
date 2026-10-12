@@ -25,7 +25,11 @@ import "./interfaces/IAssetRegistry.sol";
  * - Two-step ownership transfer via Ownable2Step
  * - Optional Treasury-backed defensive stake subsidies (depositStakeWithSubsidy): the subsidy is
  *   escrowed here as part of the counterparty stake, never paid to a wallet, and the funder is repaid
- *   its pro-rata share of the counterparty payout on resolution
+ *   its pro-rata share of the counterparty payout on resolution; the caller bounds its own top-up
+ *   (maxTopUp), so a shrunken grant can force a revert but never an overcharge
+ * - Initiator incentive on counterparty non-participation: 10% of the stake from tokenReserves, capped
+ *   per dispute and across all disputes per window (setInitiatorIncentiveCaps); the initiator always
+ *   gets its full stake back, with a partial or zero incentive once a cap or the reserves run out
  *
  * Identity/privacy modules (ZK, FIDO, DID, viewing keys) are available as
  * separate composable contracts in contracts/modules/.
@@ -53,8 +57,23 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
     /// @notice Base counter-proposal fee (0.01 ETH equivalent)
     uint256 public constant COUNTER_FEE_BASE = 0.01 ether;
 
-    /// @notice Initiator incentive on counterparty non-stake (10% = 1000 bps)
+    /// @notice Initiator incentive rate on counterparty non-stake, before the incentive caps (10% = 1000 bps)
     uint256 public constant INITIATOR_INCENTIVE_BPS = 1000;
+
+    /// @notice Shortest allowed initiator-incentive window
+    uint256 public constant MIN_INCENTIVE_WINDOW = 1 days;
+
+    /// @notice Longest allowed initiator-incentive window
+    uint256 public constant MAX_INCENTIVE_WINDOW = 365 days;
+
+    /// @notice Default cap on a single initiator incentive (1 token; assumes 18 decimals, like deploy.js)
+    uint256 public constant DEFAULT_MAX_INCENTIVE_PER_DISPUTE = 1e18;
+
+    /// @notice Default cap on all initiator incentives paid per window (10 tokens; assumes 18 decimals)
+    uint256 public constant DEFAULT_MAX_INCENTIVE_PER_WINDOW = 10e18;
+
+    /// @notice Default initiator-incentive window
+    uint256 public constant DEFAULT_INCENTIVE_WINDOW = 30 days;
 
     /// @notice Stake escalation multiplier for repeat disputes (150% = 1.5x)
     uint256 public constant ESCALATION_MULTIPLIER = 150;
@@ -95,6 +114,32 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
     /// @notice Token reserves for initiator incentives
     uint256 public tokenReserves;
 
+    // ---- Initiator-incentive caps ----
+    // On non-participation the initiator gets its stake back plus 10% of it from tokenReserves. The
+    // counterparty can be a sybil of the initiator that simply never stakes, and a fresh counterparty faces
+    // no stake escalation, so uncapped this let anyone farm the reserves at 10% of their stake per 3-day
+    // cycle (one dispute staked at 10x the reserves drained them at once). Every payout is therefore
+    // min(10% of stake, maxIncentivePerDispute, maxIncentivePerWindow - incentivePaidInWindow, tokenReserves).
+    // The window cap is global, not keyed by address, so it holds against sybils.
+    // Residual risk (accepted): farming up to maxIncentivePerWindow per window remains possible. Under a
+    // fixed config (window T, window cap W) at most W * (ceil(t / T) + 1) is paid over any interval of
+    // length t (2W across a window boundary), and never more than the deposited reserves.
+
+    /// @notice Cap on a single initiator incentive
+    uint256 public maxIncentivePerDispute;
+
+    /// @notice Cap on all initiator incentives paid in one incentive window
+    uint256 public maxIncentivePerWindow;
+
+    /// @notice Initiator-incentive window length in seconds
+    uint256 public incentiveWindow;
+
+    /// @notice Start of the current incentive window (rolled lazily by the first payout after it expires)
+    uint256 public incentiveWindowStart;
+
+    /// @notice Initiator incentives paid in the current incentive window
+    uint256 public incentivePaidInWindow;
+
     /// @notice Treasury allowed to fund defensive stake subsidies (address(0) = subsidies disabled)
     address public subsidyTreasury;
 
@@ -116,6 +161,11 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         token = _token;
         oracle = _oracle;
         assetRegistry = _assetRegistry;
+
+        _setInitiatorIncentiveCaps(
+            DEFAULT_MAX_INCENTIVE_PER_DISPUTE, DEFAULT_MAX_INCENTIVE_PER_WINDOW, DEFAULT_INCENTIVE_WINDOW
+        );
+        incentiveWindowStart = block.timestamp;
     }
 
     // ============ Core Functions ============
@@ -352,8 +402,14 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
      *      initiatorStake). The subsidy is escrowed here as part of that stake - it never reaches the
      *      counterparty's wallet - and _payCounterpartySide repays the recorded funder its pro-rata share
      *      of whatever the counterparty side receives on resolution.
+     *      Slippage bound: the grant is only known once the treasury has run, so the caller's top-up
+     *      (stake - grant) is checked against _maxTopUp twice - before the treasury call against the best
+     *      case (requested bounds any grant from above), and after it against the actual grant, before any
+     *      record or transfer. The caller's outflow is therefore <= _maxTopUp whatever ran before it, and
+     *      any failure reverts atomically: a front-runner can force a revert but never an overcharge. The
+     *      bound only restricts the caller, so it cannot be used to draw more from the treasury.
      */
-    function depositStakeWithSubsidy(uint256 _disputeId, uint256 _maxSubsidy)
+    function depositStakeWithSubsidy(uint256 _disputeId, uint256 _maxSubsidy, uint256 _maxTopUp)
         external
         override
         nonReentrant
@@ -371,12 +427,18 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
 
         uint256 stake = d.initiatorStake;
         uint256 requested = _maxSubsidy < stake ? _maxSubsidy : stake;
+        // Pre-call check: requested is an upper bound on any grant, so this only rejects a bound that can
+        // never be met, before the treasury is called (requested <= stake, so no underflow)
+        require(stake - requested <= _maxTopUp, "Top-up exceeds max");
 
         // Effect before any external call: the treasury verifies the matching stake is committed
         d.counterpartyStake = stake;
 
         uint256 subsidy = ISubsidyTreasury(funder).fundStakeSubsidy(_disputeId, msg.sender, requested);
         require(subsidy > 0 && subsidy <= requested, "Invalid subsidy");
+        // The grant may have shrunk since the caller's preview; never charge the caller more than it
+        // bounded (checked before the record below and before both transfers)
+        require(stake - subsidy <= _maxTopUp, "Top-up exceeds max");
 
         // Recorded after the treasury call because the granted amount is only known now. Safe against
         // reentrancy: this function is nonReentrant, and every reader of the record (acceptProposal and
@@ -388,7 +450,7 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         // slither-disable-next-line arbitrary-send-erc20
         token.safeTransferFrom(funder, address(this), subsidy);
 
-        // The counterparty pays the rest; its ERC20 allowance to ILRM bounds the top-up
+        // The counterparty pays the rest: at most _maxTopUp (checked above)
         if (stake > subsidy) {
             token.safeTransferFrom(msg.sender, address(this), stake - subsidy);
         }
@@ -466,7 +528,11 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
     }
 
     /**
-     * @dev Resolve dispute when counterparty doesn't stake
+     * @dev Resolve dispute when counterparty doesn't stake. The initiator always gets its full stake back,
+     *      plus the initiator incentive (10% of the stake) within the incentive caps: partial or 0 once
+     *      maxIncentivePerDispute, the window budget or tokenReserves bind (see _takeInitiatorIncentive).
+     *      The incentive never makes this revert: it adds no external call and no require, and all state
+     *      is written before the single transfer (enforceTimeout is nonReentrant).
      * @param _disputeId Dispute ID
      * @param d Dispute storage reference
      */
@@ -474,17 +540,13 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         d.resolved = true;
         d.outcome = DisputeOutcome.DefaultLicenseApplied;
 
-        // Calculate initiator incentive (10% of expected counterparty stake)
-        uint256 incentive = (d.initiatorStake * INITIATOR_INCENTIVE_BPS) / 10_000;
+        // Uncapped initiator incentive: 10% of the stake the counterparty would have matched
+        uint256 uncapped = (d.initiatorStake * INITIATOR_INCENTIVE_BPS) / 10_000;
+        uint256 incentive = _takeInitiatorIncentive(uncapped);
 
-        // Return initiator stake + incentive (from token reserves)
-        if (tokenReserves >= incentive) {
-            tokenReserves -= incentive;
-            token.safeTransfer(d.initiator, d.initiatorStake + incentive);
-        } else {
-            // If reserves insufficient, just return stake
-            token.safeTransfer(d.initiator, d.initiatorStake);
-        }
+        // Return initiator stake + capped incentive (already taken from tokenReserves; may be 0)
+        token.safeTransfer(d.initiator, d.initiatorStake + incentive);
+        emit InitiatorIncentivePaid(_disputeId, d.initiator, incentive, uncapped);
 
         // Apply fallback license
         assetRegistry.applyFallbackLicense(_disputeId, d.fallbackLicense.termsHash);
@@ -492,6 +554,57 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
 
         emit DefaultLicenseApplied(_disputeId);
         emit DisputeResolved(_disputeId, DisputeOutcome.DefaultLicenseApplied);
+    }
+
+    /**
+     * @dev Quote the capped initiator incentive at the current block without writing state:
+     *      min(_uncapped, maxIncentivePerDispute, window budget left, tokenReserves). The window is fixed
+     *      and rolled lazily: once block.timestamp >= incentiveWindowStart + incentiveWindow, the quote
+     *      treats a new window as starting now with nothing paid in it.
+     * @param _uncapped The uncapped incentive (10% of the initiator stake)
+     * @return incentive The incentive payable now
+     * @return windowStart The window start that applies to this payout (rolled if expired)
+     * @return paidInWindow Incentives already paid in that window (0 if rolled)
+     */
+    function _quoteInitiatorIncentive(uint256 _uncapped)
+        internal
+        view
+        returns (uint256 incentive, uint256 windowStart, uint256 paidInWindow)
+    {
+        windowStart = incentiveWindowStart;
+        paidInWindow = incentivePaidInWindow;
+        if (block.timestamp >= windowStart + incentiveWindow) {
+            windowStart = block.timestamp;
+            paidInWindow = 0;
+        }
+
+        uint256 maxPerWindow = maxIncentivePerWindow;
+        uint256 windowLeft = maxPerWindow > paidInWindow ? maxPerWindow - paidInWindow : 0;
+
+        incentive = Math.min(Math.min(_uncapped, maxIncentivePerDispute), Math.min(windowLeft, tokenReserves));
+    }
+
+    /**
+     * @dev Take the capped initiator incentive out of tokenReserves and charge it to the current window.
+     *      Never reverts. With a 0 incentive (a cap or the reserves exhausted, or zero caps) it writes no
+     *      state at all, so the window is not rolled and tokenReserves stays untouched.
+     *      Residual risk (accepted): the caps bound farming but do not stop it. Under a fixed config each
+     *      payout is <= min(10% of the stake, maxIncentivePerDispute), incentivePaidInWindow stays <=
+     *      maxIncentivePerWindow (W), and over any interval of length t at most W * (ceil(t / T) + 1) is
+     *      paid (T = incentiveWindow; 2W across a window boundary), never more than the deposited reserves.
+     *      The window budget is first come, first served across all initiators.
+     * @param _uncapped The uncapped incentive (10% of the initiator stake)
+     * @return incentive The incentive to pay on top of the returned stake
+     */
+    function _takeInitiatorIncentive(uint256 _uncapped) internal returns (uint256 incentive) {
+        uint256 windowStart;
+        uint256 paidInWindow;
+        (incentive, windowStart, paidInWindow) = _quoteInitiatorIncentive(_uncapped);
+        if (incentive > 0) {
+            if (windowStart != incentiveWindowStart) incentiveWindowStart = windowStart;
+            incentivePaidInWindow = paidInWindow + incentive;
+            tokenReserves -= incentive;
+        }
     }
 
     /**
@@ -542,21 +655,25 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
      * @param _amount Total amount owed to the counterparty side
      */
     function _payCounterpartySide(uint256 _disputeId, Dispute storage d, uint256 _amount) internal {
-        StakeSubsidy memory s = _stakeSubsidies[_disputeId];
-        if (s.amount == 0) {
+        // Storage pointer: the unsubsidized path reads only the amount slot, never the funder slot
+        StakeSubsidy storage s = _stakeSubsidies[_disputeId];
+        uint256 subsidy = s.amount;
+        if (subsidy == 0) {
             token.safeTransfer(d.counterparty, _amount);
             return;
         }
 
-        uint256 own = Math.mulDiv(_amount, d.counterpartyStake - s.amount, d.counterpartyStake);
+        uint256 cpStake = d.counterpartyStake;
+        uint256 own = Math.mulDiv(_amount, cpStake - subsidy, cpStake);
         uint256 toFunder = _amount - own;
 
         if (own > 0) {
             token.safeTransfer(d.counterparty, own);
         }
         if (toFunder > 0) {
-            token.safeTransfer(s.funder, toFunder);
-            emit SubsidyReturned(_disputeId, s.funder, toFunder);
+            address funder = s.funder;
+            token.safeTransfer(funder, toFunder);
+            emit SubsidyReturned(_disputeId, funder, toFunder);
         }
     }
 
@@ -575,9 +692,60 @@ contract ILRM is IILRM, ReentrancyGuard, Pausable, Ownable2Step {
         subsidyTreasury = _treasury;
     }
 
+    // ============ Initiator Incentive ============
+
+    /**
+     * @notice Set the initiator-incentive caps
+     * @dev Only owner (intended owner: GovernanceTimelock). Deliberately not whenNotPaused: enforceTimeout
+     *      cannot be paused, so the kill switch (zero caps, which are allowed) must work while paused.
+     *      There is no absolute ceiling: the owner can raise the caps up to the deposited reserves (owner
+     *      trust). The current window is not reset: a cap lowered below incentivePaidInWindow pays 0 until
+     *      the window rolls, and a new window length applies to the current window (its start is kept).
+     *      There is deliberately no per-initiator cap: initiator addresses are free, so sybils would defeat
+     *      it and it would only cost gas. The global window cap is what bounds farming.
+     * @param _maxPerDispute Cap on a single incentive (must be <= _maxPerWindow)
+     * @param _maxPerWindow Cap on all incentives paid in one window
+     * @param _window Window length in seconds, MIN_INCENTIVE_WINDOW to MAX_INCENTIVE_WINDOW inclusive
+     */
+    function setInitiatorIncentiveCaps(uint256 _maxPerDispute, uint256 _maxPerWindow, uint256 _window)
+        external
+        onlyOwner
+    {
+        _setInitiatorIncentiveCaps(_maxPerDispute, _maxPerWindow, _window);
+    }
+
+    /**
+     * @notice Preview the initiator incentive a non-participation resolution would pay now
+     * @dev Same caps as the payout. The actual payout can be lower if other payouts land first (the window
+     *      budget is first come, first served across all initiators).
+     * @param _initiatorStake The dispute's initiatorStake
+     * @return The incentive that would be paid on top of the returned stake
+     */
+    function previewInitiatorIncentive(uint256 _initiatorStake) external view returns (uint256) {
+        (uint256 incentive,,) = _quoteInitiatorIncentive((_initiatorStake * INITIATOR_INCENTIVE_BPS) / 10_000);
+        return incentive;
+    }
+
+    /**
+     * @dev Validate and store the initiator-incentive caps and emit InitiatorIncentiveCapsUpdated. Does not
+     *      touch incentiveWindowStart or incentivePaidInWindow.
+     */
+    function _setInitiatorIncentiveCaps(uint256 _maxPerDispute, uint256 _maxPerWindow, uint256 _window) private {
+        require(_window >= MIN_INCENTIVE_WINDOW && _window <= MAX_INCENTIVE_WINDOW, "Invalid incentive window");
+        require(_maxPerDispute <= _maxPerWindow, "Per-dispute cap above window cap");
+
+        maxIncentivePerDispute = _maxPerDispute;
+        maxIncentivePerWindow = _maxPerWindow;
+        incentiveWindow = _window;
+
+        emit InitiatorIncentiveCapsUpdated(_maxPerDispute, _maxPerWindow, _window);
+    }
+
     /**
      * @notice Deposit tokens into reserves for initiator incentives
-     * @dev Anyone can contribute to the incentive pool
+     * @dev Anyone can contribute to the incentive pool. Deposits are irrevocable: there is no withdrawal
+     *      path, and reserves leave ILRM only as capped initiator incentives on non-participation
+     *      resolutions (see setInitiatorIncentiveCaps). With zero caps they stay locked.
      * @param _amount Amount of tokens to deposit
      */
     function depositTokenReserves(uint256 _amount) external nonReentrant {

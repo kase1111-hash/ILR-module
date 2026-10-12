@@ -147,7 +147,7 @@ describe("Treasury Tests", function () {
       const walletBefore = await token.balanceOf(counterparty.address);
       const treasuryBefore = await token.balanceOf(treasury.target);
 
-      await ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, STAKE);
+      await ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, STAKE, ethers.MaxUint256);
 
       // Fully subsidized: the wallet neither grows nor pays anything
       expect(await token.balanceOf(counterparty.address)).to.equal(walletBefore);
@@ -163,7 +163,7 @@ describe("Treasury Tests", function () {
 
       const disputeId = await createDispute(ilrm, initiator, counterparty, STAKE, EVIDENCE_HASH, fallback);
 
-      await expect(ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, STAKE))
+      await expect(ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, STAKE, ethers.MaxUint256))
         .to.emit(treasury, "SubsidyFunded")
         .withArgs(counterparty.address, disputeId, STAKE)
         .and.to.emit(ilrm, "StakeSubsidized")
@@ -179,14 +179,14 @@ describe("Treasury Tests", function () {
 
       const disputeId = await createDispute(ilrm, initiator, counterparty, STAKE, EVIDENCE_HASH, fallback);
 
-      await ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, STAKE);
+      await ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, STAKE, ethers.MaxUint256);
 
       // Second subsidized stake on the same dispute - should fail in ILRM
-      await expect(ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, STAKE))
+      await expect(ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, STAKE, ethers.MaxUint256))
         .to.be.revertedWith("Already staked");
 
       // Same dispute, different address - should fail
-      await expect(ilrm.connect(attacker).depositStakeWithSubsidy(disputeId, STAKE))
+      await expect(ilrm.connect(attacker).depositStakeWithSubsidy(disputeId, STAKE, ethers.MaxUint256))
         .to.be.revertedWith("Not counterparty");
 
       // Even ILRM itself cannot get a second subsidy for the dispute
@@ -203,7 +203,7 @@ describe("Treasury Tests", function () {
 
       const walletBefore = await token.balanceOf(counterparty.address);
       const treasuryBefore = await token.balanceOf(treasury.target);
-      await ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, bigStake);
+      await ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, bigStake, ethers.MaxUint256);
 
       // Subsidy is maxPerDispute (5); the defender tops up the remaining 95
       const [, amount] = await ilrm.stakeSubsidy(disputeId);
@@ -221,12 +221,12 @@ describe("Treasury Tests", function () {
       // Create 4 separate disputes and stake each with a subsidy
       for (let i = 0; i < 4; i++) {
         const disputeId = await createDispute(ilrm, initiator, counterparty, stake, EVIDENCE_HASH, fallback);
-        await ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, stake);
+        await ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, stake, ethers.MaxUint256);
       }
 
       // 4 * 5 = 20 ETH = MAX_PER_PARTICIPANT, next should fail (the error bubbles up from the treasury)
       const disputeId5 = await createDispute(ilrm, initiator, counterparty, stake, EVIDENCE_HASH, fallback);
-      await expect(ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId5, stake))
+      await expect(ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId5, stake, ethers.MaxUint256))
         .to.be.revertedWithCustomError(treasury, "NoSubsidyAvailable");
     });
 
@@ -236,12 +236,12 @@ describe("Treasury Tests", function () {
       // Use up allowance (each subsidy is capped at MAX_PER_DISPUTE, so it takes several disputes)
       for (let i = 0n; i < MAX_PER_PARTICIPANT / MAX_PER_DISPUTE; i++) {
         const disputeId = await createDispute(ilrm, initiator, counterparty, MAX_PER_DISPUTE, EVIDENCE_HASH, fallback);
-        await ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, MAX_PER_DISPUTE);
+        await ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, MAX_PER_DISPUTE, ethers.MaxUint256);
       }
 
       // Should fail now
       const disputeId2 = await createDispute(ilrm, initiator, counterparty, ethers.parseEther("1"), EVIDENCE_HASH, fallback);
-      await expect(ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId2, ethers.parseEther("1")))
+      await expect(ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId2, ethers.parseEther("1"), ethers.MaxUint256))
         .to.be.revertedWithCustomError(treasury, "NoSubsidyAvailable");
 
       // Warp past window
@@ -251,7 +251,7 @@ describe("Treasury Tests", function () {
       const disputeId3 = await createDispute(ilrm, initiator, counterparty, ethers.parseEther("5"), EVIDENCE_HASH, fallback);
       const walletBefore = await token.balanceOf(counterparty.address);
       const treasuryBefore = await token.balanceOf(treasury.target);
-      await ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId3, ethers.parseEther("5"));
+      await ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId3, ethers.parseEther("5"), ethers.MaxUint256);
 
       const [, amount] = await ilrm.stakeSubsidy(disputeId3);
       expect(amount).to.equal(ethers.parseEther("5"));
@@ -280,7 +280,7 @@ describe("Treasury Tests", function () {
       const stake = ethers.parseEther("8");
       const disputeId = await createDispute(ilrm, initiator, counterparty, stake, EVIDENCE_HASH, fallback);
       const treasuryBefore = await token.balanceOf(treasury.target);
-      await ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, stake);
+      await ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, stake, ethers.MaxUint256);
       const walletAfterStake = await token.balanceOf(counterparty.address);
 
       await time.increase(RESOLUTION_TIMEOUT + 1);
@@ -313,7 +313,7 @@ describe("Treasury Tests", function () {
       // Create dispute with attacker as counterparty
       const disputeId = await createDispute(ilrm, initiator, attacker, STAKE, EVIDENCE_HASH, fallback);
 
-      await expect(ilrm.connect(attacker).depositStakeWithSubsidy(disputeId, STAKE))
+      await expect(ilrm.connect(attacker).depositStakeWithSubsidy(disputeId, STAKE, ethers.MaxUint256))
         .to.be.revertedWithCustomError(treasury, "ParticipantFlaggedForAbuse");
     });
 
@@ -324,7 +324,7 @@ describe("Treasury Tests", function () {
 
       const disputeId = await createDispute(ilrm, initiator, counterparty, STAKE, EVIDENCE_HASH, fallback);
 
-      await expect(ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, STAKE))
+      await expect(ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, STAKE, ethers.MaxUint256))
         .to.emit(treasury, "SubsidyFunded");
     });
 
@@ -386,7 +386,7 @@ describe("Treasury Tests", function () {
 
       const disputeId = await createDispute(ilrm, initiator, counterparty, STAKE, EVIDENCE_HASH, fallback);
       // Asking for 5 against a stake of 3 now grants (and charges) only 3
-      await ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, ethers.parseEther("5"));
+      await ilrm.connect(counterparty).depositStakeWithSubsidy(disputeId, ethers.parseEther("5"), ethers.MaxUint256);
 
       expect(await treasury.getRemainingAllowance(counterparty.address))
         .to.equal(MAX_PER_PARTICIPANT - STAKE);

@@ -246,7 +246,7 @@ contract MockOracleBench is IOracle {
 
             // Benchmark: Counterparty stakes, fully funded by the treasury (maxPerDispute == STAKE_AMOUNT)
             vm.prank(counterparty);
-            ilrm.depositStakeWithSubsidy(disputeId, STAKE_AMOUNT);
+            ilrm.depositStakeWithSubsidy(disputeId, STAKE_AMOUNT, type(uint256).max);
         }
 
         // =========================================================================

@@ -90,7 +90,7 @@ describe("END-TO-END SECURITY TESTS", function () {
 
       // Dispute is now resolved - try to claim subsidy
       await expect(
-        ilrm.connect(counterparty).depositStakeWithSubsidy(0, STAKE)
+        ilrm.connect(counterparty).depositStakeWithSubsidy(0, STAKE, ethers.MaxUint256)
       ).to.be.revertedWith("Dispute resolved");
     });
 
@@ -105,7 +105,7 @@ describe("END-TO-END SECURITY TESTS", function () {
 
       // Already staked - try to claim subsidy
       await expect(
-        ilrm.connect(counterparty).depositStakeWithSubsidy(0, STAKE)
+        ilrm.connect(counterparty).depositStakeWithSubsidy(0, STAKE, ethers.MaxUint256)
       ).to.be.revertedWith("Already staked");
     });
 
@@ -118,7 +118,7 @@ describe("END-TO-END SECURITY TESTS", function () {
       await ilrm.connect(initiator).initiateBreachDispute(counterparty.address, STAKE, EVIDENCE_HASH, fallback);
 
       await expect(
-        ilrm.connect(initiator).depositStakeWithSubsidy(0, STAKE)
+        ilrm.connect(initiator).depositStakeWithSubsidy(0, STAKE, ethers.MaxUint256)
       ).to.be.revertedWith("Not counterparty");
     });
 
@@ -132,7 +132,7 @@ describe("END-TO-END SECURITY TESTS", function () {
 
       // Attacker tries to claim for counterparty, through ILRM or straight at the treasury
       await expect(
-        ilrm.connect(attacker).depositStakeWithSubsidy(0, STAKE)
+        ilrm.connect(attacker).depositStakeWithSubsidy(0, STAKE, ethers.MaxUint256)
       ).to.be.revertedWith("Not counterparty");
       await expect(
         treasury.connect(attacker).fundStakeSubsidy(0, counterparty.address, STAKE)
@@ -151,7 +151,7 @@ describe("END-TO-END SECURITY TESTS", function () {
       await treasury.connect(owner).setHarassmentScore(counterparty.address, 60);
 
       await expect(
-        ilrm.connect(counterparty).depositStakeWithSubsidy(0, STAKE)
+        ilrm.connect(counterparty).depositStakeWithSubsidy(0, STAKE, ethers.MaxUint256)
       ).to.be.revertedWithCustomError(treasury, "ParticipantFlaggedForAbuse");
     });
   });

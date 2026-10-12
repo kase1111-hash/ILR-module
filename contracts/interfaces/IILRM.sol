@@ -81,6 +81,16 @@ interface IILRM {
     /// @notice Emitted when tokens are deposited to reserves for incentives
     event TokenReservesDeposited(address indexed depositor, uint256 amount);
 
+    /// @notice Emitted when the owner sets the initiator-incentive caps (also once in the constructor)
+    event InitiatorIncentiveCapsUpdated(uint256 maxPerDispute, uint256 maxPerWindow, uint256 window);
+
+    /// @notice Emitted on every non-participation resolution with the initiator incentive actually paid
+    ///         (on top of the returned stake) and the uncapped 10% it was derived from;
+    ///         amount < uncappedAmount (including 0) means a cap or the token reserves bound the payout
+    event InitiatorIncentivePaid(
+        uint256 indexed disputeId, address indexed initiator, uint256 amount, uint256 uncappedAmount
+    );
+
     /// @notice Emitted when harassment score is updated
     event HarassmentScoreUpdated(address indexed participant, uint256 oldScore, uint256 newScore);
 
@@ -193,16 +203,24 @@ interface IILRM {
     /**
      * @notice Counterparty deposits the matching stake with part of it funded by the subsidy treasury
      * @dev Counterparty-only, same checks as depositStake. Stakes exactly initiatorStake (stakes stay
-     *      symmetric): the treasury funds min(maxSubsidy, initiatorStake, treasury caps) straight into
-     *      ILRM escrow and the caller pays the rest. The caller needs an ERC20 allowance to ILRM for the
-     *      top-up, which also bounds what it can be charged. Atomic: if the treasury grants nothing or
-     *      the top-up cannot be pulled, the whole call reverts and nothing is reserved.
-     *      The subsidy is never paid to the caller's wallet; on resolution the funder is repaid its
-     *      pro-rata share of the counterparty payout.
+     *      symmetric): the treasury funds a grant of min(maxSubsidy, initiatorStake, treasury caps)
+     *      straight into ILRM escrow, and the caller pays the top-up = initiatorStake - grant from its own
+     *      wallet (it needs an ERC20 allowance to ILRM for it).
+     *      The grant is only known on execution and can shrink between the caller's preview and inclusion
+     *      (other subsidized stakes draining the treasury, updateCaps / setMinReserve / harassment-score
+     *      changes, a treasury rotation, the caller's own per-participant rolling window). maxTopUp bounds
+     *      what the caller can be charged: the call reverts with "Top-up exceeds max" when the top-up
+     *      would exceed it. Recommended value:
+     *      maxTopUp = stake - calculateSubsidy(disputeId, min(maxSubsidy, stake), caller).subsidyAmount.
+     *      0 means a full subsidy or a revert; type(uint256).max means no bound.
+     *      Atomic: if the bound fails, the treasury grants nothing or the top-up cannot be pulled, the
+     *      whole call reverts and nothing is reserved. The subsidy is never paid to the caller's wallet;
+     *      on resolution the funder is repaid its pro-rata share of the counterparty payout.
      * @param disputeId The dispute to stake into
      * @param maxSubsidy Maximum amount the caller asks the treasury to fund
+     * @param maxTopUp Maximum amount the caller agrees to pay from its wallet (initiatorStake - grant)
      */
-    function depositStakeWithSubsidy(uint256 disputeId, uint256 maxSubsidy) external;
+    function depositStakeWithSubsidy(uint256 disputeId, uint256 maxSubsidy, uint256 maxTopUp) external;
 
     /**
      * @notice Get the treasury subsidy recorded for a dispute's counterparty stake

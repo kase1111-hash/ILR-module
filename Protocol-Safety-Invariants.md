@@ -153,8 +153,7 @@ This ensures harassment collapses under its own economics.
 ### Implementation
 - **Harassment Score**: Tracked per participant (`ILRM.sol:78, 486-490`)
 - **Stake Escalation**: 1.5x multiplier for repeat disputes (`ILRM.sol:366-377`)
-- **Treasury Integration**: High scores block subsidies (`Treasury.sol:228-230`)
-- **Tiered Subsidies**: Graduated reduction based on score (`Treasury.sol:617-646`)
+- **Treasury Integration**: High scores block subsidies (`HARASSMENT_THRESHOLD` check in `Treasury.fundStakeSubsidy`)
 
 ---
 
@@ -230,8 +229,7 @@ These must be:
 ### Implementation
 - **Matched Stakes**: Counterparty must match initiator stake exactly (`ILRM.sol:182-194`)
 - **Symmetric Burn**: 50% of total escrow burned symmetrically (`ILRM.sol:37`)
-- **Subsidies**: Optional, counterparty-only, with transparency (`Treasury.sol:189-273`)
-- **Tiered Subsidies**: Based on harassment score, not favoritism (`Treasury.sol:617-646`)
+- **Subsidies**: Optional, counterparty-only, with transparency (`ILRM.depositStakeWithSubsidy` -> `Treasury.fundStakeSubsidy`; escrowed in ILRM, repaid pro rata, the caller bounds its top-up with `maxTopUp`)
 
 ---
 
@@ -259,7 +257,7 @@ All constants are public and immutable:
 | `BURN_PERCENTAGE` | 50% | `ILRM.sol:37` |
 | `MAX_COUNTERS` | 3 | `ILRM.sol:34` |
 | `COUNTER_FEE_BASE` | 0.01 ETH | `ILRM.sol:46` |
-| `INITIATOR_INCENTIVE_BPS` | 1000 (10%) | `ILRM.sol:49` |
+| `INITIATOR_INCENTIVE_BPS` | 1000 (10%): upper bound; paid from tokenReserves within owner-set caps (maxIncentivePerDispute / maxIncentivePerWindow per incentiveWindow) | `ILRM.INITIATOR_INCENTIVE_BPS` |
 | `ESCALATION_MULTIPLIER` | 150 (1.5x) | `ILRM.sol:52` |
 | `COOLDOWN_PERIOD` | 30 days | `ILRM.sol:55` |
 
