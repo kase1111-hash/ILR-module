@@ -63,6 +63,11 @@ contract does not emit, when `abis/` disagrees with the compiled fragment of a h
 a function a mapping calls (`ILRM.disputes`, `L3Bridge.getChallengeDeadline`,
 `AssetRegistry.getLicense`), or when a handler is not exported by its mapping.
 
+`abis/ILRM.json` is also used downstream: the [LEO](https://github.com/kase1111-hash/LEO) subgraph
+keeps a verbatim copy and calls `ILRM.disputes` and `ILRM.oracleContext`. LEO's CI compares its copy
+with this file on the default branch, so an ILRM ABI change here needs a matching LEO update
+(`npm run sync-ilrm-abi` in LEO's `subgraph/`, see its `INTEGRATION.md`).
+
 ## Adding a new event
 
 1. Compile the contracts and run `npm run sync-abis`.

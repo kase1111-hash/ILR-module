@@ -423,6 +423,7 @@ ILRM is part of a broader ecosystem of tools for **intent preservation**, **huma
 - [**IntentLog**](https://github.com/kase1111-hash/IntentLog) - Git for human reasoning. Tracks "why" changes happen via prose commits
 - [**RRA-Module**](https://github.com/kase1111-hash/RRA-Module) - Revenant Repo Agent: Converts abandoned GitHub repositories into autonomous AI agents
 - [**mediator-node**](https://github.com/kase1111-hash/mediator-node) - LLM mediation layer for matching, negotiation, and closure proposals
+- [**LEO**](https://github.com/kase1111-hash/LEO) - License Entropy Oracle: indexes ILRM dispute events into clause-level entropy scores (its subgraph uses a copy of `subgraph/abis/ILRM.json`)
 - [**Finite-Intent-Executor**](https://github.com/kase1111-hash/Finite-Intent-Executor) - Posthumous execution of predefined intent (Solidity smart contract)
 
 ### Agent-OS Ecosystem
